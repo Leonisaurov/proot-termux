@@ -156,6 +156,37 @@ static void vnp_stop_helper(VnpConfig *config)
 	}
 }
 
+/**
+ * Check if an IPv6 address is loopback (::1) or unspecified (::).
+ */
+static int is_ipv6_loopback_or_unspecified(const struct in6_addr *addr)
+{
+    /* Check for :: (all zeros) */
+    int all_zero = 1;
+    int i;
+    for (i = 0; i < 16; i++) {
+        if (addr->s6_addr[i] != 0) {
+            all_zero = 0;
+            break;
+        }
+    }
+    if (all_zero)
+        return 1;
+    
+    /* Check for ::1 (last byte = 1) */
+    if (addr->s6_addr[0] == 0 && addr->s6_addr[1] == 0 && 
+        addr->s6_addr[2] == 0 && addr->s6_addr[3] == 0 &&
+        addr->s6_addr[4] == 0 && addr->s6_addr[5] == 0 &&
+        addr->s6_addr[6] == 0 && addr->s6_addr[7] == 0 &&
+        addr->s6_addr[8] == 0 && addr->s6_addr[9] == 0 &&
+        addr->s6_addr[10] == 0 && addr->s6_addr[11] == 0 &&
+        addr->s6_addr[12] == 0 && addr->s6_addr[13] == 0 &&
+        addr->s6_addr[14] == 0 && addr->s6_addr[15] == 1)
+        return 1;
+    
+    return 0;
+}
+
 /* ================================================================
  * Syscall handlers
  * ================================================================ */
@@ -192,10 +223,22 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 	if (read_data(tracee, &sa_in, addr_ptr, sizeof(sa_in)) < 0)
 		return 0;
 
-	if (sa_in.sin_family != AF_INET)
+	uint16_t port;
+	if (sa_in.sin_family == AF_INET) {
+		port = ntohs(sa_in.sin_port);
+	}
+	else if (sa_in.sin_family == AF_INET6) {
+		/* Read full sockaddr_in6 to get the port */
+		struct sockaddr_in6 sa_in6;
+		if (addrlen < sizeof(struct sockaddr_in6))
+			return 0;
+		if (read_data(tracee, &sa_in6, addr_ptr, sizeof(sa_in6)) < 0)
+			return 0;
+		port = ntohs(sa_in6.sin6_port);
+	}
+	else {
 		return 0;
-
-	uint16_t port = ntohs(sa_in.sin_port);
+	}
 
 	/* Check if this port is exposed via -p */
 	int is_exposed = 0;
@@ -210,12 +253,12 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 	/* Track this fd as virtual */
 	entry = vnp_find_fd(config, sockfd);
 	if (entry == NULL) {
-		entry = vnp_add_fd(config, sockfd, port, AF_INET);
+		entry = vnp_add_fd(config, sockfd, port, sa_in.sin_family);
 		if (entry == NULL)
 			return 0;
 	} else {
 		entry->virtual_port = port;
-		entry->orig_domain = AF_INET;
+		entry->orig_domain = sa_in.sin_family;
 	}
 	if (is_exposed)
 		entry->exposed_port = port;
@@ -256,14 +299,27 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	if (read_data(tracee, &sa_in, addr_ptr, sizeof(sa_in)) < 0)
 		return 0;
 
-	if (sa_in.sin_family != AF_INET)
+	uint16_t port;
+	if (sa_in.sin_family == AF_INET) {
+		/* Only intercept loopback connections */
+		if ((ntohl(sa_in.sin_addr.s_addr) & 0xFF000000) != 0x7F000000)
+			return 0;
+		port = ntohs(sa_in.sin_port);
+	}
+	else if (sa_in.sin_family == AF_INET6) {
+		struct sockaddr_in6 sa_in6;
+		if (addrlen < sizeof(struct sockaddr_in6))
+			return 0;
+		if (read_data(tracee, &sa_in6, addr_ptr, sizeof(sa_in6)) < 0)
+			return 0;
+		/* Only intercept loopback or unspecified IPv6 connections */
+		if (!is_ipv6_loopback_or_unspecified(&sa_in6.sin6_addr))
+			return 0;
+		port = ntohs(sa_in6.sin6_port);
+	}
+	else {
 		return 0;
-
-	/* Only intercept loopback connections */
-	if ((ntohl(sa_in.sin_addr.s_addr) & 0xFF000000) != 0x7F000000)
-		return 0;
-
-	uint16_t port = ntohs(sa_in.sin_port);
+	}
 
 	/* Check if this port is virtual */
 	int is_virtual = 0;
@@ -289,7 +345,7 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	/* Track this fd */
 	entry = vnp_find_fd(config, sockfd);
 	if (entry == NULL) {
-		entry = vnp_add_fd(config, sockfd, port, AF_INET);
+		entry = vnp_add_fd(config, sockfd, port, sa_in.sin_family);
 		if (entry == NULL)
 			return 0;
 	}
@@ -334,25 +390,44 @@ static int vnp_handle_getsockname(Tracee *tracee, VnpConfig *config)
 	if (entry == NULL)
 		return 0;
 
-	struct sockaddr_in fake;
-	memset(&fake, 0, sizeof(fake));
-	fake.sin_family = entry->orig_domain;
-	fake.sin_port = htons(entry->virtual_port);
-	fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-	if (write_data(tracee, addr_ptr, &fake, sizeof(fake)) < 0)
+	if (entry->orig_domain == AF_INET6) {
+		struct sockaddr_in6 fake6;
+		memset(&fake6, 0, sizeof(fake6));
+		fake6.sin6_family = AF_INET6;
+		fake6.sin6_port = htons(entry->virtual_port);
+		fake6.sin6_addr = in6addr_loopback;
+		if (write_data(tracee, addr_ptr, &fake6, sizeof(fake6)) < 0)
+			return 0;
+		if (addrlen_ptr != 0) {
+			word_t cur_len = peek_word(tracee, addrlen_ptr);
+			if (cur_len >= sizeof(struct sockaddr_in6))
+				poke_word(tracee, addrlen_ptr, sizeof(struct sockaddr_in6));
+		}
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
 		return 0;
-
-	if (addrlen_ptr != 0) {
-		word_t cur_len = peek_word(tracee, addrlen_ptr);
-		if (cur_len >= sizeof(struct sockaddr_in))
-			poke_word(tracee, addrlen_ptr, sizeof(struct sockaddr_in));
 	}
+	else {
+		struct sockaddr_in fake;
+		memset(&fake, 0, sizeof(fake));
+		fake.sin_family = entry->orig_domain;
+		fake.sin_port = htons(entry->virtual_port);
+		fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-	poke_reg(tracee, SYSARG_RESULT, 0);
-	set_sysnum(tracee, PR_void);
+		if (write_data(tracee, addr_ptr, &fake, sizeof(fake)) < 0)
+			return 0;
 
-	return 0;
+		if (addrlen_ptr != 0) {
+			word_t cur_len = peek_word(tracee, addrlen_ptr);
+			if (cur_len >= sizeof(struct sockaddr_in))
+				poke_word(tracee, addrlen_ptr, sizeof(struct sockaddr_in));
+		}
+
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
+
+		return 0;
+	}
 }
 
 /**
@@ -369,23 +444,41 @@ static int vnp_handle_getpeername(Tracee *tracee, VnpConfig *config)
 	if (entry == NULL)
 		return 0;
 
-	struct sockaddr_in fake;
-	memset(&fake, 0, sizeof(fake));
-	fake.sin_family = entry->orig_domain;
-	fake.sin_port = htons(entry->virtual_port);
-	fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-	if (write_data(tracee, addr_ptr, &fake, sizeof(fake)) < 0)
+	if (entry->orig_domain == AF_INET6) {
+		struct sockaddr_in6 fake6;
+		memset(&fake6, 0, sizeof(fake6));
+		fake6.sin6_family = AF_INET6;
+		fake6.sin6_port = htons(entry->virtual_port);
+		fake6.sin6_addr = in6addr_loopback;
+		if (write_data(tracee, addr_ptr, &fake6, sizeof(fake6)) < 0)
+			return 0;
+		if (addrlen_ptr != 0) {
+			word_t cur_len = peek_word(tracee, addrlen_ptr);
+			if (cur_len >= sizeof(struct sockaddr_in6))
+				poke_word(tracee, addrlen_ptr, sizeof(struct sockaddr_in6));
+		}
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
 		return 0;
-
-	if (addrlen_ptr != 0) {
-		word_t cur_len = peek_word(tracee, addrlen_ptr);
-		if (cur_len >= sizeof(struct sockaddr_in))
-			poke_word(tracee, addrlen_ptr, sizeof(struct sockaddr_in));
 	}
+	else {
+		struct sockaddr_in fake;
+		memset(&fake, 0, sizeof(fake));
+		fake.sin_family = entry->orig_domain;
+		fake.sin_port = htons(entry->virtual_port);
+		fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-	poke_reg(tracee, SYSARG_RESULT, 0);
-	set_sysnum(tracee, PR_void);
+		if (write_data(tracee, addr_ptr, &fake, sizeof(fake)) < 0)
+			return 0;
+
+		if (addrlen_ptr != 0) {
+			word_t cur_len = peek_word(tracee, addrlen_ptr);
+			if (cur_len >= sizeof(struct sockaddr_in))
+				poke_word(tracee, addrlen_ptr, sizeof(struct sockaddr_in));
+		}
+
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		set_sysnum(tracee, PR_void);
 
 	return 0;
 }
