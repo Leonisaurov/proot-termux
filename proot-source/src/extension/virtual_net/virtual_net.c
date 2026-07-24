@@ -13,7 +13,9 @@
  * Copyright (C) 2025 Licensed under GPL v2 or later.
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <string.h>     /* str*(3), */
 #include <stdlib.h>     /* atoi(3), */
 #include <unistd.h>     /* close(2), read(2), write(2), fork(2), execve(2) */
@@ -35,6 +37,7 @@
 #include "syscall/syscall.h"
 #include "cli/note.h"
 #include "attribute.h"
+#include "syscall/seccomp.h"
 
 #include "arch.h"
 #include "path/path.h"
@@ -43,18 +46,18 @@
  * Filtered sysnums for this extension.
  */
 static FilteredSysnum syss[] = {
-	PR_socket,
-	PR_bind,
-	PR_listen,
-	PR_accept,
-	PR_accept4,
-	PR_connect,
-	PR_close,
-	PR_getsockname,
-	PR_getpeername,
-	PR_getsockopt,
-	PR_setsockopt,
-	FILTERING_SYSNUM_END,
+	{ PR_socket,      0 },
+	{ PR_bind,        0 },
+	{ PR_listen,      0 },
+	{ PR_accept,      0 },
+	{ PR_accept4,     0 },
+	{ PR_connect,     0 },
+	{ PR_close,       0 },
+	{ PR_getsockname, 0 },
+	{ PR_getpeername, 0 },
+	{ PR_getsockopt,  0 },
+	{ PR_setsockopt,  0 },
+	FILTERED_SYSNUM_END,
 };
 
 /* ================================================================

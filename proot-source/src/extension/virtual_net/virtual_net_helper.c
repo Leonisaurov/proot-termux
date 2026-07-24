@@ -14,7 +14,9 @@
  * Copyright (C) 2025 Licensed under GPL v2 or later.
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <string.h>     /* str*(3), */
 #include <stdlib.h>     /* atoi(3), */
 #include <unistd.h>     /* close(2), read(2), write(2) */
