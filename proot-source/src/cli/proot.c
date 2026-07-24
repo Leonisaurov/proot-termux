@@ -29,6 +29,7 @@
 #include "cli/note.h"
 #include "extension/extension.h"
 #include "extension/sysvipc/sysvipc.h"
+#include "extension/virtual_net/virtual_net.h"
 #include "path/binding.h"
 #include "attribute.h"
 
@@ -383,6 +384,22 @@ static int handle_option_port_mapping(Tracee *tracee, const Cli *cli UNUSED, con
                 return -1;
         }
 
+        /* Si --proxy está activo, delegar a virtual_net */
+        {
+                extern int vnp_add_expose(Tracee *, uint16_t, uint16_t);
+                Extension *vnp_ext = get_extension(tracee, vnp_callback);
+                if (vnp_ext != NULL) {
+                        int ret = vnp_add_expose(tracee, host_port, container_port);
+                        if (ret == 0) {
+                                VERBOSE(tracee, 2,
+                                        "port mapping handled by virtual_net: "
+                                        "%d \u2192 virtual %d",
+                                        host_port, container_port);
+                                return 0;
+                        }
+                }
+        }
+
         ext = get_extension(tracee, port_switch_callback);
         if (ext != NULL) {
                 PortSwitchConfig *config = talloc_get_type_abort(((Extension *)ext)->config, PortSwitchConfig);
@@ -422,6 +439,21 @@ static int handle_option_p(Tracee *tracee, const Cli *cli UNUSED, const char *va
                 config->auto_redirect = true;
         }
         return 0;
+}
+
+/**
+ * Handler for "--proxy name".
+ * Activates virtual network isolation for this proot instance.
+ */
+static int handle_option_proxy(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+        if (value == NULL || value[0] == '\0') {
+                note(tracee, ERROR, USER,
+                     "missing proxy name: use --proxy NAME");
+                return -1;
+        }
+
+        return vnp_configure(tracee, value);
 }
 
 /**

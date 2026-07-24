@@ -83,6 +83,8 @@ OBJECTS += \
 	extension/hidden_files/hidden_files.o \
 	extension/mountinfo/mountinfo.o \
 	extension/port_switch/port_switch.o \
+	extension/virtual_net/virtual_net.o \
+	extension/virtual_net/virtual_net_helper.o \
 	extension/sysvipc/sysvipc.o \
 	extension/sysvipc/sysvipc_msg.o \
 	extension/sysvipc/sysvipc_sem.o \

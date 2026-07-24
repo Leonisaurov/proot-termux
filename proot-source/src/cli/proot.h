@@ -70,6 +70,7 @@ static int handle_option_L(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_H(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_p(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_port_mapping(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_proxy(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_mbind(Tracee *tracee, const Cli *cli, const char *value);
 
 static int pre_initialize_bindings(Tracee *, const Cli *, size_t, char *const *, size_t);
@@ -310,6 +311,15 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
           .detail = "\tAutomatically redirect bind() calls for ports below 1024\n\
 \tby adding 2000 to the port number. If the resulting port\n\
 \tis occupied, proot will search for the next free port.",
+        },
+        { .class = "Extension options",
+          .arguments = {
+                { .name = "--proxy", .separator = ' ', .value = "name" },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_proxy,
+          .description = "Create isolated virtual network. Without -p, binds stay virtual "
+                         "and are only visible within the same --proxy network.",
+          .detail = "",
         },
         { .class = "Extension options",
           .arguments = {

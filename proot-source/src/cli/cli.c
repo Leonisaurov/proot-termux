@@ -46,6 +46,7 @@
 #include "path/path.h"
 #include <extension/extension.h>
 #include <extension/sysvipc/sysvipc.h>
+#include <extension/virtual_net/virtual_net_helper.h>
 
 #include "build.h"
 
@@ -73,7 +74,7 @@ void print_usage(Tracee *tracee, const Cli *cli, bool detailed)
 				DETAIL(printf("\n"));
 				printf("\t%s\n", options[i].description);
 				if (detailed) {
-					if (options[i].detail[0] != '\0')
+					if (options[i].detail != NULL && options[i].detail[0] != '\0')
 						printf("\n%s\n\n", options[i].detail);
 					else
 						printf("\n");
@@ -459,6 +460,10 @@ int main(int argc, char *const argv[])
 
 	if (argc == 2 && strcmp(argv[1], "--shm-helper") == 0) {
 		sysvipc_shm_helper_main();
+	}
+
+	if (argc >= 3 && strcmp(argv[1], "--vnp-helper") == 0) {
+		vnp_helper_main(argc, argv);
 	}
 
 	/* Pre-create the first tracee (pid == 0).  */
