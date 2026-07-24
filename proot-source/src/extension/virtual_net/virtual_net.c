@@ -53,8 +53,8 @@ static FilteredSysnum syss[] = {
 	{ PR_accept4,     0 },
 	{ PR_connect,     0 },
 	{ PR_close,       0 },
-	{ PR_getsockname, 0 },
-	{ PR_getpeername, 0 },
+	{ PR_getsockname, FILTER_SYSEXIT },
+	{ PR_getpeername, FILTER_SYSEXIT },
 	{ PR_getsockopt,  0 },
 	{ PR_setsockopt,  0 },
 	FILTERED_SYSNUM_END,
@@ -376,113 +376,7 @@ static int vnp_handle_close(Tracee *tracee, VnpConfig *config)
 	return 0;
 }
 
-/**
- * Handle getsockname() — fake AF_INET result for virtual sockets.
- */
-static int vnp_handle_getsockname(Tracee *tracee, VnpConfig *config)
-{
-	word_t sockfd = peek_reg(tracee, CURRENT, SYSARG_1);
-	word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
-	word_t addrlen_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
-	VnpFdEntry *entry;
 
-	entry = vnp_find_fd(config, sockfd);
-	if (entry == NULL)
-		return 0;
-
-	if (entry->orig_domain == AF_INET6) {
-		struct sockaddr_in6 fake6;
-		memset(&fake6, 0, sizeof(fake6));
-		fake6.sin6_family = AF_INET6;
-		fake6.sin6_port = htons(entry->virtual_port);
-		fake6.sin6_addr = in6addr_loopback;
-		if (write_data(tracee, addr_ptr, &fake6, sizeof(fake6)) < 0)
-			return 0;
-		if (addrlen_ptr != 0) {
-			word_t cur_len = peek_word(tracee, addrlen_ptr);
-			if (cur_len >= sizeof(struct sockaddr_in6))
-				poke_word(tracee, addrlen_ptr, sizeof(struct sockaddr_in6));
-		}
-		poke_reg(tracee, SYSARG_RESULT, 0);
-		set_sysnum(tracee, PR_void);
-		return 0;
-	}
-	else {
-		struct sockaddr_in fake;
-		memset(&fake, 0, sizeof(fake));
-		fake.sin_family = entry->orig_domain;
-		fake.sin_port = htons(entry->virtual_port);
-		fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-		if (write_data(tracee, addr_ptr, &fake, sizeof(fake)) < 0)
-			return 0;
-
-		if (addrlen_ptr != 0) {
-			word_t cur_len = peek_word(tracee, addrlen_ptr);
-			if (cur_len >= sizeof(struct sockaddr_in))
-				poke_word(tracee, addrlen_ptr, sizeof(struct sockaddr_in));
-		}
-
-		poke_reg(tracee, SYSARG_RESULT, 0);
-		set_sysnum(tracee, PR_void);
-
-		return 0;
-	}
-}
-
-/**
- * Handle getpeername() — fake AF_INET result for virtual sockets.
- */
-static int vnp_handle_getpeername(Tracee *tracee, VnpConfig *config)
-{
-	word_t sockfd = peek_reg(tracee, CURRENT, SYSARG_1);
-	word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
-	word_t addrlen_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
-	VnpFdEntry *entry;
-
-	entry = vnp_find_fd(config, sockfd);
-	if (entry == NULL)
-		return 0;
-
-	if (entry->orig_domain == AF_INET6) {
-		struct sockaddr_in6 fake6;
-		memset(&fake6, 0, sizeof(fake6));
-		fake6.sin6_family = AF_INET6;
-		fake6.sin6_port = htons(entry->virtual_port);
-		fake6.sin6_addr = in6addr_loopback;
-		if (write_data(tracee, addr_ptr, &fake6, sizeof(fake6)) < 0)
-			return 0;
-		if (addrlen_ptr != 0) {
-			word_t cur_len = peek_word(tracee, addrlen_ptr);
-			if (cur_len >= sizeof(struct sockaddr_in6))
-				poke_word(tracee, addrlen_ptr, sizeof(struct sockaddr_in6));
-		}
-		poke_reg(tracee, SYSARG_RESULT, 0);
-		set_sysnum(tracee, PR_void);
-		return 0;
-	}
-	else {
-		struct sockaddr_in fake;
-		memset(&fake, 0, sizeof(fake));
-		fake.sin_family = entry->orig_domain;
-		fake.sin_port = htons(entry->virtual_port);
-		fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-		if (write_data(tracee, addr_ptr, &fake, sizeof(fake)) < 0)
-			return 0;
-
-		if (addrlen_ptr != 0) {
-			word_t cur_len = peek_word(tracee, addrlen_ptr);
-			if (cur_len >= sizeof(struct sockaddr_in))
-				poke_word(tracee, addrlen_ptr, sizeof(struct sockaddr_in));
-		}
-
-		poke_reg(tracee, SYSARG_RESULT, 0);
-		set_sysnum(tracee, PR_void);
-
-		return 0;
-	}
-}
 
 /* ================================================================
  * Expose management
@@ -563,9 +457,49 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 		case PR_close:
 			return vnp_handle_close(tracee, config);
 		case PR_getsockname:
-			return vnp_handle_getsockname(tracee, config);
-		case PR_getpeername:
-			return vnp_handle_getpeername(tracee, config);
+		case PR_getpeername: {
+			word_t sockfd = peek_reg(tracee, CURRENT, SYSARG_1);
+			word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
+			word_t addrlen_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
+			VnpFdEntry *entry = vnp_find_fd(config, (int)sockfd);
+
+			if (entry != NULL && addr_ptr != 0) {
+				if (entry->orig_domain == AF_INET6) {
+					struct sockaddr_in6 fake6;
+					memset(&fake6, 0, sizeof(fake6));
+					fake6.sin6_family = AF_INET6;
+					fake6.sin6_port = htons(entry->virtual_port);
+					fake6.sin6_addr = in6addr_loopback;
+					if (write_data(tracee, addr_ptr, &fake6, sizeof(fake6)) == 0) {
+						if (addrlen_ptr != 0) {
+							uint32_t cur_len = peek_uint32(tracee, addrlen_ptr);
+							if (cur_len >= sizeof(struct sockaddr_in6))
+								poke_uint32(tracee, addrlen_ptr, sizeof(struct sockaddr_in6));
+						}
+					}
+				} else {
+					struct sockaddr_in fake;
+					memset(&fake, 0, sizeof(fake));
+					fake.sin_family = AF_INET;
+					fake.sin_port = htons(entry->virtual_port);
+					fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+					if (write_data(tracee, addr_ptr, &fake, sizeof(fake)) == 0) {
+						if (addrlen_ptr != 0) {
+							uint32_t cur_len = peek_uint32(tracee, addrlen_ptr);
+							if (cur_len >= sizeof(struct sockaddr_in))
+								poke_uint32(tracee, addrlen_ptr, sizeof(struct sockaddr_in));
+						}
+					}
+				}
+
+				/* Void the syscall: set result to 0 and change sysnum to PR_void.
+				 * The void handler in exit.c (lines 78-89) will restore result to 0
+				 * from MODIFIED registers when the EXIT ptrace event fires. */
+				poke_reg(tracee, SYSARG_RESULT, 0);
+				set_sysnum(tracee, PR_void);
+			}
+			return 0;
+		}
 		default:
 			return 0;
 		}
@@ -575,6 +509,7 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 		Tracee *tracee = TRACEE(extension);
 		VnpConfig *config = talloc_get_type_abort(extension->config, VnpConfig);
 
+		/* Track socket fds */
 		if (get_sysnum(tracee, ORIGINAL) == PR_socket) {
 			word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
 			if ((intptr_t)result >= 0) {
