@@ -45,3 +45,15 @@ scripts/apt-packages-list-*.txt
 # Generated on GitHub Actions CI when building kernel modules
 /scripts/*.ko.zst
 __pycache__/
+
+# PRoot build artifacts
+proot-source/src/**/*.o
+proot-source/src/**/*.d
+proot-source/src/**/*.o.tmp
+proot-source/src/proot
+proot-source/src/cmd
+proot-source/src/build.h
+proot-source/src/.check_*
+proot-source/src/loader/loader
+proot-source/src/loader/loader-m32
+proot-source/src/loader/loader-info.c
