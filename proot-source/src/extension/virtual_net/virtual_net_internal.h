@@ -75,6 +75,7 @@ typedef struct {
 
 typedef struct {
 	char          proxy_name[VNP_MAX_NAME];
+	uint32_t      instance_token;    /* Unique per-instance token */
 	VnpFdEntry    fd_map[VNP_MAX_FDS];
 	int           fd_count;
 	VnpExposeEntry expose_map[VNP_EXPOSE_MAX];
@@ -85,6 +86,30 @@ typedef struct {
 	int           helper_pipe_in;   /* tracer → helper (write end) */
 	int           helper_pipe_out;  /* tracer ← helper (read end) */
 } VnpConfig;
+
+/* ================================================================
+ * Cross-instance Registry (shared file with flock)
+ * Each bind creates a unique abstract socket name.
+ * Registry maps virtual_port = unique_name for cross-instance connect.
+ * ================================================================ */
+
+#define VNP_REG_MAGIC   0x50524F4E /* "PRON" */
+#define VNP_REG_MAX     512
+#define VNP_REG_FILE    "bindings.dat"
+#define VNP_REG_LOCK    "registry.lock"
+
+struct VnpRegistryEntry {
+	uint16_t virtual_port;
+	uint32_t instance_token;
+	char     abstract_name[108];
+};
+
+struct VnpRegistryHeader {
+	uint32_t magic;        /* VNP_REG_MAGIC */
+	uint32_t count;
+	uint32_t generation;
+	struct VnpRegistryEntry entries[VNP_REG_MAX];
+};
 
 /* ================================================================
  * Inline helpers
@@ -109,24 +134,19 @@ static inline int vnp_abstract_name(const char *proxy_name, uint16_t port,
 }
 
 /**
- * Fill a struct sockaddr_un for an abstract Unix socket.
- * Abstract sockets: sun_path[0] = '\0', followed by the name.
+ * Fill a struct sockaddr_un for a unique abstract Unix socket.
+ * Name format: \0proot-vnet-{proxy_name}-{port}-{token}
+ * The token ensures uniqueness across proot instances.
  */
 static inline void vnp_fill_abstract_sa(struct sockaddr_un *sa, const char *proxy_name,
-                                         uint16_t port)
+                                         uint16_t port, uint32_t token)
 {
 	char namebuf[VNP_SOCKBUF_LEN];
-	int namelen;
-
 	memset(sa, 0, sizeof(*sa));
 	sa->sun_family = AF_UNIX;
-
-	/* Abstract socket: first byte is '\0' */
 	sa->sun_path[0] = '\0';
-	namelen = vnp_abstract_name(proxy_name, port, namebuf, sizeof(namebuf));
-	if (namelen > 0) {
-		memcpy(&sa->sun_path[1], namebuf, namelen);
-	}
+	snprintf(&sa->sun_path[1], sizeof(sa->sun_path) - 1,
+		 "%s%s-%u-%u", VNP_ABSTRACT_PREFIX, proxy_name, port, token);
 }
 
 /**

@@ -167,6 +167,163 @@ Restart opencode after pulling to activate changes.
 
 ## TODO
 
-- **Merge bind (getdents64)**: Implement true overlay-style merge bind where files from
-  both host and rootfs are visible simultaneously, not just copied. Requires intercepting
-  `getdents64` to merge directory listings (similar to hidden_files extension).
+### System V IPC Completo (cross-instance)
+
+Implementar los tres mecanismos de System V IPC (shm, sem, msg) con persistencia entre instancias de proot, usando un registro basado en archivos compartidos en tmpfs.
+
+#### Componentes
+
+1. **Shared Memory (PSSR)**: Ver diseño abajo en "Proot Shared Memory Registry"
+2. **Semáforos (semget/semop/semctl)**: Implementar semáforos System V sobre futex(2) o file-locks (flock), con persistencia en archivo compartido:
+   - `registry.dat` extendido con entrada de semáforos: `[key:8, tipo:SEM, valor:4, nsems:4, pid:4]`
+   - `semop()` traducido a operaciones atómicas sobre el archivo con flock() como mutex
+   - Soporte para SEM_UNDO (deshacer al morir el proceso) via registro de undo en archivo separado
+3. **Message Queues (msgget/msgsnd/msgrcv/msgctl)**: Implementar colas de mensajes sobre archivos:
+   - Cada cola es un archivo FIFO especial o un archivo regular con locking
+   - `msgsnd()` escribe al final del archivo (con flock)
+   - `msgrcv()` lee del principio (con flock)
+   - Soporte para msgtyp (selección por tipo) mediante búsqueda secuencial
+
+#### Arquitectura unificada
+
+```
+/data/local/tmp/proot-ipc/
+├── registry.lock         ← flock(2) global
+├── shm.dat               ← registro de segmentos shm
+├── sem.dat               ← registro de semáforos (key, nsems, permisos)
+├── msg.dat               ← registro de colas (key, permisos)
+├── shm_segments/
+│   └── {key}.shm         ← archivo de respaldo del segmento
+├── sem_values/
+│   └── {key}.sem         ← valores actuales del semáforo
+└── msg_queues/
+    └── {key}.msg         ← cola de mensajes (formato binario: [tipo:4, len:4, data...])
+```
+
+#### Flujo General
+
+- **INIT**: Al iniciar el helper, verificar que `/data/local/tmp/proot-ipc/` exista, crearlo si no
+- **LOCK**: flock(registry.lock, LOCK_EX) para operaciones de escritura, LOCK_SH para lectura
+- **OP**: Leer/escribir el archivo correspondiente
+- **UNLOCK**: flock(registry.lock, LOCK_UN)
+- **CLEANUP**: Al cerrar proot, el helper limpia entries huerfanas (procesos que ya no existen)
+
+#### Implementación en helper (sin threads)
+
+Todo se implementa en `sysvipc_shm_helper_main()` agregando nuevos opcodes:
+
+```c
+enum SysVIpcHelperOp {
+    SHM_ALLOC_KEY,     // shmget key-based
+    SHM_LOOKUP,        // shmget lookup
+    SHM_RMID,          // shmctl IPC_RMID
+    SEM_GET,           // semget
+    SEM_OP,            // semop (puede ser múltiple)
+    SEM_CTL,           // semctl
+    MSG_GET,           // msgget
+    MSG_SND,           // msgsnd
+    MSG_RCV,           // msgrcv
+    MSG_CTL,           // msgctl
+};
+```
+
+#### Ventajas sobre implementación actual
+
+| Aspecto | Actual (en memoria de proot) | Propuesta (archivos compartidos) |
+|---------|------------------------------|----------------------------------|
+| Persistencia | Solo mientras proot vive | Hasta reinicio del host |
+| Cross-instance | ❌ No | ✅ flock() + archivos |
+| Semáforos | Solo dentro de un proot | Cross-instance |
+| Message queues | Solo dentro de un proot | Cross-instance |
+| Threads | Depende del backend | 0 threads |
+| Deadlock | Posible (libandroid) | Imposible |
+
+#### Archivos a modificar
+
+- `proot-source/src/extension/sysvipc/sysvipc_shm.c`: PSSR (ya documentado)
+- `proot-source/src/extension/sysvipc/sysvipc_sem.c`: Agregar helper ops para semáforos persistentes
+- `proot-source/src/extension/sysvipc/sysvipc_msg.c`: Agregar helper ops para colas persistentes
+- `proot-source/src/extension/sysvipc/sysvipc.c`: Modificar dispatch para nuevo helper protocol
+- `proot-source/src/extension/sysvipc/sysvipc_internal.h`: Definir estructura del registry, opcodes
+- `packages/proot/build.sh`: Crear /data/local/tmp/proot-ipc/ en post-install
+
+### Proot Shared Memory Registry (PSSR)
+
+Implementar un registro compartido de segmentos SysV IPC shared memory que permita a múltiples instancias de proot compartir memoria por clave (key_t), recuperando la funcionalidad que libandroid-shmem intentaba proveer pero sin su deadlock interno.
+
+#### Diseño: Registry basado en archivos compartidos
+
+En vez de usar libandroid-shmem (que tenía threads + socket IPC interno → deadlock ABBA), usar un archivo en tmpfs accesible por todas las instancias de proot:
+
+```
+/data/local/tmp/proot-shm/
+├── registry.lock        ← flock(2) para exclusión mutua entre instancias
+├── registry.dat         ← binario: entries de [key:8, dev:8, ino:8, size:8, gen:4]
+└── segments/
+    └── {dev}_{ino}.shm  ← archivo respaldo del segmento (ftruncate al tamaño)
+```
+
+#### Flujo
+
+1. **shmget(key, size, IPC_CREAT)**:
+   - Helper recibe SHMHELPER_ALLOC con key
+   - `flock(registry.lock, LOCK_EX)`
+   - Lee `registry.dat`, busca key
+   - Si existe: verifica size, retorna (dev, ino) = shmid
+   - Si no existe: crea `segments/{dev}_{ino}.shm`, ftruncate(size), agrega a registry
+   - `flock(registry.lock, LOCK_UN)`
+   - Retorna shmid que codifica (dev, ino, generation)
+
+2. **shmget(key, 0, 0)** (buscar existente):
+   - Helper recibe SHMHELPER_LOOKUP con key
+   - `flock(registry.lock, LOCK_SH)`
+   - Lee `registry.dat`, busca key
+   - Si existe: retorna shmid
+   - Si no: retorna -ENOENT
+   - `flock(registry.lock, LOCK_UN)`
+
+3. **shmat(shmid)**:
+   - Decodifica (dev, ino) del shmid
+   - Helper abre `segments/{dev}_{ino}.shm` → fd
+   - fd se pasa al tracee vía SCM_RIGHTS (DISTRIBUTE handler existente)
+   - Tracee mmap(MAP_SHARED, fd, ...)
+
+4. **shmctl(IPC_RMID)**:
+   - Helper cierra fd local
+   - `flock(registry.lock, LOCK_EX)`
+   - Elimina entrada de `registry.dat`
+   - Unlink `segments/{dev}_{ino}.shm`
+   - `flock(registry.lock, LOCK_UN)`
+
+#### Formato de shmid
+
+Codificar (dev, ino, generation) en 32 bits para compatibilidad con SysV IPC:
+
+```
+bits 0-11:  inode & 0xFFF     (índice dentro del segmento)
+bits 12-27: generation & 0xFFFF
+bits 28-31: 0 (reservado)
+```
+
+El helper mantiene una tabla local (dev, ino) → fd para evitar re-abrir en cada shmat.
+
+#### Ventajas sobre libandroid-shmem
+
+| Aspecto | libandroid-shmem | PSSR (propuesto) |
+|---------|-----------------|------------------|
+| Threads | 1 listener thread | 0 threads |
+| Sockets | socketpair interno | 0 sockets extra |
+| Deadlock | ABBA clásico | Imposible (sin threads) |
+| Cross-instance | ❌ No soportado | ✅ Archivo compartido |
+| Persistencia | Solo mientras helper vive | Hasta reinicio del host |
+| Concurrencia | Un solo proceso | flock() entre instancias |
+
+#### Archivos a modificar
+
+- `proot-source/src/extension/sysvipc/sysvipc_shm.c`: Agregar nuevos ops SHMHELPER_ALLOC_KEY, SHMHELPER_LOOKUP, SHMHELPER_RMID_KEY; modificar handlers en helper_main()
+- `proot-source/src/extension/sysvipc/sysvipc_internal.h`: Agregar defines para registry path, formato de entry
+- `packages/proot/build.sh`: Agregar creación de /data/local/tmp/proot-shm/ en termux_step_post_make_install()
+
+### Merge bind (getdents64)
+
+Implementar true overlay-style merge bind donde archivos tanto del host como del rootfs sean visibles simultáneamente, no solo copiados. Requiere interceptar `getdents64` para mergear directorios (similar a hidden_files extension).

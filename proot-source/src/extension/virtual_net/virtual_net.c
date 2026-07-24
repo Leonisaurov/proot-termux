@@ -27,6 +27,8 @@
 #include <sys/stat.h>   /* mkdir(2) */
 #include <signal.h>     /* kill(2) */
 #include <sys/wait.h>  /* waitpid(2) */
+#include <sys/file.h>    /* flock(2) */
+#include <time.h>        /* clock_gettime(3) */
 
 #include "extension/extension.h"
 #include "extension/virtual_net/virtual_net.h"
@@ -188,6 +190,119 @@ static int is_ipv6_loopback_or_unspecified(const struct in6_addr *addr)
 }
 
 /* ================================================================
+ * Token generation & registry management
+ * ================================================================ */
+
+/**
+ * Generate a unique instance token.
+ * Used to create unique abstract socket names per proot instance.
+ */
+static uint32_t vnp_generate_token(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	/* Mix time with address of stack variable for entropy */
+	return (uint32_t)(ts.tv_sec ^ ts.tv_nsec) ^ (uint32_t)(uintptr_t)&ts;
+}
+
+/**
+ * Open registry file with the given lock type.
+ * Returns fd, or -1 on error.
+ */
+static int vnp_registry_open(const char *proxy_name, int lock_type)
+{
+	char path[VNP_SOCKBUF_LEN];
+	int fd;
+	snprintf(path, sizeof(path), "%s/%s/%s",
+		 VNP_TMP_DIR, proxy_name, VNP_REG_LOCK);
+	fd = open(path, O_CREAT | O_RDWR, 0644);
+	if (fd < 0)
+		return -1;
+	if (flock(fd, lock_type) < 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+static void vnp_registry_close(int fd)
+{
+	if (fd >= 0) {
+		flock(fd, LOCK_UN);
+		close(fd);
+	}
+}
+
+static int vnp_registry_read(int fd, struct VnpRegistryHeader *hdr)
+{
+	lseek(fd, 0, SEEK_SET);
+	ssize_t n = read(fd, hdr, sizeof(*hdr));
+	if (n != sizeof(*hdr) || hdr->magic != VNP_REG_MAGIC) {
+		memset(hdr, 0, sizeof(*hdr));
+		hdr->magic = VNP_REG_MAGIC;
+		hdr->count = 0;
+		hdr->generation = 0;
+	}
+	return 0;
+}
+
+static int vnp_registry_write(int fd, const struct VnpRegistryHeader *hdr)
+{
+	lseek(fd, 0, SEEK_SET);
+	ssize_t n = write(fd, hdr, sizeof(*hdr));
+	ftruncate(fd, n);
+	return (n == sizeof(*hdr)) ? 0 : -1;
+}
+
+static struct VnpRegistryEntry *vnp_registry_find(
+	struct VnpRegistryHeader *hdr, uint16_t virtual_port)
+{
+	unsigned int i;
+	for (i = 0; i < hdr->count; i++) {
+		if (hdr->entries[i].virtual_port == virtual_port)
+			return &hdr->entries[i];
+	}
+	return NULL;
+}
+
+static struct VnpRegistryEntry *vnp_registry_add(
+	struct VnpRegistryHeader *hdr, uint16_t virtual_port,
+	uint32_t token, const char *abstract_name)
+{
+	struct VnpRegistryEntry *entry = vnp_registry_find(hdr, virtual_port);
+	if (entry != NULL) {
+		entry->instance_token = token;
+		memcpy(entry->abstract_name, abstract_name, sizeof(entry->abstract_name));
+		return entry;
+	}
+	if (hdr->count >= VNP_REG_MAX)
+		return NULL;
+	entry = &hdr->entries[hdr->count++];
+	entry->virtual_port = virtual_port;
+	entry->instance_token = token;
+	memcpy(entry->abstract_name, abstract_name, sizeof(entry->abstract_name));
+	hdr->generation++;
+	return entry;
+}
+
+static void vnp_registry_remove(struct VnpRegistryHeader *hdr,
+				 uint16_t virtual_port, uint32_t token)
+{
+	unsigned int i;
+	for (i = 0; i < hdr->count; i++) {
+		if (hdr->entries[i].virtual_port == virtual_port
+		    && hdr->entries[i].instance_token == token) {
+			unsigned int j;
+			for (j = i; j < hdr->count - 1; j++)
+				hdr->entries[j] = hdr->entries[j + 1];
+			hdr->count--;
+			hdr->generation++;
+			return;
+		}
+	}
+}
+
+/* ================================================================
  * Syscall handlers
  * ================================================================ */
 
@@ -200,6 +315,7 @@ static int vnp_handle_socket(Tracee *tracee)
 	word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
 	if (domain == AF_INET || domain == AF_INET6) {
 		poke_reg(tracee, SYSARG_1, AF_UNIX);
+		poke_reg(tracee, SYSARG_3, 0);
 	}
 	return 0;
 }
@@ -263,8 +379,21 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 	if (is_exposed)
 		entry->exposed_port = port;
 
-	/* Build abstract Unix socket address */
-	vnp_fill_abstract_sa(&sa_unix, config->proxy_name, port);
+	/* Build unique abstract Unix socket address with instance token */
+	vnp_fill_abstract_sa(&sa_unix, config->proxy_name, port, config->instance_token);
+
+	/* Register in shared registry for cross-instance discovery */
+	{
+		int reg_fd = vnp_registry_open(config->proxy_name, LOCK_EX);
+		if (reg_fd >= 0) {
+			struct VnpRegistryHeader hdr;
+			vnp_registry_read(reg_fd, &hdr);
+			/* abstract_name in registry includes the leading \0 */
+			vnp_registry_add(&hdr, port, config->instance_token, sa_unix.sun_path);
+			vnp_registry_write(reg_fd, &hdr);
+			vnp_registry_close(reg_fd);
+		}
+	}
 
 	/* Write new sockaddr_un to tracee's stack and update bind() args */
 	word_t new_addr = alloc_mem(tracee, sizeof(struct sockaddr_un));
@@ -290,7 +419,6 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
 	word_t addrlen = peek_reg(tracee, CURRENT, SYSARG_3);
 	struct sockaddr_in sa_in;
-	struct sockaddr_un sa_unix;
 	VnpFdEntry *entry;
 
 	if (addrlen < sizeof(struct sockaddr_in))
@@ -339,6 +467,18 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 		}
 	}
 
+	if (!is_virtual) {
+		/* Check registry for cross-instance ports (bound by other proots) */
+		int reg_fd = vnp_registry_open(config->proxy_name, LOCK_SH);
+		if (reg_fd >= 0) {
+			struct VnpRegistryHeader hdr;
+			vnp_registry_read(reg_fd, &hdr);
+			if (vnp_registry_find(&hdr, port) != NULL)
+				is_virtual = 1;
+			vnp_registry_close(reg_fd);
+		}
+	}
+
 	if (!is_virtual)
 		return 0;
 
@@ -350,18 +490,31 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 			return 0;
 	}
 
-	/* Build abstract Unix socket address */
-	vnp_fill_abstract_sa(&sa_unix, config->proxy_name, port);
+	/* Look up registry to find the unique abstract socket for this port */
+	{
+		int reg_fd = vnp_registry_open(config->proxy_name, LOCK_SH);
+		if (reg_fd >= 0) {
+			struct VnpRegistryHeader hdr;
+			vnp_registry_read(reg_fd, &hdr);
+			struct VnpRegistryEntry *entry = vnp_registry_find(&hdr, port);
+			if (entry != NULL) {
+				/* Use the registered abstract name */
+				struct sockaddr_un sa_unix;
+				memset(&sa_unix, 0, sizeof(sa_unix));
+				sa_unix.sun_family = AF_UNIX;
+				memcpy(sa_unix.sun_path, entry->abstract_name,
+				       sizeof(entry->abstract_name));
 
-	word_t new_addr = alloc_mem(tracee, sizeof(struct sockaddr_un));
-	if (new_addr == 0)
-		return 0;
-
-	if (write_data(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
-		return 0;
-
-	poke_reg(tracee, SYSARG_2, new_addr);
-	poke_reg(tracee, SYSARG_3, sizeof(struct sockaddr_un));
+				word_t new_addr = alloc_mem(tracee, sizeof(sa_unix));
+				if (new_addr != 0) {
+					write_data(tracee, new_addr, &sa_unix, sizeof(sa_unix));
+					poke_reg(tracee, SYSARG_2, new_addr);
+					poke_reg(tracee, SYSARG_3, sizeof(sa_unix));
+				}
+			}
+			vnp_registry_close(reg_fd);
+		}
+	}
 
 	return 0;
 }
@@ -433,6 +586,7 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 
 		strncpy(config->proxy_name, proxy_name, VNP_MAX_NAME - 1);
 		config->proxy_name[VNP_MAX_NAME - 1] = '\0';
+		config->instance_token = vnp_generate_token();
 		config->helper_pid = -1;
 		config->helper_pipe_in = -1;
 		config->helper_pipe_out = -1;
@@ -456,6 +610,14 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 			return vnp_handle_connect(tracee, config);
 		case PR_close:
 			return vnp_handle_close(tracee, config);
+		case PR_setsockopt: {
+			word_t level = peek_reg(tracee, CURRENT, SYSARG_2);
+			if (level == IPPROTO_TCP || level == IPPROTO_IP) {
+				poke_reg(tracee, SYSARG_RESULT, 0);
+				set_sysnum(tracee, PR_void);
+			}
+			return 0;
+		}
 		case PR_getsockname:
 		case PR_getpeername: {
 			word_t sockfd = peek_reg(tracee, CURRENT, SYSARG_1);
@@ -508,23 +670,91 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 	case SYSCALL_EXIT_END: {
 		Tracee *tracee = TRACEE(extension);
 		VnpConfig *config = talloc_get_type_abort(extension->config, VnpConfig);
+		word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
 
-		/* Track socket fds */
-		if (get_sysnum(tracee, ORIGINAL) == PR_socket) {
-			word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-			if ((intptr_t)result >= 0) {
-				int fd = (int)result;
-				VnpFdEntry *entry = vnp_find_fd(config, fd);
-				if (entry == NULL) {
-					vnp_add_fd(config, fd, 0, AF_INET);
-				}
-			}
+		if ((intptr_t)result < 0)
+			return 0;
+
+		switch (get_sysnum(tracee, ORIGINAL)) {
+		case PR_socket: {
+			int fd = (int)result;
+			VnpFdEntry *entry = vnp_find_fd(config, fd);
+			if (entry == NULL)
+				vnp_add_fd(config, fd, 0, AF_INET);
+			return 0;
 		}
-		return 0;
+		case PR_accept:
+		case PR_accept4: {
+			word_t listen_fd;
+			word_t addr_ptr;
+			word_t addrlen_ptr;
+			int newfd = (int)result;
+
+			if (get_sysnum(tracee, ORIGINAL) == PR_accept4) {
+				listen_fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
+				addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+				addrlen_ptr = peek_reg(tracee, ORIGINAL, SYSARG_3);
+			} else {
+				listen_fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
+				addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+				addrlen_ptr = peek_reg(tracee, ORIGINAL, SYSARG_3);
+			}
+
+			VnpFdEntry *listen_entry = vnp_find_fd(config, (int)listen_fd);
+			if (listen_entry == NULL || listen_entry->virtual_port == 0)
+				return 0;
+
+			/* Track the new fd with same virtual port */
+			VnpFdEntry *entry = vnp_find_fd(config, newfd);
+			if (entry == NULL) {
+				entry = vnp_add_fd(config, newfd, listen_entry->virtual_port,
+						    listen_entry->orig_domain);
+				if (entry != NULL)
+					entry->exposed_port = listen_entry->exposed_port;
+			}
+
+			/* Fake the client address as AF_INET loopback */
+			if (addr_ptr != 0 && addrlen_ptr != 0) {
+				struct sockaddr_in fake;
+				memset(&fake, 0, sizeof(fake));
+				fake.sin_family = AF_INET;
+				fake.sin_port = 0;
+				fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+				if (write_data(tracee, addr_ptr, &fake, sizeof(fake)) == 0)
+					poke_uint32(tracee, addrlen_ptr, sizeof(fake));
+			}
+			return 0;
+		}
+		default:
+			return 0;
+		}
 	}
 
 	case REMOVED: {
 		VnpConfig *config = talloc_get_type_abort(extension->config, VnpConfig);
+		{
+			/* Unregister all our ports from the registry */
+			int reg_fd = vnp_registry_open(config->proxy_name, LOCK_EX);
+			if (reg_fd >= 0) {
+				struct VnpRegistryHeader hdr;
+				vnp_registry_read(reg_fd, &hdr);
+				/* Remove entries owned by our instance */
+				unsigned int i = 0;
+				while (i < hdr.count) {
+					if (hdr.entries[i].instance_token == config->instance_token) {
+						unsigned int j;
+						for (j = i; j < hdr.count - 1; j++)
+							hdr.entries[j] = hdr.entries[j + 1];
+						hdr.count--;
+					} else {
+						i++;
+					}
+				}
+				hdr.generation++;
+				vnp_registry_write(reg_fd, &hdr);
+				vnp_registry_close(reg_fd);
+			}
+		}
 		vnp_stop_helper(config);
 		return 0;
 	}
