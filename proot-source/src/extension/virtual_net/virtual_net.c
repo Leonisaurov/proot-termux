@@ -480,7 +480,8 @@ static int vnp_handle_getpeername(Tracee *tracee, VnpConfig *config)
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		set_sysnum(tracee, PR_void);
 
-	return 0;
+		return 0;
+	}
 }
 
 /* ================================================================
