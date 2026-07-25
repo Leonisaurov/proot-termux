@@ -36,6 +36,13 @@
 
 #include "supervise/supervise.h"
 #include "cli/note.h"
+#include "tracee/tracee.h"
+
+/* NULL tracee for VERBOSE calls in this file.
+ * We use a typed variable instead of NULL literal because the Android NDK
+ * defines NULL as (void*)0, and the VERBOSE macro accesses tracee->verbose
+ * which the compiler rejects on void* even with short-circuit evaluation. */
+static const Tracee *supervise_tracee;
 
 /* ===========================================================================
  * Internal state
@@ -235,7 +242,7 @@ void supervise_accept_client(int ctl_fd)
 		return;
 	}
 
-	VERBOSE(NULL, 2, "supervise: exec request: %s", argv_ptrs[0]);
+	VERBOSE(supervise_tracee, 2, "supervise: exec request: %s", argv_ptrs[0]);
 
 	/* Fork a new tracee */
 	pid = fork();
@@ -267,7 +274,7 @@ void supervise_accept_client(int ctl_fd)
 		return;
 	}
 
-	VERBOSE(NULL, 2, "supervise: spawned tracee pid=%d for client fd=%d",
+	VERBOSE(supervise_tracee, 2, "supervise: spawned tracee pid=%d for client fd=%d",
 		pid, client_fd);
 }
 
@@ -300,7 +307,7 @@ int supervise_tracee_exited(pid_t pid, int status)
 			close(exec_clients[i].fd);
 			remove_client(i);
 
-			VERBOSE(NULL, 2, "supervise: tracee pid=%d exited: status=%d",
+			VERBOSE(supervise_tracee, 2, "supervise: tracee pid=%d exited: status=%d",
 				pid, resp.exit_status);
 
 			break;

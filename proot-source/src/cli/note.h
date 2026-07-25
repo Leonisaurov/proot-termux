@@ -42,8 +42,9 @@ typedef enum {
 } Severity;
 
 #define VERBOSE(tracee, level, message, args...) do {			\
-		if (tracee == NULL || tracee->verbose >= (level))	\
-			note(tracee, INFO, INTERNAL, (message), ## args); \
+		const Tracee *__tracee = (tracee);				\
+		if (__tracee == NULL || __tracee->verbose >= (level))	\
+			note(__tracee, INFO, INTERNAL, (message), ## args); \
 	} while (0)
 
 extern void note(const Tracee *tracee, Severity severity, Origin origin, const char *message, ...) FORMAT(printf, 4, 5);
