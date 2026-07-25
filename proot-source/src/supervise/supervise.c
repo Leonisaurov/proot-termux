@@ -212,8 +212,6 @@ void supervise_accept_client(int ctl_fd)
 	int client_fd;
 	ExecRequest req;
 	pid_t pid;
-	int i;
-
 	client_fd = accept(ctl_fd, NULL, NULL);
 	if (client_fd < 0)
 		return;
