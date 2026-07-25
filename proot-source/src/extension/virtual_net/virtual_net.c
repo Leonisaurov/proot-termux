@@ -99,8 +99,10 @@ static int vnp_start_helper(VnpConfig *config, const char *proxy_name)
 		dup2(pipe_helper2main[1], STDOUT_FILENO);
 		close(pipe_main2helper[0]);
 		close(pipe_helper2main[1]);
+		char tokbuf[16];
 		snprintf(namebuf, sizeof(namebuf), "%s", proxy_name);
-		execl("/proc/self/exe", "proot", "--vnp-helper", namebuf, (char *)NULL);
+		snprintf(tokbuf, sizeof(tokbuf), "%u", config->instance_token);
+		execl("/proc/self/exe", "proot", "--vnp-helper", namebuf, tokbuf, (char *)NULL);
 		_exit(1);
 	}
 

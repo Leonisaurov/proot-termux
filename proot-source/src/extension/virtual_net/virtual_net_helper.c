@@ -41,6 +41,7 @@
  * ================================================================ */
 
 static char g_proxy_name[VNP_MAX_NAME];
+static uint32_t g_instance_token;
 
 /* ================================================================
  * Helpers
@@ -63,15 +64,16 @@ static void helper_send_response(int result, uint16_t host_port)
  * Name: "\0proot-vnet-{proxy_name}-{port}"
  */
 static void build_abstract_name(char *sun_path, size_t pathlen,
-                                 const char *proxy_name, uint16_t port)
+                                 const char *proxy_name, uint16_t port,
+                                 uint32_t token)
 {
 	int len;
 	/* Abstract socket: first byte is '\0' */
 	sun_path[0] = '\0';
-	len = snprintf(&sun_path[1], pathlen - 1, "%s%s-%u",
-		VNP_ABSTRACT_PREFIX, proxy_name, port);
+	len = snprintf(&sun_path[1], pathlen - 1, "%s%s-%u-%u",
+		VNP_ABSTRACT_PREFIX, proxy_name, port, token);
 	if ((size_t)len >= pathlen - 1)
-		sun_path[pathlen - 1] = '\0'; /* ensure null termination */
+		sun_path[pathlen - 1] = '\0';
 }
 
 /* ================================================================
@@ -204,7 +206,7 @@ static void handle_accept_loop(int tcp_fd, uint16_t virtual_port)
 		memset(&unix_addr, 0, sizeof(unix_addr));
 		unix_addr.sun_family = AF_UNIX;
 		build_abstract_name(unix_addr.sun_path, sizeof(unix_addr.sun_path),
-			g_proxy_name, virtual_port);
+			g_proxy_name, virtual_port, g_instance_token);
 
 		if (connect(unix_fd, (struct sockaddr *)&unix_addr,
 			    sizeof(unix_addr)) < 0) {
@@ -271,6 +273,8 @@ int vnp_helper_main(int argc, char *argv[])
 	/* Store proxy name */
 	strncpy(g_proxy_name, argv[2], VNP_MAX_NAME - 1);
 	g_proxy_name[VNP_MAX_NAME - 1] = '\0';
+	if (argc > 3)
+		g_instance_token = (uint32_t)strtoul(argv[3], NULL, 10);
 
 	/* Ignore SIGCHLD to auto-reap bridged children.
 	 * SA_NOCLDWAIT prevents zombies: when SIGCHLD is set to SIG_IGN,

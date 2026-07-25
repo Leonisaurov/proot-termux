@@ -118,24 +118,6 @@ struct VnpRegistryHeader {
 /* ========================================================================= */
 
 /**
- * Build abstract Unix socket name for a virtual port.
- * Result: "@proot-vnet-{proxy_name}-{port}"
- * buf must be at least VNP_SOCKBUF_LEN bytes.
- * Returns length including the leading '@'.
- */
-static inline int vnp_abstract_name(const char *proxy_name, uint16_t port,
-                                     char *buf, size_t bufsz)
-{
-	/* Abstract sockets start with '\0' (sun_path[0] = 0).
-	 * For readability we use '@' prefix in our internal name,
-	 * but the actual sun_path starts with '\0'. */
-	int len = snprintf(buf, bufsz, "%s%s-%u", VNP_ABSTRACT_PREFIX, proxy_name, port);
-	if (len < 0 || (size_t)len >= bufsz)
-		return -1;
-	return len;
-}
-
-/**
  * Fill a struct sockaddr_un for a unique abstract Unix socket.
  * Name format: \0proot-vnet-{proxy_name}-{port}-{token}
  * The token ensures uniqueness across proot instances.
