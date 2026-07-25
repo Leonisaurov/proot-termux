@@ -46,6 +46,7 @@
 #include "path/path.h"
 #include <extension/sysvipc/sysvipc.h>
 #include <extension/virtual_net/virtual_net_helper.h>
+#include "supervise/supervise.h"
 
 #include "build.h"
 
@@ -473,6 +474,26 @@ int main(int argc, char *const argv[])
 #if defined(TALLOC_VERSION_MAJOR) && TALLOC_VERSION_MAJOR >= 2
 	talloc_set_log_stderr();
 #endif
+
+	/* Dispatch --exec mode: connect to a supervisor and run a command.
+	 * Usage: proot --exec <PID> <command...>
+	 * This never enters the event loop — it connects, runs, and exits. */
+	if (argc >= 4 && strcmp(argv[1], "--exec") == 0) {
+		char *end = NULL;
+		errno = 0;
+		pid_t target_pid = (pid_t)strtol(argv[2], &end, 10);
+		if (errno != 0 || end == argv[2] || *end != '\0') {
+			fprintf(stderr, "proot --exec: invalid PID '%s'\n", argv[2]);
+			exit(EXIT_FAILURE);
+		}
+
+		int ret = exec_connect(target_pid, argc - 3, &argv[3]);
+		if (ret < 0) {
+			fprintf(stderr, "proot --exec: %s\n", strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+		exit(ret);
+	}
 
 	if (argc == 2 && strcmp(argv[1], "--shm-helper") == 0) {
 		sysvipc_shm_helper_main();

@@ -30,6 +30,7 @@
 #include "extension/extension.h"
 #include "extension/sysvipc/sysvipc.h"
 #include "extension/virtual_net/virtual_net.h"
+#include "supervise/supervise.h"
 #include "path/binding.h"
 #include "attribute.h"
 
@@ -436,6 +437,18 @@ static int handle_option_proxy(Tracee *tracee, const Cli *cli UNUSED, const char
         }
 
         return vnp_configure(tracee, value);
+}
+
+/**
+ * Handler for "--supervise".
+ * Sets the supervise flag on the tracee so the event loop stays alive
+ * after the root tracee exits, accepting --exec connections.
+ */
+static int handle_option_supervise(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	tracee->supervise = true;
+	VERBOSE(tracee, 1, "supervise mode enabled");
+	return 0;
 }
 
 /**

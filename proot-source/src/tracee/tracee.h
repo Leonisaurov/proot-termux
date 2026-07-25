@@ -350,6 +350,14 @@ typedef struct tracee {
 	/* For diagnostic purpose.  */
 	const char *tool_name;
 
+	/**********************************************************************
+	 * Event loop configuration                                           *
+	 **********************************************************************/
+
+	/* Supervise mode: keep event loop alive for --exec connections.
+	 * Set when --supervise is active. */
+	bool supervise;
+
 } Tracee;
 
 #define HOST_ROOTFS "/host-rootfs"

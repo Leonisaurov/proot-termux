@@ -151,6 +151,99 @@ struct VnpRegistryEntry {
 - `proot-source/src/extension/extension.h` — `vnp_callback` declaration
 - `proot-source/src/GNUmakefile` — `virtual_net.o` and `virtual_net_helper.o`
 
+### Supervise Mode (`--supervise`) & Exec (`--exec <PID> <command>`)
+
+Added in revision 18. Implements container-like process management.
+
+`--supervise` keeps the event loop alive after the root tracee exits, listening
+on an abstract Unix socket for `--exec` connections.
+
+`--exec <PID> <command>` connects to a running supervisor and executes a command
+inside its context (same rootfs, bindings, proxy network, etc).
+
+#### How it works
+
+1. **`--supervise`** modifies the event loop:
+   - Uses `signalfd` + `poll()` instead of blocking `waitpid()` — zero overhead when not used
+   - Creates an abstract listen socket: `@proot-exec-<PID>`
+   - When the root tracee exits: logs the exit reason to
+     `/data/data/com.termux/files/usr/tmp/proot-exit-<PID>.log`
+   - Accepts `--exec` connections as long as it's alive
+
+2. **`--exec <PID> <cmd...>`** runs as a separate proot invocation:
+   - Connects to `@proot-exec-<PID>` abstract socket
+   - Sends the command to execute
+   - The supervisor `fork()`s a new tracee, applies the same context
+   - The command runs with full path translation, bindings, and proxy network
+   - When the command finishes, `--exec` exits with its exit code
+   - If the supervisor isn't reachable, reads its exit log from the tmpdir
+
+#### Usage
+
+```bash
+# Terminal 1: start a supervised server
+proot --supervise --proxy web -r /data/data/com.termux/files/usr/var/lib/proot-distro/installed-rootfs/ubuntu /bin/server
+
+# Terminal 2: run a healthcheck inside the same context
+proot --exec $(pidof proot) curl -f http://127.0.0.1/health
+
+# Check why a supervised process exited
+cat /data/data/com.termux/files/usr/tmp/proot-exit-$(pidof proot).log
+```
+
+#### Key Files
+
+| File | Purpose |
+|------|---------|
+| `supervise/supervise.h` | Public API: `supervise_init()`, `exec_connect()`, etc. |
+| `supervise/supervise.c` | Implementation: abstract socket, signalfd, client tracking |
+| `cli/proot.c` | `--supervise` handler |
+| `cli/cli.c` | `--exec` dispatch before event loop |
+| `tracee/event.c` | Poll-based event loop for supervise mode |
+| `tracee/tracee.h` | `bool supervise` field in Tracee struct |
+
+#### Protocol
+
+Abstract socket: `@proot-exec-<PID>`
+
+Request format (client → supervisor):
+```
+struct ExecRequest {
+    int    argc;                          // Number of arguments
+    char   argv[4096];                    // Args concatenated, \0-separated
+    char   cwd[4096];                     // Working directory
+};
+```
+
+Response format (supervisor → client):
+```
+struct ExecResponse {
+    int    exit_status;   // WEXITSTATUS or 128+signal
+    bool   signaled;      // true if killed by signal
+    int    termsig;       // signal number if signaled
+};
+```
+
+#### Zero Overhead Guarantee
+
+When `--supervise` is NOT used, the event loop is **100% identical** to the
+original proot code. There is no performance impact, no extra syscalls, no
+changed behaviour.
+
+When `--supervise` IS used, the only overhead is:
+- One `signalfd` (1 fd)
+- One `listen()` socket (1 fd)
+- `poll()` instead of `waitpid()` — same blocking semantics
+- `WNOHANG` loop after each SIGCHLD — negligible
+
+#### Exit Log Format
+
+File: `/data/data/com.termux/files/usr/tmp/proot-exit-<PID>.log`
+```
+process 'server' exited with status 1 (started 45s)
+process 'server' killed by signal 9 (started 120s)
+```
+
 ## How the Build Works
 
 1. `TERMUX_PKG_SKIP_SRC_EXTRACT=true` skips download

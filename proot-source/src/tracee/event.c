@@ -48,6 +48,11 @@
 #include "extension/extension.h"
 #include "execve/elf.h"
 
+#include <sys/signalfd.h>
+#include <poll.h>
+
+#include "supervise/supervise.h"
+
 #include "attribute.h"
 #include "compat.h"
 
@@ -340,6 +345,22 @@ int event_loop()
 			note(NULL, WARNING, SYSTEM, "sigaction(%d)", signum);
 	}
 
+	/* Check if supervise mode is on */
+	Tracee *root_tracee = get_tracee(NULL, 0, true);
+	bool supervise = (root_tracee != NULL && root_tracee->supervise);
+
+	int ctl_fd = -1;
+	int sig_fd = -1;
+
+	if (supervise) {
+		/* Initialize supervisor: signalfd + abstract listen socket */
+		if (supervise_init(&ctl_fd, &sig_fd) < 0) {
+			supervise = false;
+			note(NULL, WARNING, INTERNAL,
+			     "supervise: init failed, falling back to normal mode");
+		}
+	}
+
 	while (1) {
 		int tracee_status;
 		Tracee *tracee;
@@ -352,36 +373,131 @@ int event_loop()
 		/* Close shadow pipe read ends whose last writer exited.  */
 		shadow_pipes_close_eof();
 
-		/* Wait for the next tracee's stop. */
-		pid = waitpid(-1, &tracee_status, __WALL);
-		if (pid < 0) {
-			if (errno != ECHILD) {
-				note(NULL, ERROR, SYSTEM, "waitpid()");
-				return EXIT_FAILURE;
+		if (supervise) {
+			/* ---------------------------------------------------------
+			 * SUPERVISE MODE: poll-based event loop
+			 *
+			 * Uses signalfd for SIGCHLD + abstract socket for --exec.
+			 * Process tracee events in a non-blocking WNOHANG loop.
+			 * Behaviour is IDENTICAL to normal mode for tracee events.
+			 * --------------------------------------------------------- */
+			struct pollfd fds[2];
+			int nfds = 0;
+			int poll_ret;
+			Tracee *ptracee;
+
+			/* fds[0]: signalfd for SIGCHLD */
+			fds[0].fd     = sig_fd;
+			fds[0].events = POLLIN;
+			nfds = 1;
+
+			/* fds[1]: control socket for --exec */
+			if (ctl_fd >= 0) {
+				fds[1].fd     = ctl_fd;
+				fds[1].events = POLLIN;
+				nfds = 2;
 			}
-			break;
-		}
 
-		/* Get information about this tracee. */
-		tracee = get_tracee(NULL, pid, true);
-		assert(tracee != NULL);
+			poll_ret = poll(fds, nfds, -1);
+			if (poll_ret < 0) {
+				if (errno == EINTR)
+					continue;
+				break;
+			}
 
-		tracee->running = false;
+			/* --- Handle SIGCHLD (tracee events) --- */
+			if (fds[0].revents & POLLIN) {
+				struct signalfd_siginfo fdsi;
+				int wait_status;
 
-		status = notify_extensions(tracee, NEW_STATUS, tracee_status, 0);
-		if (status != 0)
-			continue;
+				/* Consume the signal */
+				read(sig_fd, &fdsi, sizeof(fdsi));
 
-		if (tracee->as_ptracee.ptracer != NULL) {
-			bool keep_stopped = handle_ptracee_event(tracee, tracee_status);
-			if (keep_stopped)
+				/* Process all terminated tracees in non-blocking loop.
+				 * This mirrors the normal mode behaviour exactly, but
+				 * uses WNOHANG to avoid blocking the poll loop. */
+				while (1) {
+					pid = waitpid(-1, &wait_status, WNOHANG | __WALL);
+					if (pid <= 0)
+						break;
+
+					/* Get information about this tracee. */
+					tracee = get_tracee(NULL, pid, true);
+					assert(tracee != NULL);
+					tracee->running = false;
+
+					status = notify_extensions(tracee, NEW_STATUS, wait_status, 0);
+					if (status != 0)
+						continue;
+
+					if (tracee->as_ptracee.ptracer != NULL) {
+						bool keep_stopped = handle_ptracee_event(tracee, wait_status);
+						if (keep_stopped)
+							continue;
+					}
+
+					signal = handle_tracee_event(tracee, wait_status);
+					(void) restart_tracee(tracee, signal);
+
+					/* If a tracee exited, notify the supervisor.
+					 * This is supervise-specific: check if this tracee
+					 * was spawned by an --exec client. */
+					if (WIFEXITED(wait_status) || WIFSIGNALED(wait_status)) {
+						int remaining = supervise_tracee_exited(pid, wait_status);
+
+						/* If no more exec clients and root tracee is dead, exit */
+						if (remaining == 0 && ctl_fd < 0) {
+							supervise_fini();
+							goto done;
+						}
+					}
+				}
+			}
+
+			/* --- Handle new --exec connection --- */
+			if (nfds > 1 && (fds[1].revents & POLLIN)) {
+				supervise_accept_client(ctl_fd);
+			}
+		} else {
+			/* ---------------------------------------------------------
+			 * NORMAL MODE: original blocking waitpid loop
+			 * This is EXACTLY the original code path.
+			 * --------------------------------------------------------- */
+			pid = waitpid(-1, &tracee_status, __WALL);
+			if (pid < 0) {
+				if (errno != ECHILD) {
+					note(NULL, ERROR, SYSTEM, "waitpid()");
+					return EXIT_FAILURE;
+				}
+				break;
+			}
+
+			/* Get information about this tracee. */
+			tracee = get_tracee(NULL, pid, true);
+			assert(tracee != NULL);
+
+			tracee->running = false;
+
+			status = notify_extensions(tracee, NEW_STATUS, tracee_status, 0);
+			if (status != 0)
 				continue;
-		}
 
-		signal = handle_tracee_event(tracee, tracee_status);
-		(void) restart_tracee(tracee, signal);
+			if (tracee->as_ptracee.ptracer != NULL) {
+				bool keep_stopped = handle_ptracee_event(tracee, tracee_status);
+				if (keep_stopped)
+					continue;
+			}
+
+			signal = handle_tracee_event(tracee, tracee_status);
+			(void) restart_tracee(tracee, signal);
+		}
 	}
 
+	/* Normal mode exit (or supervise with no clients) */
+	if (supervise)
+		supervise_fini();
+
+done:
 	return last_exit_status;
 }
 

@@ -56,6 +56,7 @@ OBJECTS += \
 	tracee/event.o		\
 	tracee/seccomp.o        \
 	tracee/statx.o		\
+	supervise/supervise.o	\
 	ptrace/ptrace.o		\
 	ptrace/user.o		\
 	ptrace/wait.o		\

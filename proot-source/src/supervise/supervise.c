@@ -1,0 +1,448 @@
+/* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
+ *
+ * Supervise mode implementation for PRoot
+ *
+ * --supervise:
+ *   Uses signalfd + poll() instead of blocking waitpid() so the event loop
+ *   can also accept new tracee requests via an abstract Unix socket.
+ *   When the root tracee exits, logs the reason and keeps running until
+ *   all exec clients finish, then exits cleanly.
+ *
+ * --exec:
+ *   Connects to a running supervisor's abstract socket, sends the command
+ *   to execute, and blocks until the tracee finishes. Returns the exit code.
+ *   If the supervisor is not found, reads its exit log from tmpdir.
+ *
+ * Copyright (C) 2025 Licensed under GPL v2 or later.
+ */
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <string.h>     /* str*(3), */
+#include <stdlib.h>     /* atoi(3), */
+#include <stdio.h>      /* snprintf(3), fopen(3), */
+#include <unistd.h>     /* close(2), read(2), write(2), fork(2), execvp(3) */
+#include <errno.h>      /* E*, */
+#include <sys/socket.h> /* AF_UNIX, SOCK_STREAM, socket(2), bind(2), listen(2), accept(2), connect(2) */
+#include <sys/un.h>     /* struct sockaddr_un, */
+#include <sys/signalfd.h> /* signalfd(2), */
+#include <signal.h>     /* sigaddset(3), sigprocmask(3), */
+#include <poll.h>       /* poll(2), */
+#include <sys/wait.h>   /* waitpid(2), WIFEXITED, WIFSIGNALED, WEXITSTATUS, WTERMSIG */
+#include <time.h>       /* time(2), */
+#include <stdbool.h>    /* bool, true, false */
+#include <sys/stat.h>   /* mkdir(2) */
+
+#include "supervise/supervise.h"
+#include "cli/note.h"
+
+/* ===========================================================================
+ * Internal state
+ * =========================================================================== */
+
+/* A pending exec client: we're waiting for its tracee to finish */
+typedef struct {
+	int   fd;           /* Client socket (for sending response) */
+	pid_t tracee_pid;   /* PID of the spawned tracee */
+	bool  active;       /* Still waiting for completion */
+} ExecClientEntry;
+
+static ExecClientEntry exec_clients[SUPERVISE_MAX_CLIENTS];
+static int             num_exec_clients = 0;
+
+static int      ctl_fd_global = -1;  /* Listen socket for incoming --exec */
+static pid_t    own_pid = 0;         /* Our PID (for socket name) */
+static time_t   start_time = 0;      /* When supervise started */
+
+/* ---------------------------------------------------------------------------
+ * Helpers
+ * --------------------------------------------------------------------------- */
+
+static void build_sockaddr(struct sockaddr_un *sa, pid_t pid)
+{
+	memset(sa, 0, sizeof(*sa));
+	sa->sun_family = AF_UNIX;
+	sa->sun_path[0] = '\0';
+	snprintf(&sa->sun_path[1], sizeof(sa->sun_path) - 1,
+		 "%s%u", SUPERVISE_SOCKET_PREFIX, pid);
+}
+
+static void build_logpath(char *buf, size_t bufsz, pid_t pid)
+{
+	snprintf(buf, bufsz, "%s/%s%d.log",
+		 SUPERVISE_TMP_DIR, SUPERVISE_LOG_PREFIX, pid);
+}
+
+static int add_client(int fd, pid_t tracee_pid)
+{
+	int i;
+	for (i = 0; i < SUPERVISE_MAX_CLIENTS; i++) {
+		if (!exec_clients[i].active) {
+			exec_clients[i].fd          = fd;
+			exec_clients[i].tracee_pid  = tracee_pid;
+			exec_clients[i].active      = true;
+			if (i >= num_exec_clients)
+				num_exec_clients = i + 1;
+			return 0;
+		}
+	}
+	return -1; /* Too many clients */
+}
+
+static void remove_client(int index)
+{
+	if (index >= 0 && index < num_exec_clients) {
+		exec_clients[index].active = false;
+		/* Shrink num_exec_clients if last slot */
+		while (num_exec_clients > 0 && !exec_clients[num_exec_clients - 1].active)
+			num_exec_clients--;
+	}
+}
+
+/* ===========================================================================
+ * supervise_init: create signalfd + abstract listen socket
+ * =========================================================================== */
+
+int supervise_init(int *ctl_fd, int *sig_fd)
+{
+	struct sockaddr_un sa;
+	int fd, ret;
+	sigset_t mask;
+
+	if (ctl_fd == NULL || sig_fd == NULL)
+		return -1;
+
+	own_pid = getpid();
+	start_time = time(NULL);
+
+	/* --- Create signalfd for SIGCHLD --- */
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+	sigprocmask(SIG_BLOCK, &mask, NULL);
+
+	fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+	if (fd < 0) {
+		note(NULL, WARNING, INTERNAL,
+		     "supervise: signalfd: %s", strerror(errno));
+		return -1;
+	}
+	*sig_fd = fd;
+
+	/* --- Create abstract listen socket --- */
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) {
+		note(NULL, WARNING, INTERNAL,
+		     "supervise: socket: %s", strerror(errno));
+		close(*sig_fd);
+		*sig_fd = -1;
+		return -1;
+	}
+
+	build_sockaddr(&sa, own_pid);
+
+	/* Remove stale socket (shouldn't exist, be safe) */
+	unlink(sa.sun_path);
+
+	ret = bind(fd, (struct sockaddr *)&sa, sizeof(sa));
+	if (ret < 0) {
+		note(NULL, WARNING, INTERNAL,
+		     "supervise: bind: %s", strerror(errno));
+		close(fd);
+		close(*sig_fd);
+		*sig_fd = -1;
+		return -1;
+	}
+
+	ret = listen(fd, 5);
+	if (ret < 0) {
+		note(NULL, WARNING, INTERNAL,
+		     "supervise: listen: %s", strerror(errno));
+		close(fd);
+		close(*sig_fd);
+		*sig_fd = -1;
+		return -1;
+	}
+
+	ctl_fd_global = fd;
+	*ctl_fd = fd;
+
+	note(NULL, INFO, INTERNAL,
+	     "supervise: listening on @proot-exec-%u", own_pid);
+
+	return 0;
+}
+
+/* ===========================================================================
+ * supervise_fini: cleanup
+ * =========================================================================== */
+
+void supervise_fini(void)
+{
+	int i;
+
+	/* Close all pending client sockets */
+	for (i = 0; i < num_exec_clients; i++) {
+		if (exec_clients[i].active) {
+			close(exec_clients[i].fd);
+			exec_clients[i].active = false;
+		}
+	}
+	num_exec_clients = 0;
+
+	if (ctl_fd_global >= 0) {
+		close(ctl_fd_global);
+		ctl_fd_global = -1;
+	}
+}
+
+/* ===========================================================================
+ * supervise_accept_client: accept a new --exec connection
+ * =========================================================================== */
+
+void supervise_accept_client(int ctl_fd)
+{
+	int client_fd;
+	ExecRequest req;
+	pid_t pid;
+	int i;
+
+	client_fd = accept(ctl_fd, NULL, NULL);
+	if (client_fd < 0)
+		return;
+
+	/* Read the exec request */
+	ssize_t n = read(client_fd, &req, sizeof(req));
+	if (n != sizeof(req) || req.argc < 1) {
+		close(client_fd);
+		return;
+	}
+
+	/* Parse argv from the null-separated buffer */
+	char *argv_ptrs[256];
+	int argc = 0;
+	char *p = req.argv;
+	char *end = req.argv + sizeof(req.argv);
+
+	while (argc < req.argc && argc < 255 && p < end) {
+		argv_ptrs[argc++] = p;
+		p += strlen(p) + 1;
+	}
+	argv_ptrs[argc] = NULL;
+
+	if (argc < 1) {
+		close(client_fd);
+		return;
+	}
+
+	VERBOSE(NULL, 2, "supervise: exec request: %s", argv_ptrs[0]);
+
+	/* Fork a new tracee */
+	pid = fork();
+	if (pid < 0) {
+		close(client_fd);
+		return;
+	}
+
+	if (pid == 0) {
+		/* Child: becomes a new tracee */
+		ptrace(PTRACE_TRACEME, 0, NULL, NULL);
+		raise(SIGSTOP);  /* Wait for parent to attach */
+
+		/* Change to requested cwd if provided */
+		if (req.cwd[0] != '\0')
+			chdir(req.cwd);
+
+		/* Exec the command */
+		execvp(argv_ptrs[0], argv_ptrs);
+		_exit(127);
+	}
+
+	/* Parent: track this client */
+	if (add_client(client_fd, pid) < 0) {
+		/* Too many clients, kill the tracee and reject */
+		kill(pid, SIGKILL);
+		waitpid(pid, NULL, 0);
+		close(client_fd);
+		return;
+	}
+
+	VERBOSE(NULL, 2, "supervise: spawned tracee pid=%d for client fd=%d",
+		pid, client_fd);
+}
+
+/* ===========================================================================
+ * supervise_tracee_exited: called when a tracee exits
+ * =========================================================================== */
+
+int supervise_tracee_exited(pid_t pid, int status)
+{
+	ExecResponse resp;
+	int i;
+
+	/* Find which client owns this tracee */
+	for (i = 0; i < num_exec_clients; i++) {
+		if (exec_clients[i].active && exec_clients[i].tracee_pid == pid) {
+			/* Build response */
+			memset(&resp, 0, sizeof(resp));
+			if (WIFEXITED(status)) {
+				resp.exit_status = WEXITSTATUS(status);
+				resp.signaled = false;
+				resp.termsig = 0;
+			} else if (WIFSIGNALED(status)) {
+				resp.exit_status = 128 + WTERMSIG(status);
+				resp.signaled = true;
+				resp.termsig = WTERMSIG(status);
+			}
+
+			/* Send response to client */
+			write(exec_clients[i].fd, &resp, sizeof(resp));
+			close(exec_clients[i].fd);
+			remove_client(i);
+
+			VERBOSE(NULL, 2, "supervise: tracee pid=%d exited: status=%d",
+				pid, resp.exit_status);
+
+			break;
+		}
+	}
+
+	return num_exec_clients;
+}
+
+/* ===========================================================================
+ * supervise_log_exit: write exit log for --exec to read
+ * =========================================================================== */
+
+void supervise_log_exit(const char *who, int status)
+{
+	char path[SUPERVISE_MAX_PATH];
+	FILE *f;
+
+	build_logpath(path, sizeof(path), own_pid);
+	f = fopen(path, "w");
+	if (f == NULL)
+		return;
+
+	if (WIFEXITED(status)) {
+		fprintf(f, "process '%s' exited with status %d (started %lds)",
+			who ? who : "unknown", WEXITSTATUS(status),
+			(long)(time(NULL) - start_time));
+	} else if (WIFSIGNALED(status)) {
+		fprintf(f, "process '%s' killed by signal %d (started %lds)",
+			who ? who : "unknown", WTERMSIG(status),
+			(long)(time(NULL) - start_time));
+	} else {
+		fprintf(f, "process '%s' terminated unexpectedly (started %lds)",
+			who ? who : "unknown",
+			(long)(time(NULL) - start_time));
+	}
+
+	fclose(f);
+}
+
+/* ===========================================================================
+ * supervise_pending_clients
+ * =========================================================================== */
+
+int supervise_pending_clients(void)
+{
+	return num_exec_clients;
+}
+
+/* ===========================================================================
+ * exec_connect: called by proot --exec mode
+ * =========================================================================== */
+
+int exec_connect(pid_t target_pid, int argc, char *const argv[])
+{
+	struct sockaddr_un sa;
+	ExecRequest req;
+	ExecResponse resp;
+	int fd;
+	ssize_t n;
+	int i;
+	char *p;
+
+	/* Build the abstract socket address */
+	memset(&sa, 0, sizeof(sa));
+	sa.sun_family = AF_UNIX;
+	sa.sun_path[0] = '\0';
+	snprintf(&sa.sun_path[1], sizeof(sa.sun_path) - 1,
+		 "%s%u", SUPERVISE_SOCKET_PREFIX, target_pid);
+
+	/* Connect to the supervisor */
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0)
+		goto try_log;
+
+	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+		close(fd);
+		fd = -1;
+		goto try_log;
+	}
+
+	/* Build the exec request */
+	memset(&req, 0, sizeof(req));
+	req.argc = argc;
+
+	p = req.argv;
+	for (i = 0; i < argc; i++) {
+		size_t remaining = sizeof(req.argv) - (p - req.argv);
+		size_t len = strlen(argv[i]) + 1;
+		if (len > remaining) {
+			close(fd);
+			errno = E2BIG;
+			return -1;
+		}
+		memcpy(p, argv[i], len);
+		p += len;
+	}
+
+	/* Send request */
+	if (write(fd, &req, sizeof(req)) != sizeof(req)) {
+		close(fd);
+		errno = EIO;
+		return -1;
+	}
+
+	/* Wait for response (blocks until the tracee finishes) */
+	n = read(fd, &resp, sizeof(resp));
+	close(fd);
+
+	if (n != sizeof(resp)) {
+		errno = EIO;
+		return -1;
+	}
+
+	return resp.exit_status;
+
+try_log:
+	/* Supervisor not reachable — try reading its exit log */
+	{
+		char logpath[SUPERVISE_MAX_PATH];
+		char buf[256];
+		FILE *f;
+		int saved_errno = errno;
+
+		build_logpath(logpath, sizeof(logpath), target_pid);
+		f = fopen(logpath, "r");
+		if (f != NULL) {
+			if (fgets(buf, sizeof(buf), f) != NULL) {
+				/* Remove trailing newline */
+				size_t blen = strlen(buf);
+				if (blen > 0 && buf[blen - 1] == '\n')
+					buf[blen - 1] = '\0';
+				fprintf(stderr, "supervise: target exited: %s\n", buf);
+			}
+			fclose(f);
+			errno = ESRCH;
+			return -1;
+		}
+
+		/* Neither socket nor log found */
+		errno = saved_errno;
+		fprintf(stderr, "supervise: no target process %d found\n", target_pid);
+		return -1;
+	}
+}
