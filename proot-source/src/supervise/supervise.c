@@ -339,7 +339,7 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 		 * come, so syscalls are not intercepted.
 		 * By setting SECCOMP_DISABLED, we force PTRACE_SYSCALL
 		 * which intercepts every syscall for path translation. */
-		child_tracee->seccomp = SECCOMP_DISABLED;
+		child_tracee->seccomp = DISABLED;
 			child_tracee->tool_name = root_tracee->tool_name;
 
 			/* The child just did PTRACE_TRACEME + raise(SIGSTOP).
