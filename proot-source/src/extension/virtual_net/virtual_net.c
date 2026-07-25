@@ -197,9 +197,30 @@ static uint32_t vnp_generate_token(void)
 static int vnp_registry_open(const char *proxy_name, int lock_type)
 {
 	char path[VNP_SOCKBUF_LEN];
+	char dir[VNP_SOCKBUF_LEN];
 	int fd;
+
 	snprintf(path, sizeof(path), "%s/%s/%s",
 		 VNP_TMP_DIR, proxy_name, VNP_REG_LOCK);
+
+	/* Ensure all parent directories exist (mkdir -p equivalent) */
+	snprintf(dir, sizeof(dir), "%s", VNP_TMP_DIR);
+	if (access(dir, F_OK) < 0) {
+		if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
+			note(NULL, WARNING, INTERNAL,
+				"virtual_net: failed to create registry base dir %s", dir);
+			return -1;
+		}
+	}
+	snprintf(dir, sizeof(dir), "%s/%s", VNP_TMP_DIR, proxy_name);
+	if (access(dir, F_OK) < 0) {
+		if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
+			note(NULL, WARNING, INTERNAL,
+				"virtual_net: failed to create registry dir %s", dir);
+			return -1;
+		}
+	}
+
 	fd = open(path, O_CREAT | O_RDWR, 0644);
 	if (fd < 0) {
 		note(NULL, WARNING, INTERNAL,
@@ -369,7 +390,7 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
 		return 0;
 
-	note(tracee, WARNING, SYSTEM, "vnet: bind port %u on fd %lu", port, (unsigned long)sockfd);
+	note(tracee, WARNING, INTERNAL, "vnet: bind port %u on fd %lu", port, (unsigned long)sockfd);
 
 	/* Track this fd as virtual */
 	entry = vnp_find_fd(config, sockfd);
@@ -415,8 +436,35 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 		if (new_addr == 0)
 			return 0;
 
-		if (write_data(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
-			return 0;
+		/* Write sockaddr_un directly with PTRACE_POKEDATA (no workaround).
+		 * Handles trailing bytes like write_data() does, but always
+		 * uses raw ptrace to avoid process_vm_writev + workaround. */
+		{
+			const word_t *words = (const word_t *)&sa_unix;
+			size_t size = sizeof(sa_unix);
+			size_t nwords = size / sizeof(word_t);
+			size_t trailing = size % sizeof(word_t);
+			size_t i;
+
+			for (i = 0; i < nwords; i++) {
+				ptrace(PTRACE_POKEDATA, tracee->pid,
+				       (word_t)(new_addr + i * sizeof(word_t)),
+				       words[i]);
+			}
+
+			if (trailing > 0) {
+				word_t last_word = ptrace(PTRACE_PEEKDATA, tracee->pid,
+					(word_t)(new_addr + nwords * sizeof(word_t)));
+				uint8_t *last_dest = (uint8_t *)&last_word;
+				const uint8_t *last_src = (const uint8_t *)&sa_unix;
+				last_src += nwords * sizeof(word_t);
+				for (i = 0; i < trailing; i++)
+					last_dest[i] = last_src[i];
+				ptrace(PTRACE_POKEDATA, tracee->pid,
+				       (word_t)(new_addr + nwords * sizeof(word_t)),
+				       last_word);
+			}
+		}
 
 		poke_reg(tracee, SYSARG_1, sockfd);
 		poke_reg(tracee, SYSARG_2, new_addr);
@@ -441,7 +489,7 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
 		return 0;
 
-	note(tracee, WARNING, SYSTEM, "vnet: connect port %u on fd %lu", port, (unsigned long)sockfd);
+	note(tracee, WARNING, INTERNAL, "vnet: connect port %u on fd %lu", port, (unsigned long)sockfd);
 
 	if (family == AF_INET) {
 		/* Only intercept loopback connections */
@@ -526,7 +574,33 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 
 				word_t new_addr = alloc_mem(tracee, sizeof(sa_unix));
 				if (new_addr != 0) {
-					write_data(tracee, new_addr, &sa_unix, sizeof(sa_unix));
+					/* Write sockaddr_un directly with PTRACE_POKEDATA */
+				{
+					const word_t *words = (const word_t *)&sa_unix;
+					size_t size = sizeof(sa_unix);
+					size_t nwords = size / sizeof(word_t);
+					size_t trailing = size % sizeof(word_t);
+					size_t i;
+
+					for (i = 0; i < nwords; i++) {
+						ptrace(PTRACE_POKEDATA, tracee->pid,
+						       (word_t)(new_addr + i * sizeof(word_t)),
+						       words[i]);
+					}
+
+					if (trailing > 0) {
+						word_t last_word = ptrace(PTRACE_PEEKDATA, tracee->pid,
+							(word_t)(new_addr + nwords * sizeof(word_t)));
+						uint8_t *last_dest = (uint8_t *)&last_word;
+						const uint8_t *last_src = (const uint8_t *)&sa_unix;
+						last_src += nwords * sizeof(word_t);
+						for (i = 0; i < trailing; i++)
+							last_dest[i] = last_src[i];
+						ptrace(PTRACE_POKEDATA, tracee->pid,
+						       (word_t)(new_addr + nwords * sizeof(word_t)),
+						       last_word);
+					}
+				}
 					poke_reg(tracee, SYSARG_2, new_addr);
 					poke_reg(tracee, SYSARG_3, sizeof(sa_unix));
 				}
@@ -706,8 +780,11 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 		case PR_socket: {
 			int fd = (int)result;
 			VnpFdEntry *entry = vnp_find_fd(config, fd);
-			if (entry == NULL)
-				vnp_add_fd(config, tracee->pid, fd, 0, AF_INET);
+			if (entry == NULL) {
+				word_t domain = peek_reg(tracee, ORIGINAL, SYSARG_1);
+				vnp_add_fd(config, tracee->pid, fd, 0,
+					   (domain == AF_INET6) ? AF_INET6 : AF_INET);
+			}
 			return 0;
 		}
 		case PR_accept:

@@ -1,0 +1,29 @@
+Levantamos server bajo proxy
+Esto no deberia alcanzar el servidor
+curl: (7) Failed to connect to localhost:8000 after 8 ms: Could not connect to server
+Esto deberia de alcanzar el servidor
+proot warning: vnet: connect port 65535 on fd 3
+proot warning: vnet: connect port 8000 on fd 4
+proot warning: vnet: connect port 65535 on fd 3
+proot warning: vnet: bind port 8000 on fd 3
+proot warning: vnet: connect port 8000 on fd 4
+curl: (7) Failed to connect to localhost:8000 after 6 ms: Could not connect to server
+talloc: access after free error - first free may be at ./tracee/tracee.c:376
+Bad talloc magic value - access after free
+proot warning: signal 6 received from process 26608
+Esto no deberia de alcanzar el servidor
+proot warning: vnet: connect port 8000 on fd 4
+proot warning: vnet: connect port 8000 on fd 4
+curl: (7) Failed to connect to localhost:8000 after 2 ms: Could not connect to server
+talloc: access after free error - first free may be at ./tracee/tracee.c:376
+Bad talloc magic value - access after free
+proot warning: signal 6 received from process 26613
+Esto no deberia de alcanzar el servidor
+curl: (7) Failed to connect to localhost:8000 after 3 ms: Could not connect to server
+talloc: access after free error - first free may be at ./tracee/tracee.c:376
+Bad talloc magic value - access after free
+proot warning: signal 6 received from process 26620
+proot info: vpid 1: terminated with signal 15
+talloc: access after free error - first free may be at ./tracee/tracee.c:376
+Bad talloc magic value - access after free
+proot warning: signal 6 received from process 26570

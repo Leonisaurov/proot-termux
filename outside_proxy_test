@@ -1,0 +1,22 @@
+#!/bin/env bash
+set -m
+
+PORT=8000
+
+echo "Levantamos server bajo proxy"
+PROOT_FLAGS="--proxy web" ./alpine_rootfs python -m http.server $PORT &
+sleep 1
+
+echo "Esto no deberia alcanzar el servidor"
+curl localhost:$PORT
+
+echo "Esto deberia de alcanzar el servidor"
+PROOT_FLAGS="--proxy web" ./alpine_rootfs curl localhost:$PORT
+
+echo "Esto no deberia de alcanzar el servidor"
+PROOT_FLAGS="--proxy web2" ./alpine_rootfs curl localhost:$PORT
+
+echo "Esto no deberia de alcanzar el servidor"
+PROOT_FLAGS="" ./alpine_rootfs curl localhost:$PORT
+
+kill %1
