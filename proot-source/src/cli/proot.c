@@ -452,6 +452,17 @@ static int handle_option_supervise(Tracee *tracee, const Cli *cli UNUSED, const 
 }
 
 /**
+ * Handler for "--exec" (only reached for --help display).
+ * The actual dispatch happens in main() before parse_config().
+ * If we get here, something went wrong — show usage.
+ */
+static int handle_option_exec(Tracee *tracee UNUSED, const Cli *cli, const char *value UNUSED)
+{
+	print_usage(tracee, cli, false);
+	return -1;
+}
+
+/**
  * Initialize @tracee->qemu.
  */
 static int post_initialize_exe(Tracee *tracee, const Cli *cli UNUSED,

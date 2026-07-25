@@ -73,6 +73,7 @@ static int handle_option_port_mapping(Tracee *tracee, const Cli *cli, const char
 static int handle_option_proxy(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_mbind(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_supervise(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_exec(Tracee *tracee, const Cli *cli, const char *value);
 
 static int pre_initialize_bindings(Tracee *, const Cli *, size_t, char *const *, size_t);
 static int post_initialize_exe(Tracee *, const Cli *, size_t, char *const *, size_t);
@@ -330,6 +331,16 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
 	  .handler = handle_option_supervise,
 	  .description = "Keep event loop alive after root tracee exits. "
 	                 "Listens on an abstract socket for --exec connections.",
+	  .detail = "",
+	},
+	{ .class = "Extension options",
+	  .arguments = {
+		{ .name = "--exec", .separator = ' ', .value = "PID command" },
+		{ .name = NULL, .separator = '\0', .value = NULL }
+	  },
+	  .handler = handle_option_exec,
+	  .description = "Execute a command inside a --supervise instance. "
+	                 "Usage: --exec <PID> <command> [args...]",
 	  .detail = "",
 	},
         { .class = "Extension options",
