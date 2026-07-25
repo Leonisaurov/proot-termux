@@ -331,7 +331,15 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 
 			/* Inherit basic flags */
 			child_tracee->verbose  = root_tracee->verbose;
-			child_tracee->seccomp  = root_tracee->seccomp;
+			/* Disable seccomp for exec children: the child process was
+		 * forked from the supervisor and did NOT install the seccomp
+		 * BPF filter (enable_syscall_filtering() was not called).
+		 * If we inherit seccomp=ENABLED, restart_tracee() uses
+		 * PTRACE_CONT and expects kernel seccomp events that never
+		 * come, so syscalls are not intercepted.
+		 * By setting SECCOMP_DISABLED, we force PTRACE_SYSCALL
+		 * which intercepts every syscall for path translation. */
+		child_tracee->seccomp = SECCOMP_DISABLED;
 			child_tracee->tool_name = root_tracee->tool_name;
 
 			/* The child just did PTRACE_TRACEME + raise(SIGSTOP).
