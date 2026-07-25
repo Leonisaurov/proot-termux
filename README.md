@@ -180,6 +180,14 @@ the inner process — it only uses seccomp internally for interception.
 A `--seccomp-filter` feature would add an ADDITIONAL seccomp filter on
 top of proot's existing one.
 
+### `--bpf-isolated`, `--perf-isolated`, `--handle-isolated`
+Block bpf(), perf_event_open(), and open_by_handle_at() syscalls.
+These are complex to emulate (require BPF bytecode interpreter, perf
+counters, and filesystem handle translation respectively), so they
+return ENOSYS/ENOENT/EOPNOTSUPP without revealing host existence.
+
+Full emulation is possible but requires significant effort. See TODO.
+
 ---
 
 ## License

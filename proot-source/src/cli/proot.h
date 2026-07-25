@@ -75,6 +75,15 @@ static int handle_option_mbind(Tracee *tracee, const Cli *cli, const char *value
 static int handle_option_supervise(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_exec(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_proc_isolation(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_proc_isolated(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_ptrace_isolated(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_reboot_isolated(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_swap_isolated(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_kexec_isolated(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_ioport_isolated(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_bpf_isolated(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_perf_isolated(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_handle_isolated(Tracee *tracee, const Cli *cli, const char *value);
 
 static int pre_initialize_bindings(Tracee *, const Cli *, size_t, char *const *, size_t);
 static int post_initialize_exe(Tracee *, const Cli *, size_t, char *const *, size_t);
@@ -329,7 +338,80 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
                 { .name = "--proc-isolation", .separator = '\0', .value = NULL },
                 { .name = NULL, .separator = '\0', .value = NULL } },
           .handler = handle_option_proc_isolation,
-          .description = "Hide host processes from /proc/, ptrace(), and kill().",
+          .description = "Hide host processes from /proc/, ptrace(), and kill() (sets proc+ptrace isolation).",
+          .detail = "\tThis is a convenience flag that enables both --proc-isolated and\n\
+\t--ptrace-isolated. Use the individual flags for finer control.",
+        },
+        { .class = "Extension options",
+          .arguments = {
+                { .name = "--proc-isolated", .separator = '\0', .value = NULL },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_proc_isolated,
+          .description = "Hide host processes from /proc/ and block kill() to host PIDs.",
+          .detail = "",
+        },
+        { .class = "Extension options",
+          .arguments = {
+                { .name = "--ptrace-isolated", .separator = '\0', .value = NULL },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_ptrace_isolated,
+          .description = "Block ptrace() to host processes (debuggers still work inside).",
+          .detail = "",
+        },
+        { .class = "Extension options",
+          .arguments = {
+                { .name = "--reboot-isolated", .separator = '\0', .value = NULL },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_reboot_isolated,
+          .description = "Void reboot() syscall (returns 0 without rebooting).",
+          .detail = "",
+        },
+        { .class = "Extension options",
+          .arguments = {
+                { .name = "--swap-isolated", .separator = '\0', .value = NULL },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_swap_isolated,
+          .description = "Block swapon()/swapoff() syscalls (returns ENOSYS).",
+          .detail = "",
+        },
+        { .class = "Extension options",
+          .arguments = {
+                { .name = "--kexec-isolated", .separator = '\0', .value = NULL },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_kexec_isolated,
+          .description = "Void kexec_load() syscall (returns 0 without loading).",
+          .detail = "",
+        },
+        { .class = "Extension options",
+          .arguments = {
+                { .name = "--ioport-isolated", .separator = '\0', .value = NULL },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_ioport_isolated,
+          .description = "Void iopl()/ioperm() syscalls (returns 0 without changing ports).",
+          .detail = "",
+        },
+        { .class = "Extension options",
+          .arguments = {
+                { .name = "--bpf-isolated", .separator = '\0', .value = NULL },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_bpf_isolated,
+          .description = "Block bpf() syscall (returns ENOSYS).",
+          .detail = "",
+        },
+        { .class = "Extension options",
+          .arguments = {
+                { .name = "--perf-isolated", .separator = '\0', .value = NULL },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_perf_isolated,
+          .description = "Block perf_event_open() syscall (returns ENOENT).",
+          .detail = "",
+        },
+        { .class = "Extension options",
+          .arguments = {
+                { .name = "--handle-isolated", .separator = '\0', .value = NULL },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_handle_isolated,
+          .description = "Block open_by_handle_at() syscall (returns EOPNOTSUPP).",
           .detail = "",
         },
 	{ .class = "Extension options",

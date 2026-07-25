@@ -485,15 +485,86 @@ static int handle_option_exec(Tracee *tracee, const Cli *cli UNUSED, const char 
 	return 0;
 }
 
-static int handle_option_proc_isolation(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+/**
+ * Helper: add an isolation flag to the proc_isolation extension.
+ * If the extension already exists, OR the flag into config->flags.
+ * Otherwise, create a new extension with just this flag.
+ */
+static int handle_proc_isolation_flag(Tracee *tracee, unsigned int flag)
 {
 	int status;
 
-	status = initialize_extension(tracee, hpc_callback, NULL);
+	Extension *ext = get_extension(tracee, hpc_callback);
+	if (ext != NULL) {
+		HpcConfig *config = talloc_get_type_abort(ext->config, HpcConfig);
+		if (config != NULL) {
+			config->flags |= flag;
+			VERBOSE(tracee, 2, "proc_isolation: added flag 0x%x (now 0x%x)", flag, config->flags);
+			return 0;
+		}
+	}
+
+	status = initialize_extension(tracee, hpc_callback, (void *)(uintptr_t)flag);
 	if (status < 0)
 		note(tracee, WARNING, INTERNAL, "proc_isolation not initialized");
 
 	return 0;
+}
+
+static int handle_option_proc_isolation(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	int status;
+
+	status = handle_proc_isolation_flag(tracee, ISOLATE_PROC | ISOLATE_PTRACE);
+	if (status < 0)
+		note(tracee, WARNING, INTERNAL, "proc_isolation not initialized");
+
+	return 0;
+}
+
+static int handle_option_proc_isolated(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	return handle_proc_isolation_flag(tracee, ISOLATE_PROC);
+}
+
+static int handle_option_ptrace_isolated(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	return handle_proc_isolation_flag(tracee, ISOLATE_PTRACE);
+}
+
+static int handle_option_reboot_isolated(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	return handle_proc_isolation_flag(tracee, ISOLATE_REBOOT);
+}
+
+static int handle_option_swap_isolated(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	return handle_proc_isolation_flag(tracee, ISOLATE_SWAP);
+}
+
+static int handle_option_kexec_isolated(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	return handle_proc_isolation_flag(tracee, ISOLATE_KEXEC);
+}
+
+static int handle_option_ioport_isolated(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	return handle_proc_isolation_flag(tracee, ISOLATE_IOPORT);
+}
+
+static int handle_option_bpf_isolated(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	return handle_proc_isolation_flag(tracee, ISOLATE_BPF);
+}
+
+static int handle_option_perf_isolated(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	return handle_proc_isolation_flag(tracee, ISOLATE_PERF);
+}
+
+static int handle_option_handle_isolated(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	return handle_proc_isolation_flag(tracee, ISOLATE_HANDLE);
 }
 
 /**
