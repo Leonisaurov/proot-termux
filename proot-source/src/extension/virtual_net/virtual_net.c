@@ -390,7 +390,7 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
 		return 0;
 
-	note(tracee, WARNING, INTERNAL, "vnet: bind port %u on fd %lu", port, (unsigned long)sockfd);
+	VERBOSE(tracee, 1, "vnet: bind port %u on fd %lu", port, (unsigned long)sockfd);
 
 	/* Track this fd as virtual */
 	entry = vnp_find_fd(config, sockfd);
@@ -489,7 +489,7 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
 		return 0;
 
-	note(tracee, WARNING, INTERNAL, "vnet: connect port %u on fd %lu", port, (unsigned long)sockfd);
+	VERBOSE(tracee, 1, "vnet: connect port %u on fd %lu", port, (unsigned long)sockfd);
 
 	if (family == AF_INET) {
 		/* Only intercept loopback connections */
