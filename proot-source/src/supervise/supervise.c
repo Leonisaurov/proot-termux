@@ -33,6 +33,7 @@
 #include <time.h>       /* time(2), */
 #include <stdbool.h>    /* bool, true, false */
 #include <sys/stat.h>   /* mkdir(2) */
+#include <linux/sched.h> /* CLONE_VM, CLONE_FS */
 
 #include <assert.h>
 
