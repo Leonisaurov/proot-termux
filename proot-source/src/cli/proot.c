@@ -22,6 +22,7 @@
 
 #include <string.h>    /* str*(3), */
 #include <assert.h>    /* assert(3), */
+#include <errno.h>     /* errno, */
 #include <stdio.h>     /* printf(3), fflush(3), */
 #include <unistd.h>    /* write(2), */
 
