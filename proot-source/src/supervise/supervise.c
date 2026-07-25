@@ -111,7 +111,7 @@ static void remove_client(int index)
  * supervise_init: create signalfd + abstract listen socket
  * =========================================================================== */
 
-int supervise_init(int *ctl_fd, int *sig_fd)
+int supervise_init(int *ctl_fd, int *sig_fd, int verbose_level)
 {
 	struct sockaddr_un sa;
 	int fd, ret;
@@ -174,8 +174,9 @@ int supervise_init(int *ctl_fd, int *sig_fd)
 	ctl_fd_global = fd;
 	*ctl_fd = fd;
 
-	note(NULL, INFO, INTERNAL,
-	     "supervise: listening on @proot-exec-%u", own_pid);
+	if (verbose_level >= 1)
+		note(NULL, INFO, INTERNAL,
+		     "supervise: listening on @proot-exec-%u", own_pid);
 
 	return 0;
 }

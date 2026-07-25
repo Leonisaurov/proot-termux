@@ -356,7 +356,7 @@ int event_loop(Tracee *root_tracee)
 
 	if (supervise) {
 		/* Initialize supervisor: signalfd + abstract listen socket */
-		if (supervise_init(&ctl_fd, &sig_fd) < 0) {
+		if (supervise_init(&ctl_fd, &sig_fd, root_tracee->verbose) < 0) {
 			supervise = false;
 			note(NULL, WARNING, INTERNAL,
 			     "supervise: init failed, falling back to normal mode");
@@ -441,18 +441,29 @@ int event_loop(Tracee *root_tracee)
 					signal = handle_tracee_event(tracee, wait_status);
 					(void) restart_tracee(tracee, signal);
 
-					/* If a tracee exited, notify the supervisor.
-					 * This is supervise-specific: check if this tracee
-					 * was spawned by an --exec client. */
-					if (WIFEXITED(wait_status) || WIFSIGNALED(wait_status)) {
-						int remaining = supervise_tracee_exited(pid, wait_status);
+				/* If a tracee exited, notify the supervisor.
+				 * This is supervise-specific: check if this tracee
+				 * was spawned by an --exec client. */
+				if (WIFEXITED(wait_status) || WIFSIGNALED(wait_status)) {
+					int remaining = supervise_tracee_exited(pid, wait_status);
 
-						/* If no more exec clients and root tracee is dead, exit */
-						if (remaining == 0 && ctl_fd < 0) {
-							supervise_fini();
-							goto done;
+					if (pid == root_tracee->pid) {
+						/* Root tracee exited: log it and stop
+						 * accepting new --exec connections.
+						 * Stay alive only if exec clients are pending. */
+						supervise_log_exit(tracee->exe, wait_status);
+						if (ctl_fd >= 0) {
+							close(ctl_fd);
+							ctl_fd = -1;
 						}
 					}
+
+					/* If no more exec clients, we can shut down */
+					if (remaining == 0 && ctl_fd < 0) {
+						supervise_fini();
+						goto done;
+					}
+				}
 				}
 			}
 

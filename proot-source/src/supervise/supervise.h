@@ -58,7 +58,7 @@ typedef struct {
  * Returns 0 on success, -1 on error.
  * On success, *ctl_fd and *sig_fd are populated.
  */
-extern int supervise_init(int *ctl_fd, int *sig_fd);
+extern int supervise_init(int *ctl_fd, int *sig_fd, int verbose_level);
 
 /**
  * Shutdown supervisor mode.
