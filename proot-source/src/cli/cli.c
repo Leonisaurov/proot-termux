@@ -507,11 +507,17 @@ int main(int argc, char *const argv[])
 	 * a local tracee. The command is the first non-option argument,
 	 * determined by parse_config's return value (argc_offset). */
 	if (tracee->exec_target > 0) {
+		VERBOSE(tracee, 2, "--exec: connecting to PID %d, command: %s",
+			tracee->exec_target, argv[status]);
+
 		int ret = exec_connect(tracee->exec_target, argc - status, &argv[status]);
 		if (ret < 0) {
 			note(tracee, ERROR, INTERNAL, "proot --exec: %s", strerror(errno));
 			goto error;
 		}
+
+		/* Free tracee to avoid talloc leak report on exit */
+		TALLOC_FREE(tracee);
 		exit(ret);
 	}
 

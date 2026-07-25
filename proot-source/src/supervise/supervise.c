@@ -248,7 +248,7 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 		return;
 	}
 
-	VERBOSE(supervise_tracee, 2, "supervise: exec request: %s", argv_ptrs[0]);
+	VERBOSE(root_tracee, 2, "supervise: exec request: %s", argv_ptrs[0]);
 
 	/* Fork a new tracee */
 	pid = fork();
@@ -346,7 +346,7 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 		return;
 	}
 
-	VERBOSE(supervise_tracee, 2, "supervise: spawned tracee pid=%d for client fd=%d",
+	VERBOSE(root_tracee, 2, "supervise: spawned tracee pid=%d for client fd=%d",
 		pid, client_fd);
 }
 
@@ -379,7 +379,7 @@ int supervise_tracee_exited(pid_t pid, int status)
 			close(exec_clients[i].fd);
 			remove_client(i);
 
-			VERBOSE(supervise_tracee, 2, "supervise: tracee pid=%d exited: status=%d",
+			VERBOSE(root_tracee, 2, "supervise: tracee pid=%d exited: status=%d",
 				pid, resp.exit_status);
 
 			break;
