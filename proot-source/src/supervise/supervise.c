@@ -34,6 +34,7 @@
 #include <stdbool.h>    /* bool, true, false */
 #include <sys/stat.h>   /* mkdir(2) */
 #include <linux/sched.h> /* CLONE_VM, CLONE_FS */
+#include <inttypes.h>    /* PRIu64 */
 
 #include <assert.h>
 
