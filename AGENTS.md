@@ -268,7 +268,7 @@ process 'server' killed by signal 9 (started 120s)
 Siempre que se lance un workflow, usar `gita notify` para esperar el resultado y leer los logs:
 
 ```bash
-cd /data/data/com.termux/files/home/Develop/Clones/proot-termux
+cd /data/data/com.termux/files/home/Develop/Patch/proot-termux
 gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Success)'
 ```
 
@@ -276,12 +276,27 @@ gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Succ
 - `gita notify` bloquea hasta que el workflow termina (o retorna inmediatamente si ya terminó)
 - NO usar `timeout`
 
+### Repositorios
+
+Hay dos remotes configurados:
+
+| Remote | URL | Estado |
+|--------|-----|--------|
+| `origin` | `https://github.com/Leonisaurov/proot-termux.git` | ✅ Activo (preferido) |
+| `upstream` | `https://github.com/Leonisaurov/termux-packages.git` | ⛔ Deprecado |
+
+**Siempre usar `origin` para pushes.** `upstream` está deprecado y ya no debe usarse.
+
+```bash
+git push origin master
+```
+
 ## Development
 
 1. Edit files in `proot-source/src/`
 2. Bump `TERMUX_PKG_REVISION` in `packages/proot/build.sh` ← **IMPORTANTE: no olvidar**
 3. Commit with descriptive message
-4. Push — workflow triggers automatically
+4. Push to `origin` — workflow triggers automatically
 5. Siempre verificar con `gita notify build-proot.yml`
 
 ### Commit Guidelines
