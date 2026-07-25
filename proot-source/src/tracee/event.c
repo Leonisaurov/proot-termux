@@ -575,7 +575,6 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		signal = (tracee_status & 0xfff00) >> 8;
 
 		switch (signal) {
-			static bool deliver_sigtrap = false;
 
 		case SIGTRAP: {
 			const unsigned long default_ptrace_options = (
@@ -595,10 +594,10 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			 * related to the tracing loop, others SIGTRAP
 			 * carry tracing information because of
 			 * TRACE*FORK/CLONE/EXEC.  */
-			if (deliver_sigtrap)
+			if (tracee->ptrace_options_set)
 				break;  /* Deliver this signal as-is.  */
 
-			deliver_sigtrap = true;
+			tracee->ptrace_options_set = true;
 
 			/* Try to enable seccomp mode 2...  */
 			status = ptrace(PTRACE_SETOPTIONS, tracee->pid, NULL,

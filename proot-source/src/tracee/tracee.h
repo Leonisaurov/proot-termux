@@ -192,6 +192,12 @@ typedef struct tracee {
 		SIGSTOP_PENDING,      /* Block SIGSTOP until the parent is unknown.  */
 	} sigstop;
 
+	/* True if ptrace options have been set for this tracee (first
+	 * bare SIGTRAP was processed with PTRACE_SETOPTIONS).  Each
+	 * tracee needs its own PTRACE_SETOPTIONS call, not just the
+	 * first tracee (e.g. exec children from --supervise).  */
+	bool ptrace_options_set;
+
 	/* True if next SIGSYS caused by seccomp should be silently dropped
 	 * without affecting state of any registers.  */
 	bool skip_next_seccomp_signal;
