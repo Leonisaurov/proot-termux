@@ -217,4 +217,4 @@ if [ "$#" -eq "0" ]; then
 	set -- bash
 fi
 
-$SUDO docker exec $CI_OPT --env "DOCKER_EXEC_PID_FILE_PATH=$DOCKER_EXEC_PID_FILE_PATH" --interactive $DOCKER_TTY $TERMUX_DOCKER_EXEC_EXTRA_ARGS $CONTAINER_NAME "$@"
+$SUDO docker exec $CI_OPT --env "DOCKER_EXEC_PID_FILE_PATH=$DOCKER_EXEC_PID_FILE_PATH" --interactive $DOCKER_TTY --workdir "$CONTAINER_HOME_DIR/proot-termux" $TERMUX_DOCKER_EXEC_EXTRA_ARGS $CONTAINER_NAME "$@"
