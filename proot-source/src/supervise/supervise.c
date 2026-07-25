@@ -345,8 +345,6 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 			/* The child just did PTRACE_TRACEME + raise(SIGSTOP).
 			 * Set sigstop to PENDING so the event loop knows
 			 * to expect and handle this initial stop properly. */
-			child_tracee->sigstop = SIGSTOP_PENDING;
-
 			/* Copy filesystem namespace with bindings.
 			 * This gives the child the same rootfs, cwd,
 			 * and bindings as the supervisor. */
