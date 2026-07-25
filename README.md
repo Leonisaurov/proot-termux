@@ -144,6 +144,44 @@ To access the internet, run proot without `--proxy`.
 
 ---
 
+## Planned Features
+
+### `--fake-net`
+Fake network namespace: intercept `/proc/net/`, `/sys/class/net/`, and
+netlink sockets (rtnetlink) to show only `lo` interface. Tools like
+`ip addr`, `ifconfig`, `ss` would no longer expose real host interfaces.
+
+Rationale: Currently `--proxy` intercepts TCP/UDP but network discovery
+tools still leak host network information.
+
+### `--hostname NAME`
+Override `/proc/sys/kernel/hostname` and `hostname` syscall to show
+a fake hostname inside the sandbox.
+
+### `--hide-uid`
+Intercept `/proc/self/status` and `getuid`/`geteuid` syscalls to show
+fake UID/GID (complement to existing `--change-id`).
+
+### `--isolate-pid`
+Hide host processes from `/proc/` inside the sandbox (partial pid
+namespace emulation). High effort: requires intercepting `readdir`
+on `/proc` and `stat` on `/proc/[pid]/`.
+
+### `--seccomp-filter`
+Install a seccomp-bpf filter inside the sandbox to block dangerous
+syscalls: `ptrace`, `perf_event_open`, `bpf`, `kexec_load`,
+`open_by_handle_at`, etc.
+
+**Note on ptrace:** A `--seccomp-filter` would block `ptrace` syscall
+inside the sandbox. This means debuggers (gdb, strace) would NOT work
+inside the sandbox. If ptrace access is needed, use proot without
+`--seccomp-filter`. Proot itself does NOT use seccomp-filter to restrict
+the inner process — it only uses seccomp internally for interception.
+A `--seccomp-filter` feature would add an ADDITIONAL seccomp filter on
+top of proot's existing one.
+
+---
+
 ## License
 
 This project is derived from [termux-packages](https://github.com/termux/termux-packages) which is licensed under GPL-3.0. The proot source is licensed under GPL-2.0. See individual source files for details.
