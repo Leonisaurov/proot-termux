@@ -477,8 +477,15 @@ int main(int argc, char *const argv[])
 
 	/* Dispatch --exec mode: connect to a supervisor and run a command.
 	 * Usage: proot --exec <PID> <command...>
-	 * This never enters the event loop — it connects, runs, and exits. */
-	if (argc >= 4 && strcmp(argv[1], "--exec") == 0) {
+	 * This catches ALL invocations where argv[1] == "--exec",
+	 * even with wrong number of args, so it never reaches parse_config()
+	 * which would report "unknown option". */
+	if (argc > 1 && strcmp(argv[1], "--exec") == 0) {
+		if (argc < 4) {
+			fprintf(stderr, "proot --exec: usage: proot --exec <PID> <command> [args...]\n");
+			exit(EXIT_FAILURE);
+		}
+
 		char *end = NULL;
 		errno = 0;
 		pid_t target_pid = (pid_t)strtol(argv[2], &end, 10);
