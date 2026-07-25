@@ -339,8 +339,7 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
 		{ .name = NULL, .separator = '\0', .value = NULL }
 	  },
 	  .handler = handle_option_exec,
-	  .description = "Execute a command inside a --supervise instance. "
-	                 "Usage: --exec <PID> <command> [args...]",
+	  .description = "Execute command in --supervise instance.",
 	  .detail = "",
 	},
         { .class = "Extension options",

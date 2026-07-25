@@ -196,6 +196,7 @@ Tracee *new_dummy_tracee(TALLOC_CTX *context)
 	tracee->heap = talloc_zero(tracee, Heap);
 	tracee->auxv_fd = -1;
 	tracee->supervise = false;
+	tracee->exec_target = 0;
 	if (tracee->fs == NULL || tracee->heap == NULL)
 		goto no_mem;
 

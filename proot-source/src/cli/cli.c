@@ -475,54 +475,6 @@ int main(int argc, char *const argv[])
 	talloc_set_log_stderr();
 #endif
 
-	/* Dispatch --exec mode: connect to a supervisor and run a command.
-	 * Usage: proot --exec <PID> <command...>
-	 * This catches ALL invocations where argv[1] == "--exec",
-	 * even with wrong number of args, so it never reaches parse_config()
-	 * which would report "unknown option". */
-	if (argc > 1 && strcmp(argv[1], "--exec") == 0) {
-		if (argc < 3) {
-			fprintf(stderr, "proot --exec: usage: proot --exec <PID> <command> [args...]\n");
-			exit(EXIT_FAILURE);
-		}
-
-		char *end = NULL;
-		errno = 0;
-		pid_t target_pid = (pid_t)strtol(argv[2], &end, 10);
-		if (errno != 0 || end == argv[2] || *end != '\0') {
-			fprintf(stderr, "proot --exec: invalid PID '%s'\n", argv[2]);
-			exit(EXIT_FAILURE);
-		}
-
-		/* Find the command: skip any proot flags between --exec PID
-		 * and the command. This allows usage like:
-		 *   proot --exec 1234 -r /rootfs -b /host:/guest /bin/sh
-		 * to correctly execute /bin/sh inside the supervisor context.
-		 *
-		 * Heuristic: skip args starting with '-'. If the next arg
-		 * doesn't start with '-', it's a flag value — skip it too. */
-		int cmd_idx;
-		for (cmd_idx = 3; cmd_idx < argc; cmd_idx++) {
-			if (argv[cmd_idx][0] != '-')
-				break;
-			/* Skip flag value if it doesn't look like another flag */
-			if (cmd_idx + 1 < argc && argv[cmd_idx + 1][0] != '-')
-				cmd_idx++;
-		}
-
-		if (cmd_idx >= argc) {
-			fprintf(stderr, "proot --exec: missing command. Usage: --exec <PID> <command> [args...]\n");
-			exit(EXIT_FAILURE);
-		}
-
-		int ret = exec_connect(target_pid, argc - cmd_idx, &argv[cmd_idx]);
-		if (ret < 0) {
-			fprintf(stderr, "proot --exec: %s\n", strerror(errno));
-			exit(EXIT_FAILURE);
-		}
-		exit(ret);
-	}
-
 	if (argc == 2 && strcmp(argv[1], "--shm-helper") == 0) {
 		sysvipc_shm_helper_main();
 	}
@@ -550,6 +502,18 @@ int main(int argc, char *const argv[])
 	status = parse_config(tracee, argc, argv);
 	if (status < 0)
 		goto error;
+
+	/* --exec mode: connect to a running supervisor instead of launching
+	 * a local tracee. The command is the first non-option argument,
+	 * determined by parse_config's return value (argc_offset). */
+	if (tracee->exec_target > 0) {
+		int ret = exec_connect(tracee->exec_target, argc - status, &argv[status]);
+		if (ret < 0) {
+			note(tracee, ERROR, INTERNAL, "proot --exec: %s", strerror(errno));
+			goto error;
+		}
+		exit(ret);
+	}
 
 	if (NULL == getenv("PROOT_NO_MOUNTINFO"))
 		initialize_extension(tracee, mountinfo_callback, NULL);

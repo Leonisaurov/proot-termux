@@ -358,6 +358,10 @@ typedef struct tracee {
 	 * Set when --supervise is active. */
 	bool supervise;
 
+	/* --exec target PID: when set, connects to a --supervise instance
+	 * instead of launching a local tracee. Set by handle_option_exec(). */
+	pid_t exec_target;
+
 } Tracee;
 
 #define HOST_ROOTFS "/host-rootfs"

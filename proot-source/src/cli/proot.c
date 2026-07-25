@@ -456,10 +456,30 @@ static int handle_option_supervise(Tracee *tracee, const Cli *cli UNUSED, const 
  * The actual dispatch happens in main() before parse_config().
  * If we get here, something went wrong — show usage.
  */
-static int handle_option_exec(Tracee *tracee UNUSED, const Cli *cli, const char *value UNUSED)
+/**
+ * Handler for "--exec PID".
+ * Stores the target PID in tracee->exec_target.
+ * After parse_config, main() will connect to the supervisor
+ * instead of launching a local tracee.
+ */
+static int handle_option_exec(Tracee *tracee, const Cli *cli UNUSED, const char *value)
 {
-	print_usage(tracee, cli, false);
-	return -1;
+	if (value == NULL || value[0] == '\0') {
+		note(tracee, ERROR, USER, "--exec requires a PID");
+		return -1;
+	}
+
+	char *end = NULL;
+	errno = 0;
+	pid_t target_pid = (pid_t)strtol(value, &end, 10);
+	if (errno != 0 || end == value || *end != '\0') {
+		note(tracee, ERROR, USER, "--exec: invalid PID '%s'", value);
+		return -1;
+	}
+
+	tracee->exec_target = target_pid;
+	VERBOSE(tracee, 2, "--exec: will connect to PID %d", target_pid);
+	return 0;
 }
 
 /**
