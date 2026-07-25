@@ -532,10 +532,9 @@ int main(int argc, char *const argv[])
 	}
 
 	/* Start tracing the first tracee and all its children.  */
-	/* Free tracee before exit to avoid talloc leak report */
 	{
 		int ret = event_loop(tracee);
-		TALLOC_FREE(tracee);
+		// tracee already freed by free_terminated_tracees() inside event_loop
 		exit(ret);
 	}
 
