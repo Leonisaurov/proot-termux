@@ -282,7 +282,7 @@ static void check_architecture(Tracee *tracee)
  * Wait then handle any event from any tracee.  This function returns
  * the exit status of the last terminated program.
  */
-int event_loop()
+int event_loop(Tracee *root_tracee)
 {
 	struct sigaction signal_action;
 	long status;
@@ -345,8 +345,10 @@ int event_loop()
 			note(NULL, WARNING, SYSTEM, "sigaction(%d)", signum);
 	}
 
-	/* Check if supervise mode is on */
-	Tracee *root_tracee = get_tracee(NULL, 0, true);
+	/* Check if supervise mode is on.
+	 * Note: we use the root_tracee passed from main(), not get_tracee(NULL, 0, true),
+	 * because after launch_process() the tracee's PID changes to the child's PID,
+	 * so a pid=0 lookup would create a new tracee without the supervise flag. */
 	bool supervise = (root_tracee != NULL && root_tracee->supervise);
 
 	int ctl_fd = -1;

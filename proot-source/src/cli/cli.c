@@ -526,7 +526,7 @@ int main(int argc, char *const argv[])
 	}
 
 	/* Start tracing the first tracee and all its children.  */
-	exit(event_loop());
+	exit(event_loop(tracee));
 
 error:
 	TALLOC_FREE(tracee);

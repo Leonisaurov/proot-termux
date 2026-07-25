@@ -5,7 +5,7 @@ else
     CMD="$@"
 fi
 
-if [ -z "$ECHO" ]; then
+if [[ -v "ECHO" ]]; then
     echo_cmd=echo
 fi
 

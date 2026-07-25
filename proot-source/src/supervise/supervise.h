@@ -25,7 +25,7 @@
  * Paths & Limits
  * =========================================================================== */
 
-#define SUPERVISE_SOCKET_PREFIX	 "@proot-exec-"
+#define SUPERVISE_SOCKET_PREFIX	 "proot-exec-"
 #define SUPERVISE_TMP_DIR	 "/data/data/com.termux/files/usr/tmp"
 #define SUPERVISE_LOG_PREFIX	 "proot-exit-"
 #define SUPERVISE_MAX_CLIENTS	 16
