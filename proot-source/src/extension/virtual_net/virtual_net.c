@@ -395,7 +395,7 @@ static int vnp_write_to_tracee(Tracee *tracee, word_t dest,
 static int vnp_handle_socket(Tracee *tracee, VnpConfig *config)
 {
 	word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
-	if ((domain == AF_INET || domain == AF_INET6) && !config->allow_internet) {
+	if (domain == AF_INET || domain == AF_INET6) {
 		VERBOSE(tracee, 3, "virtual_net: socket(AF_INET%s, ...) -> AF_UNIX",
 			domain == AF_INET6 ? "6" : "");
 		poke_reg(tracee, SYSARG_1, AF_UNIX);
@@ -420,57 +420,6 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 
 	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
 		return 0;
-
-	if (config->allow_internet) {
-		int is_virtual = 0;
-		int i;
-		/* With --allow-internet, only intercept loopback binds
-		 * for ports that are explicitly exposed via -p */
-		if (family == AF_INET) {
-			struct sockaddr_in sa_in;
-			if (read_data(tracee, &sa_in, addr_ptr, sizeof(sa_in)) < 0)
-				return 0;
-			if ((ntohl(sa_in.sin_addr.s_addr) & 0xFF000000) != 0x7F000000)
-				return 0; /* Non-loopback: real bind */
-		}
-		else if (family == AF_INET6) {
-			struct sockaddr_in6 sa_in6;
-			if (addrlen < sizeof(struct sockaddr_in6))
-				return 0;
-			if (read_data(tracee, &sa_in6, addr_ptr, sizeof(sa_in6)) < 0)
-				return 0;
-			if (!is_ipv6_loopback_or_unspecified(&sa_in6.sin6_addr))
-				return 0; /* Non-loopback: real bind */
-		}
-		for (i = 0; i < config->expose_count; i++) {
-			if (config->expose_map[i].virtual_port == port) {
-				is_virtual = 1;
-				break;
-			}
-		}
-		if (!is_virtual)
-			return 0; /* Loopback but not exposed: real bind */
-
-		/* With --allow-internet: socket is AF_INET, write sockaddr_un directly
-		 * (will fail since AF_INET can't bind to AF_UNIX; known limitation) */
-		{
-			word_t new_addr;
-
-			vnp_fill_abstract_sa(&sa_unix, config->proxy_name, port, config->instance_token);
-
-			new_addr = alloc_mem(tracee, sizeof(struct sockaddr_un));
-			if (new_addr == 0)
-				return 0;
-			if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
-				return 0;
-
-			poke_reg(tracee, SYSARG_1, sockfd);
-			poke_reg(tracee, SYSARG_2, new_addr);
-			poke_reg(tracee, SYSARG_3, sizeof(struct sockaddr_un));
-
-			return 0;
-		}
-	}
 
 	/* Port 0 means "assign automatically" — generate a unique virtual port */
 	if (port == 0) {

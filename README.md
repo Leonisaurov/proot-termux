@@ -117,6 +117,33 @@ Example: `fix(virtual_net): handle AF_INET6 bind correctly`
 
 ---
 
+## ARM64 Limitations
+
+### Virtual Network + Internet Access
+
+We experimented with adding a `--allow-internet` flag to enable internet
+access while keeping virtual network functionality via `--proxy`. This
+required a **chained syscall mechanism** (socket → connect → dup3 → close)
+to replace AF_UNIX sockets with AF_INET ones for external traffic.
+
+**The chain mechanism does not work on ARM64.** The Linux kernel on ARM64
+does not re-read argument registers (x0-x5) when the instruction pointer
+(PC) is rewound after a ptrace syscall-exit stop. Only the syscall number
+(x8) can be changed (via `NT_ARM_SYSTEM_CALL`, added in Linux 4.17).
+Without the ability to change argument registers, chained syscalls always
+execute with the original syscall's arguments — making fd replacement
+impossible.
+
+This is a **kernel-level limitation** of ARM64's ptrace implementation,
+not a proot bug. On x86_64 the same mechanism works because the kernel
+re-reads all registers when a rewinded PC re-executes the `SVC` instruction.
+
+**Status:** `--allow-internet` was removed. Without it, `--proxy` provides
+virtual network isolation (all sockets become AF_UNIX, no internet access).
+To access the internet, run proot without `--proxy`.
+
+---
+
 ## License
 
 This project is derived from [termux-packages](https://github.com/termux/termux-packages) which is licensed under GPL-3.0. The proot source is licensed under GPL-2.0. See individual source files for details.

@@ -82,9 +82,6 @@ typedef struct {
 	VnpExposeEntry expose_map[VNP_EXPOSE_MAX]; /* Exposed port mappings        */
 	int           expose_count;                /* Number of exposed ports      */
 
-	/* Allow non-loopback connections (--allow-internet) */
-	bool          allow_internet;
-
 	/* Helper process management */
 	int           helper_pid;                  /* PID of helper process        */
 	int           helper_pipe_in;              /* tracer → helper (write end)  */

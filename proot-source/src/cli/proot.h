@@ -71,7 +71,6 @@ static int handle_option_H(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_p(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_port_mapping(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_proxy(Tracee *tracee, const Cli *cli, const char *value);
-static int handle_option_allow_internet(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_mbind(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_supervise(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_exec(Tracee *tracee, const Cli *cli, const char *value);
@@ -323,18 +322,6 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
           .description = "Create isolated virtual network. Without -p, binds stay virtual "
                          "and are only visible within the same --proxy network.",
           .detail = "",
-        },
-        { .class = "Extension options",
-          .arguments = {
-                { .name = "--allow-internet", .separator = '\0', .value = NULL },
-                { .name = NULL, .separator = '\0', .value = NULL } },
-          .handler = handle_option_allow_internet,
-          .description = "Allow non-loopback network connections through the virtual network.",
-          .detail = "\tBy default, --proxy only intercepts connections to 127.0.0.1 and ::1.\n\
-\tWith --allow-internet, all AF_INET/AF_INET6 connections are routed through\n\
-\tthe virtual network, including connections to external IP addresses.\n\
-\tNote: external destinations are reachable only if another proot instance\n\
-\twith the same --proxy name exposes the target port.",
         },
 	{ .class = "Extension options",
 	  .arguments = {
