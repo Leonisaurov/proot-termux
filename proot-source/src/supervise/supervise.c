@@ -35,6 +35,7 @@
 #include <sys/stat.h>   /* mkdir(2) */
 #include <linux/sched.h> /* CLONE_VM, CLONE_FS */
 #include <inttypes.h>    /* PRIu64 */
+#include <sys/uio.h>    /* iovec, writev(2) */
 
 #include <assert.h>
 
@@ -224,7 +225,40 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	if (client_fd < 0)
 		return;
 
-	/* Read the exec request */
+	/* Receive stdin/stdout/stderr from client via SCM_RIGHTS */
+	int client_fds[EXEC_FD_MAX] = { -1, -1, -1 };
+	{
+		struct msghdr msg;
+		struct iovec iov;
+		char cmsgbuf[CMSG_SPACE(EXEC_FD_MAX * sizeof(int))];
+		char dummy;
+		ssize_t ret;
+
+		memset(&msg, 0, sizeof(msg));
+		iov.iov_base = &dummy;
+		iov.iov_len  = 1;
+		msg.msg_iov        = &iov;
+		msg.msg_iovlen     = 1;
+		msg.msg_control    = cmsgbuf;
+		msg.msg_controllen = sizeof(cmsgbuf);
+
+		ret = recvmsg(client_fd, &msg, 0);
+		if (ret >= 0) {
+			struct cmsghdr *cmsg;
+			for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
+			     cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+				if (cmsg->cmsg_level == SOL_SOCKET
+				    && cmsg->cmsg_type == SCM_RIGHTS) {
+					int count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+					if (count > EXEC_FD_MAX) count = EXEC_FD_MAX;
+					memcpy(client_fds, CMSG_DATA(cmsg), count * sizeof(int));
+					break;
+				}
+			}
+		}
+	}
+
+	/* Read the exec request (now proceed normally) */
 	ssize_t n = read(client_fd, &req, sizeof(req));
 	if (n != sizeof(req) || req.argc < 1) {
 		close(client_fd);
@@ -262,6 +296,11 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 		ptrace(PTRACE_TRACEME, 0, NULL, NULL);
 		raise(SIGSTOP);  /* Wait for parent to attach */
 
+		/* Forward client's stdin/stdout/stderr to this process */
+		if (client_fds[0] >= 0) dup2(client_fds[0], STDIN_FILENO);
+		if (client_fds[1] >= 0) dup2(client_fds[1], STDOUT_FILENO);
+		if (client_fds[2] >= 0) dup2(client_fds[2], STDERR_FILENO);
+
 		/* Change to requested cwd if provided */
 		if (req.cwd[0] != '\0')
 			chdir(req.cwd);
@@ -269,6 +308,15 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 		/* Exec the command */
 		execvp(argv_ptrs[0], argv_ptrs);
 		_exit(127);
+	}
+
+	/* Parent: close received fds (only the child needs them) */
+	{
+		int i;
+		for (i = 0; i < EXEC_FD_MAX; i++) {
+			if (client_fds[i] >= 0)
+				close(client_fds[i]);
+		}
 	}
 
 	/* Parent: create a proper Tracee struct with inherited context.
@@ -459,6 +507,38 @@ int exec_connect(pid_t target_pid, int argc, char *const argv[])
 		close(fd);
 		fd = -1;
 		goto try_log;
+	}
+
+	/* --- Send stdin/stdout/stderr via SCM_RIGHTS --- */
+	{
+		struct msghdr msg;
+		struct iovec iov;
+		char cmsgbuf[CMSG_SPACE(EXEC_FD_MAX * sizeof(int))];
+		struct cmsghdr *cmsg;
+		char dummy = 0;
+		int fds[EXEC_FD_MAX] = { STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO };
+
+		memset(&msg, 0, sizeof(msg));
+
+		/* We need at least 1 byte of data to send ancillary data */
+		iov.iov_base = &dummy;
+		iov.iov_len  = 1;
+		msg.msg_iov        = &iov;
+		msg.msg_iovlen     = 1;
+		msg.msg_control    = cmsgbuf;
+		msg.msg_controllen = sizeof(cmsgbuf);
+
+		cmsg = CMSG_FIRSTHDR(&msg);
+		cmsg->cmsg_level = SOL_SOCKET;
+		cmsg->cmsg_type  = SCM_RIGHTS;
+		cmsg->cmsg_len   = CMSG_LEN(EXEC_FD_MAX * sizeof(int));
+		memcpy(CMSG_DATA(cmsg), fds, EXEC_FD_MAX * sizeof(int));
+
+		if (sendmsg(fd, &msg, 0) < 0) {
+			close(fd);
+			errno = EIO;
+			return -1;
+		}
 	}
 
 	/* Build the exec request */

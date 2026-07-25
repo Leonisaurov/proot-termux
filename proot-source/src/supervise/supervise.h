@@ -50,6 +50,13 @@ typedef struct {
 } ExecResponse;
 
 /* ===========================================================================
+ * SCM_RIGHTS: file descriptor passing for stdin/stdout/stderr
+ * =========================================================================== */
+
+/* Maximum number of fds we can send via SCM_RIGHTS */
+#define EXEC_FD_MAX 3
+
+/* ===========================================================================
  * Supervisor API (called by proot event loop when --supervise is active)
  * =========================================================================== */
 
