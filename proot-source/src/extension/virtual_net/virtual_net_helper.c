@@ -35,7 +35,6 @@
 #include "extension/virtual_net/virtual_net_internal.h"
 
 #define BRIDGE_BUF_SIZE 4096
-#define MAX_CHILDREN    128
 
 /* ================================================================
  * Globals
@@ -50,7 +49,7 @@ static uint16_t g_listener_vports[VNP_EXPOSE_MAX]; /* virtual_port for each list
 static uint16_t g_listener_hports[VNP_EXPOSE_MAX]; /* host_port for each listener */
 static int      g_num_listeners = 0;
 
-static int g_active_children = 0; /* approx count of bridge children */
+
 
 /* ================================================================
  * IPC with tracer
@@ -193,12 +192,6 @@ static void accept_and_fork(int listener_idx)
 	if (client_fd < 0)
 		return;
 
-	/* Enforce child limit to prevent resource exhaustion */
-	if (g_active_children >= MAX_CHILDREN) {
-		close(client_fd);
-		return;
-	}
-
 	/* Connect to the abstract Unix socket */
 	unix_fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (unix_fd < 0) {
@@ -233,7 +226,6 @@ static void accept_and_fork(int listener_idx)
 	}
 
 	/* Parent: close connection fds (child owns them) */
-	g_active_children++;
 	close(client_fd);
 	close(unix_fd);
 }
@@ -387,15 +379,7 @@ int vnp_helper_main(int argc, char *argv[])
 				accept_and_fork(i);
 		}
 
-		/* Decay child count: check if any terminated */
-		{
-			int saved_errno = errno;
-			while (waitpid(-1, NULL, WNOHANG) > 0) {
-				if (g_active_children > 0)
-					g_active_children--;
-			}
-			errno = saved_errno;
-		}
+
 	}
 
 done:

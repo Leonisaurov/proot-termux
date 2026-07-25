@@ -53,14 +53,12 @@
 static FilteredSysnum syss[] = {
 	{ PR_socket,      0 },
 	{ PR_bind,        0 },
-	{ PR_listen,      0 },
 	{ PR_accept,      0 },
 	{ PR_accept4,     0 },
 	{ PR_connect,     0 },
 	{ PR_close,       0 },
 	{ PR_getsockname, FILTER_SYSEXIT },
 	{ PR_getpeername, FILTER_SYSEXIT },
-	{ PR_getsockopt,  0 },
 	{ PR_setsockopt,  0 },
 	FILTERED_SYSNUM_END,
 };
@@ -139,10 +137,14 @@ static int vnp_helper_request(VnpConfig *config, struct VnpRequest *req,
 	ssize_t n;
 	if (config->helper_pipe_in < 0 || config->helper_pipe_out < 0)
 		return -1;
-	n = write(config->helper_pipe_in, req, sizeof(*req));
+	do {
+		n = write(config->helper_pipe_in, req, sizeof(*req));
+	} while (n < 0 && errno == EINTR);
 	if (n != sizeof(*req))
 		return -1;
-	n = read(config->helper_pipe_out, resp, sizeof(*resp));
+	do {
+		n = read(config->helper_pipe_out, resp, sizeof(*resp));
+	} while (n < 0 && errno == EINTR);
 	if (n != sizeof(*resp))
 		return -1;
 	return 0;
@@ -396,7 +398,7 @@ static int vnp_handle_socket(Tracee *tracee, VnpConfig *config)
 {
 	word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
 	if (domain == AF_INET || domain == AF_INET6) {
-		VERBOSE(tracee, 3, "virtual_net: socket(AF_INET%s, ...) -> AF_UNIX",
+		VERBOSE(tracee, 2, "virtual_net: socket(AF_INET%s, ...) -> AF_UNIX",
 			domain == AF_INET6 ? "6" : "");
 		poke_reg(tracee, SYSARG_1, AF_UNIX);
 		poke_reg(tracee, SYSARG_3, 0);
@@ -430,7 +432,7 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 	VERBOSE(tracee, 1, "vnet: bind port %u on fd %lu", port, (unsigned long)sockfd);
 
 	/* Track this fd as virtual */
-	entry = vnp_find_fd(config, sockfd);
+	entry = vnp_find_fd(config, sockfd, tracee->pid);
 	if (entry == NULL) {
 		entry = vnp_add_fd(config, tracee->pid, sockfd, port, family);
 		if (entry == NULL)
@@ -559,7 +561,7 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	}
 
 	/* Track this fd */
-	entry = vnp_find_fd(config, sockfd);
+	entry = vnp_find_fd(config, sockfd, tracee->pid);
 	if (entry == NULL) {
 		entry = vnp_add_fd(config, tracee->pid, sockfd, port, family);
 		if (entry == NULL)
@@ -668,10 +670,14 @@ static int vnp_handle_get_name(Tracee *tracee, VnpConfig *config)
 	word_t sockfd = peek_reg(tracee, CURRENT, SYSARG_1);
 	word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
 	word_t addrlen_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
-	VnpFdEntry *entry = vnp_find_fd(config, (int)sockfd);
+	VnpFdEntry *entry = vnp_find_fd(config, (int)sockfd, tracee->pid);
 
 	if (entry == NULL || addr_ptr == 0)
 		return 0;
+
+	VERBOSE(tracee, 2, "vnet: %s fd %lu -> 127.0.0.1:%u",
+		get_sysnum(tracee, CURRENT) == PR_getsockname ? "getsockname" : "getpeername",
+		(unsigned long)sockfd, entry->virtual_port);
 
 	if (entry->orig_domain == AF_INET6) {
 		struct sockaddr_in6 fake6;
@@ -786,11 +792,13 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 			return 0;
 		case PR_socket: {
 			int fd = (int)result;
-			VnpFdEntry *entry = vnp_find_fd(config, fd);
+			word_t original_domain = peek_reg(tracee, ORIGINAL, SYSARG_1);
+			if (original_domain != AF_INET && original_domain != AF_INET6)
+				return 0;
+			VnpFdEntry *entry = vnp_find_fd(config, fd, tracee->pid);
 			if (entry == NULL) {
-				word_t domain = peek_reg(tracee, ORIGINAL, SYSARG_1);
 				vnp_add_fd(config, tracee->pid, fd, 0,
-					   (domain == AF_INET6) ? AF_INET6 : AF_INET);
+					   (original_domain == AF_INET6) ? AF_INET6 : AF_INET);
 			}
 			return 0;
 		}
@@ -805,12 +813,12 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 			addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
 			addrlen_ptr = peek_reg(tracee, ORIGINAL, SYSARG_3);
 
-			VnpFdEntry *listen_entry = vnp_find_fd(config, (int)listen_fd);
+			VnpFdEntry *listen_entry = vnp_find_fd(config, (int)listen_fd, tracee->pid);
 			if (listen_entry == NULL || listen_entry->virtual_port == 0)
 				return 0;
 
 			/* Track the new fd with same virtual port */
-			VnpFdEntry *entry = vnp_find_fd(config, newfd);
+			VnpFdEntry *entry = vnp_find_fd(config, newfd, tracee->pid);
 			if (entry == NULL) {
 				entry = vnp_add_fd(config, tracee->pid, newfd, listen_entry->virtual_port,
 						    listen_entry->orig_domain);
@@ -826,22 +834,25 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 			 * - write_data's ptrace workaround does PTRACE_CONT
 			 *   which is unsafe in the EXIT handler context */
 		if (addr_ptr != 0 && addrlen_ptr != 0) {
+			bool write_ok = true;
 			if (listen_entry->orig_domain == AF_INET6) {
 				struct sockaddr_in6 fake6;
 				memset(&fake6, 0, sizeof(fake6));
 				fake6.sin6_family = AF_INET6;
 				fake6.sin6_port = 0;
 				fake6.sin6_addr = in6addr_loopback;
-				vnp_write_to_tracee(tracee, addr_ptr, &fake6, sizeof(fake6));
+				if (vnp_write_to_tracee(tracee, addr_ptr, &fake6, sizeof(fake6)) < 0)
+					write_ok = false;
 			} else {
 				struct sockaddr_in fake;
 				memset(&fake, 0, sizeof(fake));
 				fake.sin_family = AF_INET;
 				fake.sin_port = 0;
 				fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-				vnp_write_to_tracee(tracee, addr_ptr, &fake, sizeof(fake));
+				if (vnp_write_to_tracee(tracee, addr_ptr, &fake, sizeof(fake)) < 0)
+					write_ok = false;
 			}
-			{
+			if (write_ok) {
 				uint32_t addrlen_val = (listen_entry->orig_domain == AF_INET6)
 					? (uint32_t)sizeof(struct sockaddr_in6)
 					: (uint32_t)sizeof(struct sockaddr_in);

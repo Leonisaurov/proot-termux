@@ -140,11 +140,11 @@ static inline void vnp_fill_abstract_sa(struct sockaddr_un *sa, const char *prox
  * Find an fd entry in the config's fd_map.
  * Returns pointer to entry, or NULL if not found.
  */
-static inline VnpFdEntry *vnp_find_fd(VnpConfig *config, int fd)
+static inline VnpFdEntry *vnp_find_fd(VnpConfig *config, int fd, pid_t pid)
 {
 	int i;
 	for (i = 0; i < config->fd_count; i++) {
-		if (config->fd_map[i].fd == fd)
+		if (config->fd_map[i].fd == fd && config->fd_map[i].pid == pid)
 			return &config->fd_map[i];
 	}
 	return NULL;
