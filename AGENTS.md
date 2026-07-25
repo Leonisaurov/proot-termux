@@ -33,6 +33,18 @@ Regla:
 
 **NUNCA hagas commit sin bumpear la revisión.** Es el error más común y el que más tiempo hace perder.
 
+### ✅ Workflow de commit (no omitir pasos)
+
+Cada vez que hagas cambios en el código, sigue este workflow SECUENCIALMENTE:
+
+1. **Editas código** → modifica archivos en `proot-source/src/` o `packages/proot/`
+2. **Bump REVISION** → incrementa `TERMUX_PKG_REVISION` en `packages/proot/build.sh`
+3. **Commit** → `git add -A && git commit -m "<type>(<scope>): <summary>"`
+4. **Push** → `git push origin master`
+5. **Verificar CI** → `gita notify build-proot.yml 2>/dev/null | grep -E '(error|Successfully|done)'`
+
+**NO saltees ningún paso.** El error más común es commitear sin bumpear, o pushear sin verificar el CI.
+
 ### Location
 - `packages/proot/build.sh` — package definition
 - `packages/proot/termux-chroot` — termux-chroot script template
