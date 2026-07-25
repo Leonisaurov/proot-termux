@@ -141,7 +141,7 @@ struct VnpRegistryEntry {
 }; // Total: 116 bytes
 ```
 
-#### Bugs Fixed (revisions 12-17)
+#### Bugs Fixed (revisions 12-18)
 
 | Bug | Revision | Symptom | Fix |
 |-----|----------|---------|-----|
@@ -153,6 +153,7 @@ struct VnpRegistryEntry {
 | REMOVED handler corrupts registry | 16 | 2nd curl sees count=0 in registry | Remove registry write from REMOVED handler |
 | Missing closing brace | 14 | Compilation error | Add `}` in getpeername else block |
 | Code polish across extension files | 17 | Redundant code, macros, style | Extracted `handle_port_translation()`, removed `DETAIL`/`APPEND` macros, `select()`→`poll()`, POSIX macros for IPv6, lazy init patterns |
+| Static deliver_sigtrap kills exec children | 18 | --exec child killed by SIGTRAP (exit 133) | Replaced global static bool with per-tracee ptrace_options_set field |
 
 ### Modified Source Files
 

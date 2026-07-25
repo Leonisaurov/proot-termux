@@ -195,8 +195,21 @@ int supervise_init(int *ctl_fd, int *sig_fd, int verbose_level)
 
 void supervise_fini(void)
 {
-	int i;
+	/* Free any pending exec child tracees to avoid talloc leaks */
+	{
+		int i;
+		for (i = 0; i < num_exec_clients; i++) {
+			if (exec_clients[i].active) {
+				kill(exec_clients[i].tracee_pid, SIGKILL);
+				waitpid(exec_clients[i].tracee_pid, NULL, WNOHANG);
+				close(exec_clients[i].fd);
+				exec_clients[i].active = false;
+			}
+		}
+		num_exec_clients = 0;
+	}
 
+	int i;
 	/* Close all pending client sockets */
 	for (i = 0; i < num_exec_clients; i++) {
 		if (exec_clients[i].active) {
