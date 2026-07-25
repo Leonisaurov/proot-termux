@@ -31,6 +31,7 @@
 #include "extension/extension.h"
 #include "extension/sysvipc/sysvipc.h"
 #include "extension/virtual_net/virtual_net.h"
+#include "extension/virtual_net/virtual_net_internal.h"
 #include "supervise/supervise.h"
 #include "path/binding.h"
 #include "attribute.h"
@@ -438,6 +439,25 @@ static int handle_option_proxy(Tracee *tracee, const Cli *cli UNUSED, const char
         }
 
         return vnp_configure(tracee, value);
+}
+
+/**
+ * Handler for "--allow-internet".
+ * Allows non-loopback connections through the virtual network.
+ * Must be used together with --proxy.
+ */
+static int handle_option_allow_internet(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	Extension *ext = get_extension(tracee, vnp_callback);
+	if (ext == NULL) {
+		note(tracee, WARNING, USER,
+			"--allow-internet requires --proxy to be specified first, ignoring");
+		return 0;
+	}
+	VnpConfig *config = talloc_get_type_abort(ext->config, VnpConfig);
+	config->allow_internet = true;
+	VERBOSE(tracee, 2, "virtual_net: allow_internet enabled");
+	return 0;
 }
 
 /**

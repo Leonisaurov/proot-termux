@@ -38,6 +38,7 @@
 #include "tracee/mem.h"
 #include "tracee/reg.h"
 #include "syscall/syscall.h"
+#include "syscall/chain.h"
 #include "cli/note.h"
 #include "attribute.h"
 #include "syscall/seccomp.h"
@@ -390,10 +391,10 @@ static int vnp_write_to_tracee(Tracee *tracee, word_t dest,
  * Handle socket() — change AF_INET to AF_UNIX.
  * The tracee thinks it creates a TCP socket, but gets a Unix socket.
  */
-static int vnp_handle_socket(Tracee *tracee)
+static int vnp_handle_socket(Tracee *tracee, VnpConfig *config)
 {
 	word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
-	if (domain == AF_INET || domain == AF_INET6) {
+	if (!config->allow_internet && (domain == AF_INET || domain == AF_INET6)) {
 		VERBOSE(tracee, 3, "virtual_net: socket(AF_INET%s, ...) -> AF_UNIX",
 			domain == AF_INET6 ? "6" : "");
 		poke_reg(tracee, SYSARG_1, AF_UNIX);
@@ -465,15 +466,33 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 		}
 	}
 
-	/* Write new sockaddr_un to tracee's stack and update bind() args */
+	/* With --allow-internet: socket is AF_INET, need fd replacement via chain */
+	if (config->allow_internet) {
+		word_t new_addr = alloc_mem(tracee, sizeof(struct sockaddr_un));
+		if (new_addr == 0)
+			return 0;
+		if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
+			return 0;
+
+		config->chain_state = 1;
+		config->chain_orig_fd = (int)sockfd;
+		config->chain_addr_ptr = new_addr;
+		config->chain_addr_len = sizeof(struct sockaddr_un);
+		config->chain_port = port;
+		config->chain_is_bind = true;
+
+		set_sysnum(tracee, PR_void);
+		register_chained_syscall(tracee, PR_socket,
+			AF_UNIX, SOCK_STREAM, 0, 0, 0, 0);
+		return 0;
+	}
+
+	/* Normal path: write new sockaddr_un to tracee's stack and update bind() args */
 	{
 		word_t new_addr = alloc_mem(tracee, sizeof(struct sockaddr_un));
 		if (new_addr == 0)
 			return 0;
 
-		/* Write sockaddr_un directly with PTRACE_POKEDATA (no workaround).
-		 * Handles trailing bytes like write_data() does, but always
-		 * uses raw ptrace to avoid process_vm_writev + workaround. */
 		if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
 			return 0;
 
@@ -503,11 +522,11 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	VERBOSE(tracee, 1, "vnet: connect port %u on fd %lu", port, (unsigned long)sockfd);
 
 	if (family == AF_INET) {
-		/* Only intercept loopback connections */
 		struct sockaddr_in sa_in;
 		if (read_data(tracee, &sa_in, addr_ptr, sizeof(sa_in)) < 0)
 			return 0;
-		if ((ntohl(sa_in.sin_addr.s_addr) & 0xFF000000) != 0x7F000000)
+		if (!config->allow_internet
+		    && (ntohl(sa_in.sin_addr.s_addr) & 0xFF000000) != 0x7F000000)
 			return 0;
 	}
 	else if (family == AF_INET6) {
@@ -516,8 +535,8 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 			return 0;
 		if (read_data(tracee, &sa_in6, addr_ptr, sizeof(sa_in6)) < 0)
 			return 0;
-		/* Only intercept loopback or unspecified IPv6 connections */
-		if (!is_ipv6_loopback_or_unspecified(&sa_in6.sin6_addr))
+		if (!config->allow_internet
+		    && !is_ipv6_loopback_or_unspecified(&sa_in6.sin6_addr))
 			return 0;
 	}
 	else {
@@ -576,7 +595,44 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 			vnp_registry_read(reg_fd, &hdr);
 			struct VnpRegistryEntry *reg_entry = vnp_registry_find(&hdr, port);
 			if (reg_entry != NULL) {
-				/* Use the registered abstract name */
+				if (config->allow_internet) {
+					/* With --allow-internet: socket is AF_INET, need fd replacement.
+					 * Void the connect and use chained syscalls to:
+					 *   socket(AF_UNIX) -> connect(abstract) -> dup3 -> close */
+					struct sockaddr_un sa_unix;
+					word_t new_addr;
+
+					memset(&sa_unix, 0, sizeof(sa_unix));
+					sa_unix.sun_family = AF_UNIX;
+					memcpy(sa_unix.sun_path, reg_entry->abstract_name,
+					       sizeof(reg_entry->abstract_name));
+
+					new_addr = alloc_mem(tracee, sizeof(sa_unix));
+					if (new_addr == 0) {
+						vnp_registry_close(reg_fd);
+						return 0;
+					}
+					if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0) {
+						vnp_registry_close(reg_fd);
+						return 0;
+					}
+
+					config->chain_state = 1;
+					config->chain_orig_fd = (int)sockfd;
+					config->chain_addr_ptr = new_addr;
+					config->chain_addr_len = sizeof(sa_unix);
+					config->chain_port = port;
+					config->chain_is_bind = false;
+
+					set_sysnum(tracee, PR_void);
+					register_chained_syscall(tracee, PR_socket,
+						AF_UNIX, SOCK_STREAM, 0, 0, 0, 0);
+
+					vnp_registry_close(reg_fd);
+					return 0;
+				}
+
+				/* Normal path: use the registered abstract name */
 				struct sockaddr_un sa_unix;
 				memset(&sa_unix, 0, sizeof(sa_unix));
 				sa_unix.sun_family = AF_UNIX;
@@ -740,7 +796,7 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 
 		switch (get_sysnum(tracee, CURRENT)) {
 		case PR_socket:
-			return vnp_handle_socket(tracee);
+			return vnp_handle_socket(tracee, config);
 		case PR_bind:
 			return vnp_handle_bind(tracee, config);
 		case PR_connect:
@@ -841,6 +897,59 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 		default:
 			return 0;
 		}
+	}
+
+	case SYSCALL_CHAINED_EXIT: {
+		Tracee *tracee = TRACEE(extension);
+		VnpConfig *config = talloc_get_type_abort(extension->config, VnpConfig);
+
+		if (config->chain_state == 0)
+			return 0;
+
+		word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+		if ((intptr_t)result < 0) {
+			config->chain_state = 0;
+			force_chain_final_result(tracee, result);
+			return 0;
+		}
+
+		switch (config->chain_state) {
+		case 1: {
+			int new_fd = (int)result;
+			config->chain_new_fd = new_fd;
+			config->chain_state = 2;
+
+			if (config->chain_is_bind) {
+				register_chained_syscall(tracee, PR_bind,
+					new_fd, config->chain_addr_ptr, config->chain_addr_len,
+					0, 0, 0);
+			} else {
+				register_chained_syscall(tracee, PR_connect,
+					new_fd, config->chain_addr_ptr, config->chain_addr_len,
+					0, 0, 0);
+			}
+			break;
+		}
+		case 2: {
+			config->chain_state = 3;
+			register_chained_syscall(tracee, PR_dup3,
+				config->chain_new_fd, config->chain_orig_fd,
+				0, 0, 0, 0);
+			break;
+		}
+		case 3: {
+			config->chain_state = 4;
+			register_chained_syscall(tracee, PR_close,
+				config->chain_new_fd, 0, 0, 0, 0, 0);
+			break;
+		}
+		case 4: {
+			config->chain_state = 0;
+			force_chain_final_result(tracee, 0);
+			break;
+		}
+		}
+		return 0;
 	}
 
 	case REMOVED: {

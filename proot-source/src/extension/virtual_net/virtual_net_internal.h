@@ -2,6 +2,7 @@
 #define VIRTUAL_NET_INTERNAL_H
 
 #include <stdint.h>   /* uint*_t, */
+#include <stdbool.h>  /* bool, */
 #include <sys/types.h>
 #include <sys/un.h>
 #include <string.h>   /* memset(3), memcpy(3) */
@@ -81,10 +82,22 @@ typedef struct {
 	VnpExposeEntry expose_map[VNP_EXPOSE_MAX]; /* Exposed port mappings        */
 	int           expose_count;                /* Number of exposed ports      */
 
+	/* Allow non-loopback connections (--allow-internet) */
+	bool          allow_internet;
+
 	/* Helper process management */
 	int           helper_pid;                  /* PID of helper process        */
 	int           helper_pipe_in;              /* tracer → helper (write end)  */
 	int           helper_pipe_out;             /* tracer ← helper (read end)   */
+
+	/* Chain state for fd replacement (--allow-internet) */
+	int           chain_state;     /* 0=idle, 1=socket_done, 2=connect/bind_done, 3=dup3_done, 4=close_done */
+	int           chain_orig_fd;   /* Original fd to replace */
+	int           chain_new_fd;    /* New AF_UNIX socket fd from chained socket() */
+	uintptr_t     chain_addr_ptr;  /* Abstract sockaddr in tracee memory */
+	socklen_t     chain_addr_len;  /* Length of abstract sockaddr */
+	uint16_t      chain_port;      /* Virtual port */
+	bool          chain_is_bind;   /* true=bind chain, false=connect chain */
 } VnpConfig;
 
 /* ========================================================================= */
