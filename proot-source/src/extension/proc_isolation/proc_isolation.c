@@ -18,6 +18,8 @@
  * Copyright (C) 2025 Licensed under GPL v2 or later.
  */
 
+#include <sys/types.h>
+#include <signal.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -289,9 +291,24 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
             return 0;
         case PR_reboot:
             if (config->flags & ISOLATE_REBOOT) {
+                Tracees *list = get_tracees_list_head();
+                if (list != NULL) {
+                    Tracee *t, *tmp;
+                    int count = 0;
+                    t = LIST_FIRST(list);
+                    while (t != NULL) {
+                        tmp = LIST_NEXT(t, link);
+                        if (t->pid != tracee->pid) {
+                            kill(t->pid, SIGKILL);
+                            count++;
+                        }
+                        t = tmp;
+                    }
+                    VERBOSE(tracee, 1, "proc_isolation: reboot killed %d processes", count);
+                }
                 set_sysnum(tracee, PR_void);
                 poke_reg(tracee, SYSARG_RESULT, 0);
-                VERBOSE(tracee, 1, "proc_isolation: reboot voided");
+                kill(tracee->pid, SIGKILL);
             }
             return 0;
         case PR_swapon:
