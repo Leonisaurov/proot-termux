@@ -20,6 +20,7 @@
 #include <sys/types.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "tracee/tracee.h"
 
 /* ===========================================================================
  * Paths & Limits
@@ -70,7 +71,7 @@ extern void supervise_fini(void);
  * Accept a new exec client connection and spawn its tracee.
  * Called when ctl_fd has POLLIN.
  */
-extern void supervise_accept_client(int ctl_fd);
+extern void supervise_accept_client(int ctl_fd, Tracee *root_tracee);
 
 /**
  * Handle completed tracee in supervise mode.

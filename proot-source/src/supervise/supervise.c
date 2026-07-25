@@ -34,9 +34,14 @@
 #include <stdbool.h>    /* bool, true, false */
 #include <sys/stat.h>   /* mkdir(2) */
 
+#include <assert.h>
+
 #include "supervise/supervise.h"
 #include "cli/note.h"
 #include "tracee/tracee.h"
+#include "tracee/mem.h"
+#include "path/binding.h"
+#include "extension/extension.h"
 
 /* NULL tracee for VERBOSE calls in this file.
  * We use a typed variable instead of NULL literal because the Android NDK
@@ -208,7 +213,7 @@ void supervise_fini(void)
  * supervise_accept_client: accept a new --exec connection
  * =========================================================================== */
 
-void supervise_accept_client(int ctl_fd)
+void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 {
 	int client_fd;
 	ExecRequest req;
@@ -264,7 +269,73 @@ void supervise_accept_client(int ctl_fd)
 		_exit(127);
 	}
 
-	/* Parent: track this client */
+	/* Parent: create a proper Tracee struct with inherited context.
+	 * This is essential for path translation, bindings, and extensions
+	 * (like virtual_net proxy) to work for the --exec command. */
+	{
+		Tracee *child_tracee = get_tracee(NULL, pid, true);
+		if (child_tracee != NULL) {
+			/* Sanity check: should be a fresh tracee */
+			assert(child_tracee->exe == NULL);
+			assert(child_tracee->parent == NULL);
+
+			/* Inherit basic flags */
+			child_tracee->verbose  = root_tracee->verbose;
+			child_tracee->seccomp  = root_tracee->seccomp;
+			child_tracee->tool_name = root_tracee->tool_name;
+
+			/* Copy filesystem namespace with bindings.
+			 * This gives the child the same rootfs, cwd,
+			 * and bindings as the supervisor. */
+			TALLOC_FREE(child_tracee->fs);
+			child_tracee->fs = talloc_zero(child_tracee, FileSystemNameSpace);
+			if (child_tracee->fs != NULL && root_tracee->fs != NULL) {
+				child_tracee->fs->cwd = talloc_strdup(child_tracee->fs,
+					root_tracee->fs->cwd ?: ".");
+
+				/* Deep-copy bindings (same as new_child
+				 * with CLONE_NEWNS stripped) */
+				if (root_tracee->fs->bindings.guest != NULL) {
+					Binding *iter;
+
+					child_tracee->fs->bindings.guest = talloc_zero(child_tracee->fs, Bindings);
+					child_tracee->fs->bindings.host  = talloc_zero(child_tracee->fs, Bindings);
+					if (child_tracee->fs->bindings.guest != NULL
+					    && child_tracee->fs->bindings.host != NULL) {
+						CIRCLEQ_INIT(child_tracee->fs->bindings.guest);
+						CIRCLEQ_INIT(child_tracee->fs->bindings.host);
+
+						CIRCLEQ_FOREACH(iter, root_tracee->fs->bindings.guest, link.guest) {
+							(void) insort_binding3(child_tracee, child_tracee->fs,
+										iter->host.path,
+										iter->guest.path);
+						}
+					}
+				}
+			}
+
+			/* Copy heap (memory management context) */
+			TALLOC_FREE(child_tracee->heap);
+			child_tracee->heap = talloc_memdup(child_tracee,
+				root_tracee->heap, sizeof(Heap));
+
+			/* Reference shared resources */
+			child_tracee->exe   = talloc_reference(child_tracee, root_tracee->exe);
+			child_tracee->qemu  = talloc_reference(child_tracee, root_tracee->qemu);
+			child_tracee->glue  = talloc_reference(child_tracee, root_tracee->glue);
+
+			/* Set parent relationship */
+			child_tracee->parent = root_tracee;
+
+			/* Inherit extensions (virtual_net, fake_id0, etc.) */
+			inherit_extensions(child_tracee, root_tracee, CLONE_VM | CLONE_FS);
+
+			VERBOSE(child_tracee, 2, "exec tracee: vpid %" PRIu64 ": pid %d",
+				child_tracee->vpid, child_tracee->pid);
+		}
+	}
+
+	/* Track this client */
 	if (add_client(client_fd, pid) < 0) {
 		/* Too many clients, kill the tracee and reject */
 		kill(pid, SIGKILL);

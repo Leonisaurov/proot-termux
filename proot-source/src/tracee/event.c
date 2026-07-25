@@ -469,7 +469,7 @@ int event_loop(Tracee *root_tracee)
 
 			/* --- Handle new --exec connection --- */
 			if (nfds > 1 && (fds[1].revents & POLLIN)) {
-				supervise_accept_client(ctl_fd);
+				supervise_accept_client(ctl_fd, root_tracee);
 			}
 		} else {
 			/* ---------------------------------------------------------
