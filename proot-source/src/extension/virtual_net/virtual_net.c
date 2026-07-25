@@ -38,7 +38,7 @@
 #include "tracee/mem.h"
 #include "tracee/reg.h"
 #include "syscall/syscall.h"
-#include "syscall/chain.h"
+
 #include "cli/note.h"
 #include "attribute.h"
 #include "syscall/seccomp.h"
@@ -394,8 +394,7 @@ static int vnp_write_to_tracee(Tracee *tracee, word_t dest,
 static int vnp_handle_socket(Tracee *tracee, VnpConfig *config)
 {
 	word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
-	(void)config;
-	if (domain == AF_INET || domain == AF_INET6) {
+	if ((domain == AF_INET || domain == AF_INET6) && !config->allow_internet) {
 		VERBOSE(tracee, 3, "virtual_net: socket(AF_INET%s, ...) -> AF_UNIX",
 			domain == AF_INET6 ? "6" : "");
 		poke_reg(tracee, SYSARG_1, AF_UNIX);
@@ -420,6 +419,37 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 
 	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
 		return 0;
+
+	if (config->allow_internet) {
+		int is_virtual = 0;
+		int i;
+		/* With --allow-internet, only intercept loopback binds
+		 * for ports that are explicitly exposed via -p */
+		if (family == AF_INET) {
+			struct sockaddr_in sa_in;
+			if (read_data(tracee, &sa_in, addr_ptr, sizeof(sa_in)) < 0)
+				return 0;
+			if ((ntohl(sa_in.sin_addr.s_addr) & 0xFF000000) != 0x7F000000)
+				return 0; /* Non-loopback: real bind */
+		}
+		else if (family == AF_INET6) {
+			struct sockaddr_in6 sa_in6;
+			if (addrlen < sizeof(struct sockaddr_in6))
+				return 0;
+			if (read_data(tracee, &sa_in6, addr_ptr, sizeof(sa_in6)) < 0)
+				return 0;
+			if (!is_ipv6_loopback_or_unspecified(&sa_in6.sin6_addr))
+				return 0; /* Non-loopback: real bind */
+		}
+		for (i = 0; i < config->expose_count; i++) {
+			if (config->expose_map[i].virtual_port == port) {
+				is_virtual = 1;
+				break;
+			}
+		}
+		if (!is_virtual)
+			return 0; /* Loopback but not exposed: real bind */
+	}
 
 	/* Port 0 means "assign automatically" — generate a unique virtual port */
 	if (port == 0) {
@@ -505,8 +535,8 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 		struct sockaddr_in sa_in;
 		if (read_data(tracee, &sa_in, addr_ptr, sizeof(sa_in)) < 0)
 			return 0;
-		if (!config->allow_internet
-		    && (ntohl(sa_in.sin_addr.s_addr) & 0xFF000000) != 0x7F000000)
+		/* Non-loopback goes to kernel in all cases */
+		if ((ntohl(sa_in.sin_addr.s_addr) & 0xFF000000) != 0x7F000000)
 			return 0;
 	}
 	else if (family == AF_INET6) {
@@ -515,8 +545,7 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 			return 0;
 		if (read_data(tracee, &sa_in6, addr_ptr, sizeof(sa_in6)) < 0)
 			return 0;
-		if (!config->allow_internet
-		    && !is_ipv6_loopback_or_unspecified(&sa_in6.sin6_addr))
+		if (!is_ipv6_loopback_or_unspecified(&sa_in6.sin6_addr))
 			return 0;
 	}
 	else {
@@ -851,77 +880,6 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 		default:
 			return 0;
 		}
-	}
-
-	case SYSCALL_CHAINED_ENTER: {
-		VnpConfig *config = talloc_get_type_abort(extension->config, VnpConfig);
-		/* Transition: voided syscall EXIT done, next CHAINED_EXIT is real */
-		if (config->chain_state == 0)
-			config->chain_state = 1;
-		return 0;
-	}
-
-	case SYSCALL_CHAINED_EXIT: {
-		Tracee *tracee = TRACEE(extension);
-		VnpConfig *config = talloc_get_type_abort(extension->config, VnpConfig);
-
-		if (config->chain_state == 0)
-			return 0; /* Voided syscall EXIT — ignore, chain continues */
-
-		word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-		if ((intptr_t)result < 0) {
-			config->chain_state = 0;
-			force_chain_final_result(tracee, result);
-			return 0;
-		}
-
-		switch (config->chain_state) {
-		case 1: {
-			int new_fd = (int)result;
-			config->chain_new_fd = new_fd;
-			config->chain_state = 2;
-
-			if (config->chain_is_bind) {
-				register_chained_syscall(tracee, PR_bind,
-					new_fd, config->chain_addr_ptr, config->chain_addr_len,
-					0, 0, 0);
-			} else {
-				register_chained_syscall(tracee, PR_connect,
-					new_fd, config->chain_addr_ptr, config->chain_addr_len,
-					0, 0, 0);
-			}
-			break;
-		}
-		case 2: {
-			if ((intptr_t)result < 0) {
-				config->chain_state = 0;
-				force_chain_final_result(tracee, result);
-				break;
-			}
-			config->chain_state = 3;
-			register_chained_syscall(tracee, PR_dup3,
-				config->chain_new_fd, config->chain_orig_fd,
-				0, 0, 0, 0);
-			break;
-		}
-		case 3: {
-			if ((intptr_t)result < 0) {
-				config->chain_state = 0;
-				force_chain_final_result(tracee, result);
-				break;
-			}
-			config->chain_state = 4;
-			register_chained_syscall(tracee, PR_close,
-				config->chain_new_fd, 0, 0, 0, 0, 0);
-			break;
-		}
-		case 4: {
-			config->chain_state = 0;
-			force_chain_final_result(tracee, 0);
-			break;
-		}
-		}
-		return 0;
 	}
 
 	case REMOVED: {
