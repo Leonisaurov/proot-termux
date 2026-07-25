@@ -481,7 +481,7 @@ int main(int argc, char *const argv[])
 	 * even with wrong number of args, so it never reaches parse_config()
 	 * which would report "unknown option". */
 	if (argc > 1 && strcmp(argv[1], "--exec") == 0) {
-		if (argc < 4) {
+		if (argc < 3) {
 			fprintf(stderr, "proot --exec: usage: proot --exec <PID> <command> [args...]\n");
 			exit(EXIT_FAILURE);
 		}
@@ -494,7 +494,28 @@ int main(int argc, char *const argv[])
 			exit(EXIT_FAILURE);
 		}
 
-		int ret = exec_connect(target_pid, argc - 3, &argv[3]);
+		/* Find the command: skip any proot flags between --exec PID
+		 * and the command. This allows usage like:
+		 *   proot --exec 1234 -r /rootfs -b /host:/guest /bin/sh
+		 * to correctly execute /bin/sh inside the supervisor context.
+		 *
+		 * Heuristic: skip args starting with '-'. If the next arg
+		 * doesn't start with '-', it's a flag value — skip it too. */
+		int cmd_idx;
+		for (cmd_idx = 3; cmd_idx < argc; cmd_idx++) {
+			if (argv[cmd_idx][0] != '-')
+				break;
+			/* Skip flag value if it doesn't look like another flag */
+			if (cmd_idx + 1 < argc && argv[cmd_idx + 1][0] != '-')
+				cmd_idx++;
+		}
+
+		if (cmd_idx >= argc) {
+			fprintf(stderr, "proot --exec: missing command. Usage: --exec <PID> <command> [args...]\n");
+			exit(EXIT_FAILURE);
+		}
+
+		int ret = exec_connect(target_pid, argc - cmd_idx, &argv[cmd_idx]);
 		if (ret < 0) {
 			fprintf(stderr, "proot --exec: %s\n", strerror(errno));
 			exit(EXIT_FAILURE);

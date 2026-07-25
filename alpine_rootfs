@@ -5,7 +5,11 @@ else
     CMD="$@"
 fi
 
-exec env \
+if [ -z "$ECHO" ]; then
+    echo_cmd=echo
+fi
+
+exec $echo_cmd env \
   -i \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   TERM=screen-256color \
