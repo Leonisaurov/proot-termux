@@ -458,6 +458,7 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 			break;
 		}
 	}
+
 	if (!is_virtual) {
 		for (i = 0; i < config->expose_count; i++) {
 			if (config->expose_map[i].virtual_port == port) {
@@ -732,29 +733,6 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 
 	case REMOVED: {
 		VnpConfig *config = talloc_get_type_abort(extension->config, VnpConfig);
-		{
-			/* Unregister all our ports from the registry */
-			int reg_fd = vnp_registry_open(config->proxy_name, LOCK_EX);
-			if (reg_fd >= 0) {
-				struct VnpRegistryHeader hdr;
-				vnp_registry_read(reg_fd, &hdr);
-				/* Remove entries owned by our instance */
-				unsigned int i = 0;
-				while (i < hdr.count) {
-					if (hdr.entries[i].instance_token == config->instance_token) {
-						unsigned int j;
-						for (j = i; j < hdr.count - 1; j++)
-							hdr.entries[j] = hdr.entries[j + 1];
-						hdr.count--;
-					} else {
-						i++;
-					}
-				}
-				hdr.generation++;
-				vnp_registry_write(reg_fd, &hdr);
-				vnp_registry_close(reg_fd);
-			}
-		}
 		vnp_stop_helper(config);
 		return 0;
 	}
