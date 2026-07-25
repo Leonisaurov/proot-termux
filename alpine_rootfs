@@ -1,6 +1,8 @@
 #!/bin/env bash
 if [ $# -eq 0 ]; then
     CMD="sh -l"
+elif [ $# -eq 1 ]; then
+    CMD=$@
 else
     CMD="$@"
 fi

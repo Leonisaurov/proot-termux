@@ -369,10 +369,12 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
 		return 0;
 
+	note(tracee, WARNING, SYSTEM, "vnet: bind port %u on fd %lu", port, (unsigned long)sockfd);
+
 	/* Track this fd as virtual */
 	entry = vnp_find_fd(config, sockfd);
 	if (entry == NULL) {
-		entry = vnp_add_fd(config, sockfd, port, family);
+		entry = vnp_add_fd(config, tracee->pid, sockfd, port, family);
 		if (entry == NULL)
 			return 0;
 	} else {
@@ -439,6 +441,8 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
 		return 0;
 
+	note(tracee, WARNING, SYSTEM, "vnet: connect port %u on fd %lu", port, (unsigned long)sockfd);
+
 	if (family == AF_INET) {
 		/* Only intercept loopback connections */
 		struct sockaddr_in sa_in;
@@ -500,7 +504,7 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	/* Track this fd */
 	entry = vnp_find_fd(config, sockfd);
 	if (entry == NULL) {
-		entry = vnp_add_fd(config, sockfd, port, family);
+		entry = vnp_add_fd(config, tracee->pid, sockfd, port, family);
 		if (entry == NULL)
 			return 0;
 	}
@@ -540,7 +544,7 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 static int vnp_handle_close(Tracee *tracee, VnpConfig *config)
 {
 	word_t fd = peek_reg(tracee, CURRENT, SYSARG_1);
-	vnp_remove_fd(config, (int)fd);
+	vnp_remove_fd(config, (int)fd, tracee->pid);
 	return 0;
 }
 
@@ -703,7 +707,7 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 			int fd = (int)result;
 			VnpFdEntry *entry = vnp_find_fd(config, fd);
 			if (entry == NULL)
-				vnp_add_fd(config, fd, 0, AF_INET);
+				vnp_add_fd(config, tracee->pid, fd, 0, AF_INET);
 			return 0;
 		}
 		case PR_accept:
@@ -731,21 +735,59 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 			/* Track the new fd with same virtual port */
 			VnpFdEntry *entry = vnp_find_fd(config, newfd);
 			if (entry == NULL) {
-				entry = vnp_add_fd(config, newfd, listen_entry->virtual_port,
+				entry = vnp_add_fd(config, tracee->pid, newfd, listen_entry->virtual_port,
 						    listen_entry->orig_domain);
 				if (entry != NULL)
 					entry->exposed_port = listen_entry->exposed_port;
 			}
 
-			/* Fake the client address as AF_INET loopback */
+			/* Fake the client address as AF_INET or AF_INET6 loopback,
+			 * matching the original domain of the listening socket.
+			 * We use raw PTRACE_POKEDATA instead of write_data or
+			 * process_vm_writev because on Android/aarch64:
+			 * - process_vm_writev may be blocked by SELinux
+			 * - write_data's ptrace workaround does PTRACE_CONT
+			 *   which is unsafe in the EXIT handler context */
 			if (addr_ptr != 0 && addrlen_ptr != 0) {
-				struct sockaddr_in fake;
-				memset(&fake, 0, sizeof(fake));
-				fake.sin_family = AF_INET;
-				fake.sin_port = 0;
-				fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-				if (write_data(tracee, addr_ptr, &fake, sizeof(fake)) == 0)
-					poke_uint32(tracee, addrlen_ptr, sizeof(fake));
+				word_t addr_size;
+				size_t nwords;
+				size_t i;
+
+				/* Allocate fake addr on stack */
+				if (listen_entry->orig_domain == AF_INET6) {
+					struct sockaddr_in6 fake6;
+					word_t *f6 = (word_t *)&fake6;
+					memset(&fake6, 0, sizeof(fake6));
+					fake6.sin6_family = AF_INET6;
+					fake6.sin6_port = 0;
+					fake6.sin6_addr = in6addr_loopback;
+					addr_size = sizeof(fake6);
+					nwords = addr_size / sizeof(word_t);
+					for (i = 0; i < nwords; i++)
+						ptrace(PTRACE_POKEDATA, tracee->pid,
+						       addr_ptr + i * sizeof(word_t), f6[i]);
+				}
+				else {
+					struct sockaddr_in fake;
+					word_t *f = (word_t *)&fake;
+					memset(&fake, 0, sizeof(fake));
+					fake.sin_family = AF_INET;
+					fake.sin_port = 0;
+					fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+					addr_size = sizeof(fake);
+					nwords = addr_size / sizeof(word_t);
+					for (i = 0; i < nwords; i++)
+						ptrace(PTRACE_POKEDATA, tracee->pid,
+						       addr_ptr + i * sizeof(word_t), f[i]);
+				}
+
+				/* Write addrlen (4 bytes within a word).
+				 * This may overwrite 4 adjacent bytes on the stack
+				 * but after accept4 returns, the calling code only
+				 * reads addr and addrlen, not adjacent locals. */
+				ptrace(PTRACE_POKEDATA, tracee->pid,
+				       (word_t)addrlen_ptr,
+				       (word_t)addr_size);
 			}
 			return 0;
 		}

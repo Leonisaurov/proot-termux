@@ -55,6 +55,7 @@ struct VnpResponse {
 
 typedef struct {
 	int      fd;            /* Tracee's file descriptor */
+	pid_t    pid;           /* Tracee's pid (to prevent cross-process removal) */
 	uint16_t virtual_port;  /* Virtual port this fd is bound/connect to */
 	uint16_t exposed_port;  /* If > 0, this port is exposed via -p */
 	int      orig_domain;   /* Original AF_INET before we changed to AF_UNIX */
@@ -170,7 +171,7 @@ static inline VnpFdEntry *vnp_find_fd(VnpConfig *config, int fd)
  * Add an fd entry to the config's fd_map.
  * Returns pointer to new entry, or NULL if full.
  */
-static inline VnpFdEntry *vnp_add_fd(VnpConfig *config, int fd, uint16_t virtual_port,
+static inline VnpFdEntry *vnp_add_fd(VnpConfig *config, pid_t pid, int fd, uint16_t virtual_port,
                                       int orig_domain)
 {
 	VnpFdEntry *entry;
@@ -178,6 +179,7 @@ static inline VnpFdEntry *vnp_add_fd(VnpConfig *config, int fd, uint16_t virtual
 		return NULL;
 	entry = &config->fd_map[config->fd_count];
 	entry->fd = fd;
+	entry->pid = pid;
 	entry->virtual_port = virtual_port;
 	entry->exposed_port = 0;
 	entry->orig_domain = orig_domain;
@@ -189,11 +191,11 @@ static inline VnpFdEntry *vnp_add_fd(VnpConfig *config, int fd, uint16_t virtual
  * Remove an fd entry from the config's fd_map.
  * Uses swap-with-last strategy (O(1)) to avoid O(n) memmove.
  */
-static inline void vnp_remove_fd(VnpConfig *config, int fd)
+static inline void vnp_remove_fd(VnpConfig *config, int fd, pid_t pid)
 {
 	int i;
 	for (i = 0; i < config->fd_count; i++) {
-		if (config->fd_map[i].fd == fd) {
+		if (config->fd_map[i].fd == fd && config->fd_map[i].pid == pid) {
 			/* Swap with last entry */
 			config->fd_map[i] = config->fd_map[config->fd_count - 1];
 			config->fd_count--;
@@ -201,6 +203,8 @@ static inline void vnp_remove_fd(VnpConfig *config, int fd)
 		}
 	}
 }
+
+
 
 /**
  * Build the tmp directory path for this proxy.
