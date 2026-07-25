@@ -1,0 +1,279 @@
+/* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
+ *
+ * hide_proc — isolate /proc/, ptrace, and kill from host processes
+ *
+ * When --hide-proc is active:
+ * - /proc/ only shows processes belonging to this proot instance
+ * - ptrace() to host PIDs returns ESRCH (no such process)
+ * - kill() to host PIDs returns ESRCH
+ *
+ * Uses readlink_proc_pid_fd() at getdents time (like hidden_files)
+ * to avoid broken fd tracking through proot's chained syscall mechanism.
+ *
+ * Copyright (C) 2025 Licensed under GPL v2 or later.
+ */
+
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+#include <talloc.h>
+#include <linux/limits.h>
+
+#include "extension/hide_proc/hide_proc.h"
+#include "extension/extension.h"
+#include "tracee/tracee.h"
+#include "tracee/reg.h"
+#include "tracee/mem.h"
+#include "syscall/sysnum.h"
+#include "syscall/seccomp.h"
+#include "syscall/syscall.h"
+#include "path/path.h"
+#include "cli/note.h"
+
+#define HPC_MAX_BUF 4096
+
+/* ================================================================
+ * Filtered sysnums — ensures seccomp intercepts these syscalls
+ * ================================================================ */
+
+static FilteredSysnum hpc_filtered_sysnums[] = {
+	{ PR_getdents64,   FILTER_SYSEXIT },
+	{ PR_getdents,     FILTER_SYSEXIT },
+	{ PR_ptrace,       0 },
+	{ PR_kill,         0 },
+	{ PR_tkill,        0 },
+	{ PR_tgkill,       0 },
+	FILTERED_SYSNUM_END,
+};
+
+/* ================================================================
+ * Helpers
+ * ================================================================ */
+
+static bool hpc_is_numeric(const char *name)
+{
+	int i;
+	if (name[0] == '\0')
+		return false;
+	for (i = 0; name[i] != '\0'; i++) {
+		if (name[i] < '0' || name[i] > '9')
+			return false;
+	}
+	return true;
+}
+
+static bool hpc_is_proot_pid(pid_t pid)
+{
+	Tracees *list = get_tracees_list_head();
+	if (list == NULL)
+		return false;
+
+	Tracee *t;
+	LIST_FOREACH(t, list, link) {
+		if (t->pid == pid)
+			return true;
+	}
+	return false;
+}
+
+/* ================================================================
+ * SYSCALL_ENTER_START — ptrace interception (before built-in handler)
+ * ================================================================ */
+
+static int hpc_handle_ptrace_enter(Tracee *tracee)
+{
+	pid_t target_pid;
+
+	target_pid = (pid_t)peek_reg(tracee, CURRENT, SYSARG_2);
+
+	/* PTRACE_TRACEME (pid=0) always allowed */
+	if (target_pid == 0)
+		return 0;
+
+	/* Allow if it's a proot process */
+	if (hpc_is_proot_pid(target_pid))
+		return 0;
+
+	/* Host process: ESRCH */
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, -ESRCH);
+	VERBOSE(tracee, 2, "hide_proc: blocked ptrace to host pid %d", target_pid);
+	return 1;
+}
+
+/* ================================================================
+ * SYSCALL_ENTER_END — kill interception
+ * ================================================================ */
+
+static int hpc_handle_kill_enter(Tracee *tracee, int pid_reg)
+{
+	pid_t target_pid;
+
+	target_pid = (pid_t)peek_reg(tracee, CURRENT, pid_reg);
+
+	/* kill(0, ...) means self process group — allow */
+	if (target_pid <= 0)
+		return 0;
+
+	if (hpc_is_proot_pid(target_pid))
+		return 0;
+
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, -ESRCH);
+	VERBOSE(tracee, 2, "hide_proc: blocked kill(%d) to host process", target_pid);
+	return 0;
+}
+
+/* ================================================================
+ * SYSCALL_EXIT_END — getdents64/ getdents filtering
+ * ================================================================ */
+
+static int hpc_handle_getdents_exit(Tracee *tracee, Sysnum num)
+{
+	word_t result, fd, buf;
+	char proc_path[PATH_MAX];
+	int status;
+
+	result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	if ((int)result <= 0)
+		return 0;
+
+	/* Use ORIGINAL for fd: on ARM64 CURRENT SYSARG_1 == return value */
+	fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
+
+	/* Check if this fd points to /proc/ root */
+	status = readlink_proc_pid_fd(tracee->pid, (int)fd, proc_path);
+	if (status < 0)
+		return 0;
+
+	/* Only filter /proc/ root itself */
+	if (strcmp(proc_path, "/proc") != 0 && strcmp(proc_path, "/proc/") != 0)
+		return 0;
+
+	buf = peek_reg(tracee, CURRENT, SYSARG_2);
+
+	if ((int)result > HPC_MAX_BUF)
+		return 0;
+
+	char data[HPC_MAX_BUF];
+	if (read_data(tracee, data, buf, result) < 0)
+		return 0;
+
+	int nleft = 0;
+	char *ptr = data;
+	int remaining = (int)result;
+
+	while (remaining > 0) {
+		unsigned short reclen;
+		char *d_name;
+
+		if (num == PR_getdents64) {
+			struct linux_dirent64 {
+				unsigned long long  d_ino;
+				long long           d_off;
+				unsigned short      d_reclen;
+				unsigned char       d_type;
+				char                d_name[];
+			} *dirent = (void *)ptr;
+			reclen = dirent->d_reclen;
+			d_name = dirent->d_name;
+		}
+		else {
+			struct linux_dirent {
+				unsigned long   d_ino;
+				unsigned long   d_off;
+				unsigned short  d_reclen;
+				char            d_name[];
+			} *dirent = (void *)ptr;
+			reclen = dirent->d_reclen;
+			d_name = dirent->d_name;
+		}
+
+		if (reclen == 0 || reclen > (unsigned short)remaining)
+			break;
+
+		bool is_numeric = hpc_is_numeric(d_name);
+		pid_t entry_pid = is_numeric ? (pid_t)atoi(d_name) : 0;
+		bool keep = !is_numeric || hpc_is_proot_pid(entry_pid);
+
+		if (keep) {
+			if (ptr != data + nleft)
+				memmove(data + nleft, ptr, reclen);
+			nleft += reclen;
+		}
+
+		ptr += reclen;
+		remaining -= reclen;
+	}
+
+	if (nleft < (int)result) {
+		if (nleft > 0)
+			write_data(tracee, buf, data, nleft);
+		poke_reg(tracee, SYSARG_RESULT, (word_t)nleft);
+		VERBOSE(tracee, 3, "hide_proc: filtered getdents %d -> %d bytes",
+			(int)result, nleft);
+	}
+
+	return 0;
+}
+
+/* ================================================================
+ * Callback
+ * ================================================================ */
+
+int hpc_callback(Extension *extension, ExtensionEvent event,
+		  intptr_t data1 UNUSED, intptr_t data2 UNUSED)
+{
+	switch (event) {
+	case INITIALIZATION: {
+		extension->config = NULL;
+		extension->filtered_sysnums = hpc_filtered_sysnums;
+		return 0;
+	}
+
+	case SYSCALL_ENTER_START: {
+		Tracee *tracee = TRACEE(extension);
+
+		if (get_sysnum(tracee, CURRENT) == PR_ptrace)
+			return hpc_handle_ptrace_enter(tracee);
+		return 0;
+	}
+
+	case SYSCALL_ENTER_END: {
+		Tracee *tracee = TRACEE(extension);
+		Sysnum num;
+
+		num = get_sysnum(tracee, CURRENT);
+		switch (num) {
+		case PR_kill:
+			return hpc_handle_kill_enter(tracee, SYSARG_1);
+		case PR_tkill:
+			return hpc_handle_kill_enter(tracee, SYSARG_1);
+		case PR_tgkill:
+			return hpc_handle_kill_enter(tracee, SYSARG_2);
+		default:
+			return 0;
+		}
+	}
+
+	case SYSCALL_EXIT_END: {
+		Tracee *tracee = TRACEE(extension);
+
+		switch (get_sysnum(tracee, ORIGINAL)) {
+		case PR_getdents64:
+			return hpc_handle_getdents_exit(tracee, PR_getdents64);
+		case PR_getdents:
+			return hpc_handle_getdents_exit(tracee, PR_getdents);
+		default:
+			return 0;
+		}
+	}
+
+	case REMOVED:
+		return 0;
+
+	default:
+		return 0;
+	}
+}

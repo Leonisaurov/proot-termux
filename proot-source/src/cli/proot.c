@@ -32,6 +32,7 @@
 #include "extension/sysvipc/sysvipc.h"
 #include "extension/virtual_net/virtual_net.h"
 #include "extension/virtual_net/virtual_net_internal.h"
+#include "extension/hide_proc/hide_proc.h"
 #include "supervise/supervise.h"
 #include "path/binding.h"
 #include "attribute.h"
@@ -481,6 +482,17 @@ static int handle_option_exec(Tracee *tracee, const Cli *cli UNUSED, const char 
 
 	tracee->exec_target = target_pid;
 	VERBOSE(tracee, 2, "--exec: will connect to PID %d", target_pid);
+	return 0;
+}
+
+static int handle_option_hide_proc(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	int status;
+
+	status = initialize_extension(tracee, hpc_callback, NULL);
+	if (status < 0)
+		note(tracee, WARNING, INTERNAL, "hide_proc not initialized");
+
 	return 0;
 }
 
