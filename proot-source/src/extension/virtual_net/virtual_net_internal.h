@@ -13,7 +13,6 @@
 
 #define VNP_TMP_DIR      "/data/data/com.termux/files/usr/tmp/proot-net"
 #define VNP_MAX_NAME     64
-#define VNP_MAX_PORTS    4096
 #define VNP_MAX_FDS      256
 #define VNP_EXPOSE_MAX   64
 #define VNP_SOCKBUF_LEN  128
@@ -42,12 +41,12 @@ struct VnpRequest {
 	uint32_t opcode;
 	uint16_t virtual_port;
 	uint16_t host_port;
-};
+} __attribute__((packed));
 
 struct VnpResponse {
 	int32_t  result;     /* 0 = success, -errno = error */
 	uint16_t host_port;
-};
+} __attribute__((packed));
 
 /* ========================================================================= */
 /*  Virtual socket fd tracking (in tracer memory)                            */
@@ -97,7 +96,6 @@ typedef struct {
 
 #define VNP_REG_MAGIC   0x50524F4E /* "PRON" */
 #define VNP_REG_MAX     512
-#define VNP_REG_FILE    "bindings.dat"
 #define VNP_REG_LOCK    "registry.lock"
 
 struct VnpRegistryEntry {

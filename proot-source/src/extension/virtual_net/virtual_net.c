@@ -261,10 +261,19 @@ static int vnp_registry_read(int fd, struct VnpRegistryHeader *hdr)
 
 static int vnp_registry_write(int fd, const struct VnpRegistryHeader *hdr)
 {
-	lseek(fd, 0, SEEK_SET);
-	ssize_t n = write(fd, hdr, sizeof(*hdr));
-	ftruncate(fd, n);
-	return n == sizeof(*hdr) ? 0 : -1;
+	ssize_t n;
+
+	if (lseek(fd, 0, SEEK_SET) < 0)
+		return -1;
+
+	n = write(fd, hdr, sizeof(*hdr));
+	if (n != (ssize_t)sizeof(*hdr))
+		return -1;
+
+	if (ftruncate(fd, n) < 0)
+		return -1;
+
+	return 0;
 }
 
 static struct VnpRegistryEntry *vnp_registry_find(
@@ -296,23 +305,6 @@ static struct VnpRegistryEntry *vnp_registry_add(
 	memcpy(entry->abstract_name, abstract_name, sizeof(entry->abstract_name));
 	hdr->generation++;
 	return entry;
-}
-
-static void vnp_registry_remove(struct VnpRegistryHeader *hdr,
-				 uint16_t virtual_port, uint32_t token)
-{
-	unsigned int i;
-	for (i = 0; i < hdr->count; i++) {
-		if (hdr->entries[i].virtual_port == virtual_port
-		    && hdr->entries[i].instance_token == token) {
-			unsigned int j;
-			for (j = i; j < hdr->count - 1; j++)
-				hdr->entries[j] = hdr->entries[j + 1];
-			hdr->count--;
-			hdr->generation++;
-			return;
-		}
-	}
 }
 
 /* ===========================================================================
@@ -360,6 +352,41 @@ static inline int extract_port_from_tracee(Tracee *tracee, word_t addr_ptr,
 }
 
 /**
+ * Write data to tracee memory via direct PTRACE_POKEDATA.
+ * Returns 0 on success, -1 on failure (ptrace error).
+ */
+static int vnp_write_to_tracee(Tracee *tracee, word_t dest, 
+                                const void *src, size_t size)
+{
+	const word_t *words = (const word_t *)src;
+	size_t nwords = size / sizeof(word_t);
+	size_t trailing = size % sizeof(word_t);
+	size_t i;
+
+	for (i = 0; i < nwords; i++) {
+		if (ptrace(PTRACE_POKEDATA, tracee->pid,
+			   (word_t)(dest + i * sizeof(word_t)),
+			   words[i]) < 0)
+			return -1;
+	}
+
+	if (trailing > 0) {
+		word_t last_word;
+		word_t addr = dest + nwords * sizeof(word_t);
+		errno = 0;
+		last_word = ptrace(PTRACE_PEEKDATA, tracee->pid, (word_t)addr, NULL);
+		if (last_word == (word_t)-1 && errno != 0)
+			return -1;
+		memcpy((uint8_t *)&last_word,
+		       (const uint8_t *)src + nwords * sizeof(word_t),
+		       trailing);
+		if (ptrace(PTRACE_POKEDATA, tracee->pid, (word_t)addr, last_word) < 0)
+			return -1;
+	}
+	return 0;
+}
+
+/**
  * Handle socket() — change AF_INET to AF_UNIX.
  * The tracee thinks it creates a TCP socket, but gets a Unix socket.
  */
@@ -391,6 +418,12 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 
 	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
 		return 0;
+
+	/* Port 0 means "assign automatically" — generate a unique virtual port */
+	if (port == 0) {
+		port = (uint16_t)(((uint32_t)sockfd ^ config->instance_token) & 0xFFFF);
+		if (port == 0) port = 1;
+	}
 
 	VERBOSE(tracee, 1, "vnet: bind port %u on fd %lu", port, (unsigned long)sockfd);
 
@@ -441,32 +474,8 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 		/* Write sockaddr_un directly with PTRACE_POKEDATA (no workaround).
 		 * Handles trailing bytes like write_data() does, but always
 		 * uses raw ptrace to avoid process_vm_writev + workaround. */
-		{
-			const word_t *words = (const word_t *)&sa_unix;
-			size_t size = sizeof(sa_unix);
-			size_t nwords = size / sizeof(word_t);
-			size_t trailing = size % sizeof(word_t);
-			size_t i;
-
-			for (i = 0; i < nwords; i++) {
-				ptrace(PTRACE_POKEDATA, tracee->pid,
-				       (word_t)(new_addr + i * sizeof(word_t)),
-				       words[i]);
-			}
-
-			if (trailing > 0) {
-				word_t last_word = ptrace(PTRACE_PEEKDATA, tracee->pid,
-					(word_t)(new_addr + nwords * sizeof(word_t)));
-				uint8_t *last_dest = (uint8_t *)&last_word;
-				const uint8_t *last_src = (const uint8_t *)&sa_unix;
-				last_src += nwords * sizeof(word_t);
-				for (i = 0; i < trailing; i++)
-					last_dest[i] = last_src[i];
-				ptrace(PTRACE_POKEDATA, tracee->pid,
-				       (word_t)(new_addr + nwords * sizeof(word_t)),
-				       last_word);
-			}
-		}
+		if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
+			return 0;
 
 		poke_reg(tracee, SYSARG_1, sockfd);
 		poke_reg(tracee, SYSARG_2, new_addr);
@@ -576,33 +585,8 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 
 				word_t new_addr = alloc_mem(tracee, sizeof(sa_unix));
 				if (new_addr != 0) {
-					/* Write sockaddr_un directly with PTRACE_POKEDATA */
-				{
-					const word_t *words = (const word_t *)&sa_unix;
-					size_t size = sizeof(sa_unix);
-					size_t nwords = size / sizeof(word_t);
-					size_t trailing = size % sizeof(word_t);
-					size_t i;
-
-					for (i = 0; i < nwords; i++) {
-						ptrace(PTRACE_POKEDATA, tracee->pid,
-						       (word_t)(new_addr + i * sizeof(word_t)),
-						       words[i]);
-					}
-
-					if (trailing > 0) {
-						word_t last_word = ptrace(PTRACE_PEEKDATA, tracee->pid,
-							(word_t)(new_addr + nwords * sizeof(word_t)));
-						uint8_t *last_dest = (uint8_t *)&last_word;
-						const uint8_t *last_src = (const uint8_t *)&sa_unix;
-						last_src += nwords * sizeof(word_t);
-						for (i = 0; i < trailing; i++)
-							last_dest[i] = last_src[i];
-						ptrace(PTRACE_POKEDATA, tracee->pid,
-						       (word_t)(new_addr + nwords * sizeof(word_t)),
-						       last_word);
-					}
-				}
+					if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
+					return 0;
 					poke_reg(tracee, SYSARG_2, new_addr);
 					poke_reg(tracee, SYSARG_3, sizeof(sa_unix));
 				}
@@ -728,6 +712,15 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 		if (config == NULL)
 			return -1;
 
+		/* Validate proxy_name: no path separators or dots (prevents path traversal) */
+		if (strchr(proxy_name, '/') != NULL ||
+		    strchr(proxy_name, '\\') != NULL ||
+		    strcmp(proxy_name, ".") == 0 ||
+		    strcmp(proxy_name, "..") == 0) {
+			note(TRACEE(extension), ERROR, USER, "virtual_net: invalid proxy name '%s'", proxy_name);
+			return -1;
+		}
+
 		strncpy(config->proxy_name, proxy_name, VNP_MAX_NAME - 1);
 		config->proxy_name[VNP_MAX_NAME - 1] = '\0';
 		config->instance_token = vnp_generate_token();
@@ -796,16 +789,9 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 			word_t addrlen_ptr;
 			int newfd = (int)result;
 
-			if (get_sysnum(tracee, ORIGINAL) == PR_accept4) {
-				listen_fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
-				addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
-				addrlen_ptr = peek_reg(tracee, ORIGINAL, SYSARG_3);
-			}
-			else {
-				listen_fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
-				addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
-				addrlen_ptr = peek_reg(tracee, ORIGINAL, SYSARG_3);
-			}
+			listen_fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
+			addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+			addrlen_ptr = peek_reg(tracee, ORIGINAL, SYSARG_3);
 
 			VnpFdEntry *listen_entry = vnp_find_fd(config, (int)listen_fd);
 			if (listen_entry == NULL || listen_entry->virtual_port == 0)
@@ -827,47 +813,29 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 			 * - process_vm_writev may be blocked by SELinux
 			 * - write_data's ptrace workaround does PTRACE_CONT
 			 *   which is unsafe in the EXIT handler context */
-			if (addr_ptr != 0 && addrlen_ptr != 0) {
-				word_t addr_size;
-				size_t nwords;
-				size_t i;
-
-				/* Allocate fake addr on stack */
-				if (listen_entry->orig_domain == AF_INET6) {
-					struct sockaddr_in6 fake6;
-					word_t *f6 = (word_t *)&fake6;
-					memset(&fake6, 0, sizeof(fake6));
-					fake6.sin6_family = AF_INET6;
-					fake6.sin6_port = 0;
-					fake6.sin6_addr = in6addr_loopback;
-					addr_size = sizeof(fake6);
-					nwords = addr_size / sizeof(word_t);
-					for (i = 0; i < nwords; i++)
-						ptrace(PTRACE_POKEDATA, tracee->pid,
-						       addr_ptr + i * sizeof(word_t), f6[i]);
-				}
-				else {
-					struct sockaddr_in fake;
-					word_t *f = (word_t *)&fake;
-					memset(&fake, 0, sizeof(fake));
-					fake.sin_family = AF_INET;
-					fake.sin_port = 0;
-					fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-					addr_size = sizeof(fake);
-					nwords = addr_size / sizeof(word_t);
-					for (i = 0; i < nwords; i++)
-						ptrace(PTRACE_POKEDATA, tracee->pid,
-						       addr_ptr + i * sizeof(word_t), f[i]);
-				}
-
-				/* Write addrlen (4 bytes within a word).
-				 * This may overwrite 4 adjacent bytes on the stack
-				 * but after accept4 returns, the calling code only
-				 * reads addr and addrlen, not adjacent locals. */
-				ptrace(PTRACE_POKEDATA, tracee->pid,
-				       (word_t)addrlen_ptr,
-				       (word_t)addr_size);
+		if (addr_ptr != 0 && addrlen_ptr != 0) {
+			if (listen_entry->orig_domain == AF_INET6) {
+				struct sockaddr_in6 fake6;
+				memset(&fake6, 0, sizeof(fake6));
+				fake6.sin6_family = AF_INET6;
+				fake6.sin6_port = 0;
+				fake6.sin6_addr = in6addr_loopback;
+				vnp_write_to_tracee(tracee, addr_ptr, &fake6, sizeof(fake6));
+			} else {
+				struct sockaddr_in fake;
+				memset(&fake, 0, sizeof(fake));
+				fake.sin_family = AF_INET;
+				fake.sin_port = 0;
+				fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+				vnp_write_to_tracee(tracee, addr_ptr, &fake, sizeof(fake));
 			}
+			{
+				uint32_t addrlen_val = (listen_entry->orig_domain == AF_INET6)
+					? (uint32_t)sizeof(struct sockaddr_in6)
+					: (uint32_t)sizeof(struct sockaddr_in);
+				vnp_write_to_tracee(tracee, addrlen_ptr, &addrlen_val, sizeof(addrlen_val));
+			}
+		}
 			return 0;
 		}
 		default:
@@ -906,8 +874,14 @@ int vnp_configure(Tracee *tracee, const char *proxy_name)
 	{
 		char dirpath[VNP_SOCKBUF_LEN];
 		vnp_net_path(proxy_name, dirpath, sizeof(dirpath));
-		mkdir(VNP_TMP_DIR, 0755);
-		mkdir(dirpath, 0755);
+		if (mkdir(VNP_TMP_DIR, 0755) < 0 && errno != EEXIST) {
+			note(NULL, WARNING, INTERNAL,
+			     "virtual_net: cannot create %s", VNP_TMP_DIR);
+		}
+		if (mkdir(dirpath, 0755) < 0 && errno != EEXIST) {
+			note(NULL, WARNING, INTERNAL,
+			     "virtual_net: cannot create %s", dirpath);
+		}
 	}
 
 	status = initialize_extension(tracee, vnp_callback, proxy_name);
