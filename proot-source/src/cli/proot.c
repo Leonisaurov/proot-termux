@@ -32,7 +32,7 @@
 #include "extension/sysvipc/sysvipc.h"
 #include "extension/virtual_net/virtual_net.h"
 #include "extension/virtual_net/virtual_net_internal.h"
-#include "extension/hide_proc/hide_proc.h"
+#include "extension/proc_isolation/proc_isolation.h"
 #include "supervise/supervise.h"
 #include "path/binding.h"
 #include "attribute.h"
@@ -485,13 +485,13 @@ static int handle_option_exec(Tracee *tracee, const Cli *cli UNUSED, const char 
 	return 0;
 }
 
-static int handle_option_hide_proc(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+static int handle_option_proc_isolation(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
 {
 	int status;
 
 	status = initialize_extension(tracee, hpc_callback, NULL);
 	if (status < 0)
-		note(tracee, WARNING, INTERNAL, "hide_proc not initialized");
+		note(tracee, WARNING, INTERNAL, "proc_isolation not initialized");
 
 	return 0;
 }

@@ -74,7 +74,7 @@ static int handle_option_proxy(Tracee *tracee, const Cli *cli, const char *value
 static int handle_option_mbind(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_supervise(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_exec(Tracee *tracee, const Cli *cli, const char *value);
-static int handle_option_hide_proc(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_proc_isolation(Tracee *tracee, const Cli *cli, const char *value);
 
 static int pre_initialize_bindings(Tracee *, const Cli *, size_t, char *const *, size_t);
 static int post_initialize_exe(Tracee *, const Cli *, size_t, char *const *, size_t);
@@ -326,9 +326,9 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
         },
         { .class = "Extension options",
           .arguments = {
-                { .name = "--hide-proc", .separator = '\0', .value = NULL },
+                { .name = "--proc-isolation", .separator = '\0', .value = NULL },
                 { .name = NULL, .separator = '\0', .value = NULL } },
-          .handler = handle_option_hide_proc,
+          .handler = handle_option_proc_isolation,
           .description = "Hide host processes from /proc/, ptrace(), and kill().",
           .detail = "",
         },

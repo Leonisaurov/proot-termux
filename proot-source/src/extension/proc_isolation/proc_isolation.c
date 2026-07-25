@@ -1,8 +1,8 @@
 /* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
  *
- * hide_proc — isolate /proc/, ptrace, and kill from host processes
+ * proc_isolation — isolate /proc/, ptrace, and kill from host processes
  *
- * When --hide-proc is active:
+ * When --proc-isolation is active:
  * - /proc/ only shows processes belonging to this proot instance
  * - ptrace() to host PIDs returns ESRCH (no such process)
  * - kill() to host PIDs returns ESRCH
@@ -20,7 +20,7 @@
 #include <talloc.h>
 #include <linux/limits.h>
 
-#include "extension/hide_proc/hide_proc.h"
+#include "extension/proc_isolation/proc_isolation.h"
 #include "extension/extension.h"
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
@@ -98,7 +98,7 @@ static int hpc_handle_ptrace_enter(Tracee *tracee)
 	/* Host process: ESRCH */
 	set_sysnum(tracee, PR_void);
 	poke_reg(tracee, SYSARG_RESULT, -ESRCH);
-	VERBOSE(tracee, 2, "hide_proc: blocked ptrace to host pid %d", target_pid);
+	VERBOSE(tracee, 2, "proc_isolation: blocked ptrace to host pid %d", target_pid);
 	return 1;
 }
 
@@ -121,7 +121,7 @@ static int hpc_handle_kill_enter(Tracee *tracee, int pid_reg)
 
 	set_sysnum(tracee, PR_void);
 	poke_reg(tracee, SYSARG_RESULT, -ESRCH);
-	VERBOSE(tracee, 2, "hide_proc: blocked kill(%d) to host process", target_pid);
+	VERBOSE(tracee, 2, "proc_isolation: blocked kill(%d) to host process", target_pid);
 	return 0;
 }
 
@@ -211,7 +211,7 @@ static int hpc_handle_getdents_exit(Tracee *tracee, Sysnum num)
 		if (nleft > 0)
 			write_data(tracee, buf, data, nleft);
 		poke_reg(tracee, SYSARG_RESULT, (word_t)nleft);
-		VERBOSE(tracee, 3, "hide_proc: filtered getdents %d -> %d bytes",
+		VERBOSE(tracee, 3, "proc_isolation: filtered getdents %d -> %d bytes",
 			(int)result, nleft);
 	}
 

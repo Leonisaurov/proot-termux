@@ -86,7 +86,7 @@ OBJECTS += \
 	extension/port_switch/port_switch.o \
 	extension/virtual_net/virtual_net.o \
 	extension/virtual_net/virtual_net_helper.o \
-	extension/hide_proc/hide_proc.o \
+	extension/proc_isolation/proc_isolation.o \
 	extension/sysvipc/sysvipc.o \
 	extension/sysvipc/sysvipc_msg.o \
 	extension/sysvipc/sysvipc_sem.o \
