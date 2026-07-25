@@ -338,8 +338,9 @@ int push_specific_regs(Tracee *tracee, bool including_sysnum)
 			regs.iov_len = sizeof(current_sysnum);
 			status = ptrace(PTRACE_SETREGSET, tracee->pid, NT_ARM_SYSTEM_CALL, &regs);
 			if (status < 0) {
-				//note(tracee, WARNING, SYSTEM, "can't set the syscall number");
-				return status;
+				tracee->chain.syscall_change_unsupported = true;
+				note(tracee, WARNING, INTERNAL,
+					"ARM64 syscall number change unsupported (kernel < 4.17?)");
 			}
 		}
 

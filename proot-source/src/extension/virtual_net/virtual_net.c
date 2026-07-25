@@ -43,6 +43,7 @@
 #include "attribute.h"
 #include "syscall/seccomp.h"
 
+
 #include "arch.h"
 #include "path/path.h"
 
@@ -449,6 +450,26 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 		}
 		if (!is_virtual)
 			return 0; /* Loopback but not exposed: real bind */
+
+		/* With --allow-internet: socket is AF_INET, write sockaddr_un directly
+		 * (will fail since AF_INET can't bind to AF_UNIX; known limitation) */
+		{
+			word_t new_addr;
+
+			vnp_fill_abstract_sa(&sa_unix, config->proxy_name, port, config->instance_token);
+
+			new_addr = alloc_mem(tracee, sizeof(struct sockaddr_un));
+			if (new_addr == 0)
+				return 0;
+			if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
+				return 0;
+
+			poke_reg(tracee, SYSARG_1, sockfd);
+			poke_reg(tracee, SYSARG_2, new_addr);
+			poke_reg(tracee, SYSARG_3, sizeof(struct sockaddr_un));
+
+			return 0;
+		}
 	}
 
 	/* Port 0 means "assign automatically" — generate a unique virtual port */
@@ -608,7 +629,7 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 			vnp_registry_read(reg_fd, &hdr);
 			struct VnpRegistryEntry *reg_entry = vnp_registry_find(&hdr, port);
 			if (reg_entry != NULL) {
-				/* Use the registered abstract name */
+				/* Overwrite sockaddr args with abstract Unix socket */
 				struct sockaddr_un sa_unix;
 				memset(&sa_unix, 0, sizeof(sa_unix));
 				sa_unix.sun_family = AF_UNIX;
@@ -618,7 +639,7 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 				word_t new_addr = alloc_mem(tracee, sizeof(sa_unix));
 				if (new_addr != 0) {
 					if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
-					return 0;
+						return 0;
 					poke_reg(tracee, SYSARG_2, new_addr);
 					poke_reg(tracee, SYSARG_3, sizeof(sa_unix));
 				}
@@ -811,6 +832,9 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 			return 0;
 
 		switch (get_sysnum(tracee, ORIGINAL)) {
+		case PR_connect:
+		case PR_bind:
+			return 0;
 		case PR_socket: {
 			int fd = (int)result;
 			VnpFdEntry *entry = vnp_find_fd(config, fd);
@@ -881,6 +905,8 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 			return 0;
 		}
 	}
+
+
 
 	case REMOVED: {
 		VnpConfig *config = talloc_get_type_abort(extension->config, VnpConfig);
