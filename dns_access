@@ -1,0 +1,17 @@
+#!/bin/env bash
+set -m
+
+echo "Levantando server, deberia de poder hacer curl a google.com"
+PROOT_FLAGS='--proxy web --allow-internet' ./alpine_rootfs "curl google.com && python -m http.server 80" &
+sleep 3
+
+echo "Deberia de poder acceder"
+PROOT_FLAGS='--proxy web --allow-internet' ./alpine_rootfs "curl localhost:80"
+
+echo "Deberia de poder acceder"
+PROOT_FLAGS='--proxy web' ./alpine_rootfs "curl localhost:80"
+
+echo "No deberia de poder acceder"
+PROOT_FLAGS='--proxy web2' ./alpine_rootfs "curl localhost:80"
+
+kill %1
