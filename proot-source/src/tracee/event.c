@@ -445,7 +445,7 @@ int event_loop(Tracee *root_tracee)
 				 * This is supervise-specific: check if this tracee
 				 * was spawned by an --exec client. */
 				if (WIFEXITED(wait_status) || WIFSIGNALED(wait_status)) {
-					int remaining = supervise_tracee_exited(pid, wait_status);
+					int remaining = supervise_tracee_exited(root_tracee, pid, wait_status);
 
 					if (pid == root_tracee->pid) {
 						/* Root tracee exited: log it and stop

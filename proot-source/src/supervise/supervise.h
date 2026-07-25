@@ -79,7 +79,7 @@ extern void supervise_accept_client(int ctl_fd, Tracee *root_tracee);
  * If so, sends the exit status back to the client.
  * Returns the number of clients still pending, or 0 if none.
  */
-extern int supervise_tracee_exited(pid_t pid, int status);
+extern int supervise_tracee_exited(Tracee *root_tracee, pid_t pid, int status);
 
 /**
  * Log the exit reason of the root tracee.

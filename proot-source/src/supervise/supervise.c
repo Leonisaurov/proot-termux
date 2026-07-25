@@ -354,7 +354,7 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
  * supervise_tracee_exited: called when a tracee exits
  * =========================================================================== */
 
-int supervise_tracee_exited(pid_t pid, int status)
+int supervise_tracee_exited(Tracee *root_tracee, pid_t pid, int status)
 {
 	ExecResponse resp;
 	int i;
