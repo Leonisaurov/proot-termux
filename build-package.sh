@@ -49,7 +49,7 @@ else
 fi
 
 # Automatically enable offline set of sources and build tools.
-# Offline termux-packages bundle can be created by executing
+# Offline proot-termux bundle can be created by executing
 # script ./scripts/setup-offline-bundle.sh.
 if [[ -f "${TERMUX_SCRIPTDIR}/build-tools/.installed" ]]; then
 	export TERMUX_PACKAGES_OFFLINE=true
@@ -67,6 +67,13 @@ export TERMUX_REPO_PKG_FORMAT
 # Special variable for internal use. It forces script to ignore
 # lock file.
 : "${TERMUX_BUILD_IGNORE_LOCK:=false}"
+
+# =============================================================================
+# Build Step Functions
+# =============================================================================
+# All build steps are sourced below. Each corresponds to a phase in the
+# package build pipeline.
+#
 
 # Utility function to log an error message and exit with an error code.
 # shellcheck source=scripts/build/termux_error_exit.sh
@@ -265,12 +272,6 @@ source "$TERMUX_SCRIPTDIR/scripts/build/get_source/termux_download_src_archive.s
 # shellcheck source=scripts/build/get_source/termux_unpack_src_archive.sh
 source "$TERMUX_SCRIPTDIR/scripts/build/get_source/termux_unpack_src_archive.sh"
 
-# Hook for packages to act just after the package sources have been obtained.
-# Invoked from $TERMUX_PKG_SRCDIR.
-termux_step_post_get_source() {
-	return
-}
-
 # Optional host build. Not to be overridden by packages.
 # shellcheck source=scripts/build/termux_step_handle_host_build.sh
 source "$TERMUX_SCRIPTDIR/scripts/build/termux_step_handle_host_build.sh"
@@ -304,11 +305,6 @@ source "$TERMUX_SCRIPTDIR/scripts/build/termux_step_patch_package.sh"
 # shellcheck source=scripts/build/termux_step_replace_guess_scripts.sh
 source "$TERMUX_SCRIPTDIR/scripts/build/termux_step_replace_guess_scripts.sh"
 
-# For package scripts to override. Called in $TERMUX_PKG_BUILDDIR.
-termux_step_pre_configure() {
-	return
-}
-
 # Setup configure args and run $TERMUX_PKG_SRCDIR/configure. This function is called from termux_step_configure
 # shellcheck source=scripts/build/configure/termux_step_configure_autotools.sh
 source "$TERMUX_SCRIPTDIR/scripts/build/configure/termux_step_configure_autotools.sh"
@@ -329,11 +325,6 @@ source "$TERMUX_SCRIPTDIR/scripts/build/configure/termux_step_configure_cabal.sh
 # shellcheck source=scripts/build/configure/termux_step_configure.sh
 source "$TERMUX_SCRIPTDIR/scripts/build/configure/termux_step_configure.sh"
 
-# Hook for packages after configure step
-termux_step_post_configure() {
-	return
-}
-
 # Make package, either with ninja or make
 # shellcheck source=scripts/build/termux_step_make.sh
 source "$TERMUX_SCRIPTDIR/scripts/build/termux_step_make.sh"
@@ -341,11 +332,6 @@ source "$TERMUX_SCRIPTDIR/scripts/build/termux_step_make.sh"
 # Make install, either with ninja, make of cargo
 # shellcheck source=scripts/build/termux_step_make_install.sh
 source "$TERMUX_SCRIPTDIR/scripts/build/termux_step_make_install.sh"
-
-# Hook function for package scripts to override.
-termux_step_post_make_install() {
-	return
-}
 
 # Install hooks (alpm-hooks) and hook-scripts into the pacman package
 # shellcheck source=scripts/build/termux_step_install_pacman_hooks.sh
@@ -387,16 +373,6 @@ source "$TERMUX_SCRIPTDIR/scripts/build/termux_step_strip_elf_symbols.sh"
 # shellcheck source=scripts/build/termux_step_elf_cleaner.sh
 source "$TERMUX_SCRIPTDIR/scripts/build/termux_step_elf_cleaner.sh"
 
-# Hook for packages before massage step
-termux_step_pre_massage() {
-	return
-}
-
-# Hook for packages after massage step
-termux_step_post_massage() {
-	return
-}
-
 # Function to create {pre,post}install, {pre,post}rm-scripts and similar
 # shellcheck source=scripts/build/termux_step_create_debscripts.sh
 source "$TERMUX_SCRIPTDIR/scripts/build/termux_step_create_debscripts.sh"
@@ -426,6 +402,35 @@ source "$TERMUX_SCRIPTDIR/scripts/build/termux_step_create_alternatives.sh"
 # Finish the build. Not to be overridden by package scripts.
 # shellcheck source=scripts/build/termux_step_finish_build.sh
 source "$TERMUX_SCRIPTDIR/scripts/build/termux_step_finish_build.sh"
+
+# ===== End of build step sources =====
+
+# -------------------------------------------------------------------------
+# Package hook stubs (overridable by packages)
+# -------------------------------------------------------------------------
+termux_step_post_get_source() {
+	return
+}
+
+termux_step_pre_configure() {
+	return
+}
+
+termux_step_post_configure() {
+	return
+}
+
+termux_step_post_make_install() {
+	return
+}
+
+termux_step_pre_massage() {
+	return
+}
+
+termux_step_post_massage() {
+	return
+}
 
 ################################################################################
 
@@ -509,6 +514,31 @@ sudo() {
 	termux_error_exit "Do not use 'sudo' inside build scripts. Build environment should be configured through ./scripts/setup-ubuntu.sh."
 }
 
+# Build the current package for all architectures by re-invoking
+# build-package.sh for each target arch with the same flags.
+build_for_all_archs() {
+	local -a _SELF_ARGS=()
+	[[ "${TERMUX_CLEANUP_BUILT_PACKAGES_ON_LOW_DISK_SPACE:-}" == "true" ]] && _SELF_ARGS+=("-C")
+	[[ "${TERMUX_DEBUG_BUILD:-}" == "true" ]] && _SELF_ARGS+=("-d")
+	[[ "${TERMUX_IS_DISABLED:-}" == "true" ]] && _SELF_ARGS+=("-D")
+	[[ "${TERMUX_FORCE_BUILD:-}" == "true" && "${TERMUX_FORCE_BUILD_DEPENDENCIES:-}" != "true" ]] && _SELF_ARGS+=("-f")
+	[[ "${TERMUX_FORCE_BUILD:-}" == "true" && "${TERMUX_FORCE_BUILD_DEPENDENCIES:-}" == "true" ]] && _SELF_ARGS+=("-F")
+	[[ "${TERMUX_INSTALL_DEPS:-}" == "true" && "${TERMUX_PKGS__BUILD__RM_ALL_PKGS_BUILT_MARKER_AND_INSTALL_FILES:-}" != "false" ]] && _SELF_ARGS+=("-i")
+	[[ "${TERMUX_INSTALL_DEPS:-}" == "true" && "${TERMUX_PKGS__BUILD__RM_ALL_PKGS_BUILT_MARKER_AND_INSTALL_FILES:-}" == "false" ]] && _SELF_ARGS+=("-I")
+	[[ "${TERMUX_GLOBAL_LIBRARY:-}" == "true" ]] && _SELF_ARGS+=("-L")
+	[[ -n "${TERMUX_OUTPUT_DIR:-}" ]] && _SELF_ARGS+=("-o" "$TERMUX_OUTPUT_DIR")
+	[[ "${TERMUX_PKGS__BUILD__RM_ALL_PKG_BUILD_DEPENDENT_DIRS:-}" == "true" ]] && _SELF_ARGS+=("-r")
+	[[ "${TERMUX_WITHOUT_DEPVERSION_BINDING:-}" == "true" ]] && _SELF_ARGS+=("-w")
+	[[ -n "${TERMUX_PACKAGE_FORMAT:-}" ]] && _SELF_ARGS+=("--format" "$TERMUX_PACKAGE_FORMAT")
+	[[ -n "${TERMUX_PACKAGE_LIBRARY:-}" ]] && _SELF_ARGS+=("--library" "$TERMUX_PACKAGE_LIBRARY")
+
+	for arch in 'aarch64' 'arm' 'i686' 'x86_64'; do
+		env TERMUX_ARCH="$arch" TERMUX_BUILD_IGNORE_LOCK=true ./build-package.sh \
+			"${_SELF_ARGS[@]}" "${PACKAGE_LIST[i]}"
+	done
+	exit
+}
+
 _show_usage() {
 	echo "Usage: ./build-package.sh [options] PACKAGE_1 PACKAGE_2 ..."
 	echo
@@ -543,9 +573,14 @@ _show_usage() {
 
 declare -a PACKAGE_LIST=()
 
+# =============================================================================
+# Argument Parsing
+# =============================================================================
+
 (( $# )) || _show_usage
 while (( $# )); do
 	case "$1" in
+		# -- Long options --
 		--) shift 1; break;;
 		-h|--help) _show_usage;;
 		--format)
@@ -562,6 +597,7 @@ while (( $# )); do
 			shift 1
 			export TERMUX_PACKAGE_LIBRARY="$1"
 		;;
+		# -- Short options --
 		-a)
 			if [[ "$TERMUX_ON_DEVICE_BUILD" == "true" ]]; then
 				termux_error_exit "./build-package.sh: option '-a' is not available for on-device builds"
@@ -572,6 +608,7 @@ while (( $# )); do
 			shift 1
 			export TERMUX_ARCH="$1"
 		;;
+		# Build flags
 		-d) export TERMUX_DEBUG_BUILD=true;;
 		-D) TERMUX_IS_DISABLED=true;;
 		-f) TERMUX_FORCE_BUILD=true;;
@@ -586,6 +623,7 @@ while (( $# )); do
 			export TERMUX_INSTALL_DEPS=true
 			export TERMUX_PKGS__BUILD__RM_ALL_PKGS_BUILT_MARKER_AND_INSTALL_FILES=false
 		;;
+		# Build options
 		-j|-j[0-9]*)
 			# If we got the 2 arg form discard the "-j".
 			[[ "$1" == "-j" && "${2:-}" == [0-9]* ]] && shift 1
@@ -607,6 +645,7 @@ while (( $# )); do
 		-r) export TERMUX_PKGS__BUILD__RM_ALL_PKG_BUILD_DEPENDENT_DIRS=true;;
 		-w) export TERMUX_WITHOUT_DEPVERSION_BINDING=true;;
 		-s) export TERMUX_SKIP_DEPCHECK=true;;
+		# Output and continuation
 		-o)
 			if [[ -z "${2-}" ]]; then
 				termux_error_exit "./build-package.sh: option '-o' requires an argument"
@@ -680,26 +719,7 @@ for (( i=0; i < ${#PACKAGE_LIST[@]}; i++ )); do
 		(
 		# Handle 'all' arch:
 		if [[ "$TERMUX_ON_DEVICE_BUILD" == "false" && -n "${TERMUX_ARCH+x}" && "${TERMUX_ARCH}" == 'all' ]]; then
-			_SELF_ARGS=()
-			[[ "${TERMUX_CLEANUP_BUILT_PACKAGES_ON_LOW_DISK_SPACE:-}" == "true" ]] && _SELF_ARGS+=("-C")
-			[[ "${TERMUX_DEBUG_BUILD:-}" == "true" ]] && _SELF_ARGS+=("-d")
-			[[ "${TERMUX_IS_DISABLED:-}" == "true" ]] && _SELF_ARGS+=("-D")
-			[[ "${TERMUX_FORCE_BUILD:-}" == "true" && "${TERMUX_FORCE_BUILD_DEPENDENCIES:-}" != "true" ]] && _SELF_ARGS+=("-f")
-			[[ "${TERMUX_FORCE_BUILD:-}" == "true" && "${TERMUX_FORCE_BUILD_DEPENDENCIES:-}" == "true" ]] && _SELF_ARGS+=("-F")
-			[[ "${TERMUX_INSTALL_DEPS:-}" == "true" && "${TERMUX_PKGS__BUILD__RM_ALL_PKGS_BUILT_MARKER_AND_INSTALL_FILES:-}" != "false" ]] && _SELF_ARGS+=("-i")
-			[[ "${TERMUX_INSTALL_DEPS:-}" == "true" && "${TERMUX_PKGS__BUILD__RM_ALL_PKGS_BUILT_MARKER_AND_INSTALL_FILES:-}" == "false" ]] && _SELF_ARGS+=("-I")
-			[[ "${TERMUX_GLOBAL_LIBRARY:-}" == "true" ]] && _SELF_ARGS+=("-L")
-			[[ -n "${TERMUX_OUTPUT_DIR:-}" ]] && _SELF_ARGS+=("-o" "$TERMUX_OUTPUT_DIR")
-			[[ "${TERMUX_PKGS__BUILD__RM_ALL_PKG_BUILD_DEPENDENT_DIRS:-}" == "true" ]] && _SELF_ARGS+=("-r")
-			[[ "${TERMUX_WITHOUT_DEPVERSION_BINDING:-}" == "true" ]] && _SELF_ARGS+=("-w")
-			[[ -n "${TERMUX_PACKAGE_FORMAT:-}" ]] && _SELF_ARGS+=("--format" "$TERMUX_PACKAGE_FORMAT")
-			[[ -n "${TERMUX_PACKAGE_LIBRARY:-}" ]] && _SELF_ARGS+=("--library" "$TERMUX_PACKAGE_LIBRARY")
-
-			for arch in 'aarch64' 'arm' 'i686' 'x86_64'; do
-				env TERMUX_ARCH="$arch" TERMUX_BUILD_IGNORE_LOCK=true ./build-package.sh \
-					"${_SELF_ARGS[@]}" "${PACKAGE_LIST[i]}"
-			done
-			exit
+			build_for_all_archs
 		fi
 
 		# Check the package to build:

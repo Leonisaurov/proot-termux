@@ -20,15 +20,16 @@
 #include <stdlib.h>     /* atoi(3), */
 #include <unistd.h>     /* close(2), read(2), write(2), fork(2), execve(2) */
 #include <errno.h>      /* E*, */
-#include <sys/socket.h> /* AF_*, SOCK_*, */
+#include <sys/socket.h> /* AF_*, SOCK_*, sa_family_t */
 #include <sys/un.h>     /* struct sockaddr_un, */
-#include <netinet/in.h> /* struct sockaddr_in, htons(3), ntohs(3) */
+#include <netinet/in.h> /* struct sockaddr_in, htons(3), ntohs(3),
+                         * IN6_IS_ADDR_LOOPBACK, IN6_IS_ADDR_UNSPECIFIED */
 #include <stdio.h>      /* snprintf(3), */
 #include <sys/stat.h>   /* mkdir(2) */
 #include <signal.h>     /* kill(2) */
-#include <sys/wait.h>  /* waitpid(2) */
-#include <sys/file.h>    /* flock(2) */
-#include <time.h>        /* clock_gettime(3) */
+#include <sys/wait.h>   /* waitpid(2) */
+#include <sys/file.h>   /* flock(2) */
+#include <time.h>       /* clock_gettime(3) */
 
 #include "extension/extension.h"
 #include "extension/virtual_net/virtual_net.h"
@@ -62,23 +63,30 @@ static FilteredSysnum syss[] = {
 	FILTERED_SYSNUM_END,
 };
 
-/* ================================================================
+/* ===========================================================================
  * Helper process management
- * ================================================================ */
+ * =========================================================================== */
 
 static int vnp_start_helper(VnpConfig *config, const char *proxy_name)
 {
-	int pipe_main2helper[2];
-	int pipe_helper2main[2];
+	int pipe_main2helper[2] = { -1, -1 };
+	int pipe_helper2main[2] = { -1, -1 };
 	pid_t pid;
 
-	if (pipe(pipe_main2helper) < 0 || pipe(pipe_helper2main) < 0)
+	if (pipe(pipe_main2helper) < 0 || pipe(pipe_helper2main) < 0) {
+		close(pipe_main2helper[0]);
+		close(pipe_main2helper[1]);
+		close(pipe_helper2main[0]);
+		close(pipe_helper2main[1]);
 		return -1;
+	}
 
 	pid = fork();
 	if (pid < 0) {
-		close(pipe_main2helper[0]); close(pipe_main2helper[1]);
-		close(pipe_helper2main[0]); close(pipe_helper2main[1]);
+		close(pipe_main2helper[0]);
+		close(pipe_main2helper[1]);
+		close(pipe_helper2main[0]);
+		close(pipe_helper2main[1]);
 		return -1;
 	}
 
@@ -163,35 +171,12 @@ static void vnp_stop_helper(VnpConfig *config)
  */
 static int is_ipv6_loopback_or_unspecified(const struct in6_addr *addr)
 {
-    /* Check for :: (all zeros) */
-    int all_zero = 1;
-    int i;
-    for (i = 0; i < 16; i++) {
-        if (addr->s6_addr[i] != 0) {
-            all_zero = 0;
-            break;
-        }
-    }
-    if (all_zero)
-        return 1;
-    
-    /* Check for ::1 (last byte = 1) */
-    if (addr->s6_addr[0] == 0 && addr->s6_addr[1] == 0 && 
-        addr->s6_addr[2] == 0 && addr->s6_addr[3] == 0 &&
-        addr->s6_addr[4] == 0 && addr->s6_addr[5] == 0 &&
-        addr->s6_addr[6] == 0 && addr->s6_addr[7] == 0 &&
-        addr->s6_addr[8] == 0 && addr->s6_addr[9] == 0 &&
-        addr->s6_addr[10] == 0 && addr->s6_addr[11] == 0 &&
-        addr->s6_addr[12] == 0 && addr->s6_addr[13] == 0 &&
-        addr->s6_addr[14] == 0 && addr->s6_addr[15] == 1)
-        return 1;
-    
-    return 0;
+	return IN6_IS_ADDR_LOOPBACK(addr) || IN6_IS_ADDR_UNSPECIFIED(addr);
 }
 
-/* ================================================================
+/* ===========================================================================
  * Token generation & registry management
- * ================================================================ */
+ * =========================================================================== */
 
 /**
  * Generate a unique instance token.
@@ -216,9 +201,14 @@ static int vnp_registry_open(const char *proxy_name, int lock_type)
 	snprintf(path, sizeof(path), "%s/%s/%s",
 		 VNP_TMP_DIR, proxy_name, VNP_REG_LOCK);
 	fd = open(path, O_CREAT | O_RDWR, 0644);
-	if (fd < 0)
+	if (fd < 0) {
+		note(NULL, WARNING, INTERNAL,
+			"virtual_net: failed to open registry %s", path);
 		return -1;
+	}
 	if (flock(fd, lock_type) < 0) {
+		note(NULL, WARNING, INTERNAL,
+			"virtual_net: failed to lock registry %s", path);
 		close(fd);
 		return -1;
 	}
@@ -251,16 +241,16 @@ static int vnp_registry_write(int fd, const struct VnpRegistryHeader *hdr)
 	lseek(fd, 0, SEEK_SET);
 	ssize_t n = write(fd, hdr, sizeof(*hdr));
 	ftruncate(fd, n);
-	return (n == sizeof(*hdr)) ? 0 : -1;
+	return n == sizeof(*hdr) ? 0 : -1;
 }
 
 static struct VnpRegistryEntry *vnp_registry_find(
-	struct VnpRegistryHeader *hdr, uint16_t virtual_port)
+	const struct VnpRegistryHeader *hdr, uint16_t virtual_port)
 {
 	unsigned int i;
 	for (i = 0; i < hdr->count; i++) {
 		if (hdr->entries[i].virtual_port == virtual_port)
-			return &hdr->entries[i];
+			return (struct VnpRegistryEntry *)&hdr->entries[i];
 	}
 	return NULL;
 }
@@ -302,9 +292,49 @@ static void vnp_registry_remove(struct VnpRegistryHeader *hdr,
 	}
 }
 
-/* ================================================================
+/* ===========================================================================
  * Syscall handlers
- * ================================================================ */
+ * =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * Port extraction helper
+ * --------------------------------------------------------------------------- */
+
+/**
+ * Extract port and address family from a sockaddr_in/sockaddr_in6
+ * in tracee memory.  Returns 0 on success, -1 if not AF_INET/AF_INET6
+ * or on error.
+ */
+static inline int extract_port_from_tracee(Tracee *tracee, word_t addr_ptr,
+	word_t addrlen, sa_family_t *family, uint16_t *port)
+{
+	struct sockaddr_in sa_in;
+
+	if (addrlen < sizeof(struct sockaddr_in))
+		return -1;
+
+	if (read_data(tracee, &sa_in, addr_ptr, sizeof(sa_in)) < 0)
+		return -1;
+
+	if (sa_in.sin_family == AF_INET) {
+		*family = sa_in.sin_family;
+		*port = ntohs(sa_in.sin_port);
+		return 0;
+	}
+
+	if (sa_in.sin_family == AF_INET6) {
+		struct sockaddr_in6 sa_in6;
+		if (addrlen < sizeof(struct sockaddr_in6))
+			return -1;
+		if (read_data(tracee, &sa_in6, addr_ptr, sizeof(sa_in6)) < 0)
+			return -1;
+		*family = sa_in6.sin6_family;
+		*port = ntohs(sa_in6.sin6_port);
+		return 0;
+	}
+
+	return -1;
+}
 
 /**
  * Handle socket() — change AF_INET to AF_UNIX.
@@ -314,6 +344,8 @@ static int vnp_handle_socket(Tracee *tracee)
 {
 	word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
 	if (domain == AF_INET || domain == AF_INET6) {
+		VERBOSE(tracee, 3, "virtual_net: socket(AF_INET%s, ...) -> AF_UNIX",
+			domain == AF_INET6 ? "6" : "");
 		poke_reg(tracee, SYSARG_1, AF_UNIX);
 		poke_reg(tracee, SYSARG_3, 0);
 	}
@@ -329,55 +361,35 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 	word_t sockfd = peek_reg(tracee, CURRENT, SYSARG_1);
 	word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
 	word_t addrlen = peek_reg(tracee, CURRENT, SYSARG_3);
-	struct sockaddr_in sa_in;
 	VnpFdEntry *entry;
 	struct sockaddr_un sa_unix;
-
-	if (addrlen < sizeof(struct sockaddr_in))
-		return 0;
-
-	if (read_data(tracee, &sa_in, addr_ptr, sizeof(sa_in)) < 0)
-		return 0;
-
+	sa_family_t family;
 	uint16_t port;
-	if (sa_in.sin_family == AF_INET) {
-		port = ntohs(sa_in.sin_port);
-	}
-	else if (sa_in.sin_family == AF_INET6) {
-		/* Read full sockaddr_in6 to get the port */
-		struct sockaddr_in6 sa_in6;
-		if (addrlen < sizeof(struct sockaddr_in6))
-			return 0;
-		if (read_data(tracee, &sa_in6, addr_ptr, sizeof(sa_in6)) < 0)
-			return 0;
-		port = ntohs(sa_in6.sin6_port);
-	}
-	else {
-		return 0;
-	}
 
-	/* Check if this port is exposed via -p */
-	int is_exposed = 0;
-	int i;
-	for (i = 0; i < config->expose_count; i++) {
-		if (config->expose_map[i].virtual_port == port) {
-			is_exposed = 1;
-			break;
-		}
-	}
+	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
+		return 0;
 
 	/* Track this fd as virtual */
 	entry = vnp_find_fd(config, sockfd);
 	if (entry == NULL) {
-		entry = vnp_add_fd(config, sockfd, port, sa_in.sin_family);
+		entry = vnp_add_fd(config, sockfd, port, family);
 		if (entry == NULL)
 			return 0;
 	} else {
 		entry->virtual_port = port;
-		entry->orig_domain = sa_in.sin_family;
+		entry->orig_domain = family;
 	}
-	if (is_exposed)
-		entry->exposed_port = port;
+
+	/* Check if this port is exposed via -p */
+	{
+		int i;
+		for (i = 0; i < config->expose_count; i++) {
+			if (config->expose_map[i].virtual_port == port) {
+				entry->exposed_port = port;
+				break;
+			}
+		}
+	}
 
 	/* Build unique abstract Unix socket address with instance token */
 	vnp_fill_abstract_sa(&sa_unix, config->proxy_name, port, config->instance_token);
@@ -396,16 +408,18 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 	}
 
 	/* Write new sockaddr_un to tracee's stack and update bind() args */
-	word_t new_addr = alloc_mem(tracee, sizeof(struct sockaddr_un));
-	if (new_addr == 0)
-		return 0;
+	{
+		word_t new_addr = alloc_mem(tracee, sizeof(struct sockaddr_un));
+		if (new_addr == 0)
+			return 0;
 
-	if (write_data(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
-		return 0;
+		if (write_data(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
+			return 0;
 
-	poke_reg(tracee, SYSARG_1, sockfd);
-	poke_reg(tracee, SYSARG_2, new_addr);
-	poke_reg(tracee, SYSARG_3, sizeof(struct sockaddr_un));
+		poke_reg(tracee, SYSARG_1, sockfd);
+		poke_reg(tracee, SYSARG_2, new_addr);
+		poke_reg(tracee, SYSARG_3, sizeof(struct sockaddr_un));
+	}
 
 	return 0;
 }
@@ -418,23 +432,22 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	word_t sockfd = peek_reg(tracee, CURRENT, SYSARG_1);
 	word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
 	word_t addrlen = peek_reg(tracee, CURRENT, SYSARG_3);
-	struct sockaddr_in sa_in;
 	VnpFdEntry *entry;
-
-	if (addrlen < sizeof(struct sockaddr_in))
-		return 0;
-
-	if (read_data(tracee, &sa_in, addr_ptr, sizeof(sa_in)) < 0)
-		return 0;
-
+	sa_family_t family;
 	uint16_t port;
-	if (sa_in.sin_family == AF_INET) {
+
+	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
+		return 0;
+
+	if (family == AF_INET) {
 		/* Only intercept loopback connections */
+		struct sockaddr_in sa_in;
+		if (read_data(tracee, &sa_in, addr_ptr, sizeof(sa_in)) < 0)
+			return 0;
 		if ((ntohl(sa_in.sin_addr.s_addr) & 0xFF000000) != 0x7F000000)
 			return 0;
-		port = ntohs(sa_in.sin_port);
 	}
-	else if (sa_in.sin_family == AF_INET6) {
+	else if (family == AF_INET6) {
 		struct sockaddr_in6 sa_in6;
 		if (addrlen < sizeof(struct sockaddr_in6))
 			return 0;
@@ -443,50 +456,51 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 		/* Only intercept loopback or unspecified IPv6 connections */
 		if (!is_ipv6_loopback_or_unspecified(&sa_in6.sin6_addr))
 			return 0;
-		port = ntohs(sa_in6.sin6_port);
 	}
 	else {
 		return 0;
 	}
 
 	/* Check if this port is virtual */
-	int is_virtual = 0;
-	int i;
-	for (i = 0; i < config->fd_count; i++) {
-		if (config->fd_map[i].virtual_port == port) {
-			is_virtual = 1;
-			break;
-		}
-	}
-
-	if (!is_virtual) {
-		for (i = 0; i < config->expose_count; i++) {
-			if (config->expose_map[i].virtual_port == port) {
+	{
+		int is_virtual = 0;
+		int i;
+		for (i = 0; i < config->fd_count; i++) {
+			if (config->fd_map[i].virtual_port == port) {
 				is_virtual = 1;
 				break;
 			}
 		}
-	}
 
-	if (!is_virtual) {
-		/* Check registry for cross-instance ports (bound by other proots) */
-		int reg_fd = vnp_registry_open(config->proxy_name, LOCK_SH);
-		if (reg_fd >= 0) {
-			struct VnpRegistryHeader hdr;
-			vnp_registry_read(reg_fd, &hdr);
-			if (vnp_registry_find(&hdr, port) != NULL)
-				is_virtual = 1;
-			vnp_registry_close(reg_fd);
+		if (!is_virtual) {
+			for (i = 0; i < config->expose_count; i++) {
+				if (config->expose_map[i].virtual_port == port) {
+					is_virtual = 1;
+					break;
+				}
+			}
 		}
-	}
 
-	if (!is_virtual)
-		return 0;
+		if (!is_virtual) {
+			/* Check registry for cross-instance ports (bound by other proots) */
+			int reg_fd = vnp_registry_open(config->proxy_name, LOCK_SH);
+			if (reg_fd >= 0) {
+				struct VnpRegistryHeader hdr;
+				vnp_registry_read(reg_fd, &hdr);
+				if (vnp_registry_find(&hdr, port) != NULL)
+					is_virtual = 1;
+				vnp_registry_close(reg_fd);
+			}
+		}
+
+		if (!is_virtual)
+			return 0;
+	}
 
 	/* Track this fd */
 	entry = vnp_find_fd(config, sockfd);
 	if (entry == NULL) {
-		entry = vnp_add_fd(config, sockfd, port, sa_in.sin_family);
+		entry = vnp_add_fd(config, sockfd, port, family);
 		if (entry == NULL)
 			return 0;
 	}
@@ -497,14 +511,14 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 		if (reg_fd >= 0) {
 			struct VnpRegistryHeader hdr;
 			vnp_registry_read(reg_fd, &hdr);
-			struct VnpRegistryEntry *entry = vnp_registry_find(&hdr, port);
-			if (entry != NULL) {
+			struct VnpRegistryEntry *reg_entry = vnp_registry_find(&hdr, port);
+			if (reg_entry != NULL) {
 				/* Use the registered abstract name */
 				struct sockaddr_un sa_unix;
 				memset(&sa_unix, 0, sizeof(sa_unix));
 				sa_unix.sun_family = AF_UNIX;
-				memcpy(sa_unix.sun_path, entry->abstract_name,
-				       sizeof(entry->abstract_name));
+				memcpy(sa_unix.sun_path, reg_entry->abstract_name,
+				       sizeof(reg_entry->abstract_name));
 
 				word_t new_addr = alloc_mem(tracee, sizeof(sa_unix));
 				if (new_addr != 0) {
@@ -530,11 +544,9 @@ static int vnp_handle_close(Tracee *tracee, VnpConfig *config)
 	return 0;
 }
 
-
-
-/* ================================================================
+/* ===========================================================================
  * Expose management
- * ================================================================ */
+ * =========================================================================== */
 
 static int vnp_send_expose(Tracee *tracee, VnpConfig *config,
                             uint16_t host_port, uint16_t virtual_port)
@@ -558,19 +570,70 @@ static int vnp_send_expose(Tracee *tracee, VnpConfig *config,
 
 	if (vnp_helper_request(config, &req, &resp) < 0 || resp.result != 0) {
 		note(tracee, WARNING, INTERNAL,
-			"virtual_net: helper failed to expose port %d→%d",
+			"virtual_net: helper failed to expose port %d -> %d",
 			host_port, virtual_port);
 		return -1;
 	}
 
-	VERBOSE(tracee, 2, "virtual_net: exposed %d → virtual %d",
+	VERBOSE(tracee, 2, "virtual_net: exposed %d -> virtual %d",
 		host_port, virtual_port);
 	return 0;
 }
 
-/* ================================================================
+/* ===========================================================================
  * Extension callback
- * ================================================================ */
+ * =========================================================================== */
+
+/**
+ * Handle getsockname/getpeername — fake AF_INET/AF_INET6 result
+ * for a previously translated virtual socket.
+ */
+static int vnp_handle_get_name(Tracee *tracee, VnpConfig *config)
+{
+	word_t sockfd = peek_reg(tracee, CURRENT, SYSARG_1);
+	word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
+	word_t addrlen_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
+	VnpFdEntry *entry = vnp_find_fd(config, (int)sockfd);
+
+	if (entry == NULL || addr_ptr == 0)
+		return 0;
+
+	if (entry->orig_domain == AF_INET6) {
+		struct sockaddr_in6 fake6;
+		memset(&fake6, 0, sizeof(fake6));
+		fake6.sin6_family = AF_INET6;
+		fake6.sin6_port = htons(entry->virtual_port);
+		fake6.sin6_addr = in6addr_loopback;
+		if (write_data(tracee, addr_ptr, &fake6, sizeof(fake6)) == 0) {
+			if (addrlen_ptr != 0) {
+				uint32_t cur_len = peek_uint32(tracee, addrlen_ptr);
+				if (cur_len >= sizeof(struct sockaddr_in6))
+					poke_uint32(tracee, addrlen_ptr, sizeof(struct sockaddr_in6));
+			}
+		}
+	}
+	else {
+		struct sockaddr_in fake;
+		memset(&fake, 0, sizeof(fake));
+		fake.sin_family = AF_INET;
+		fake.sin_port = htons(entry->virtual_port);
+		fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		if (write_data(tracee, addr_ptr, &fake, sizeof(fake)) == 0) {
+			if (addrlen_ptr != 0) {
+				uint32_t cur_len = peek_uint32(tracee, addrlen_ptr);
+				if (cur_len >= sizeof(struct sockaddr_in))
+					poke_uint32(tracee, addrlen_ptr, sizeof(struct sockaddr_in));
+			}
+		}
+	}
+
+	/* Void the syscall: set result to 0 and change sysnum to PR_void.
+	 * The void handler in exit.c (lines 78-89) will restore result to 0
+	 * from MODIFIED registers when the EXIT ptrace event fires. */
+	poke_reg(tracee, SYSARG_RESULT, 0);
+	set_sysnum(tracee, PR_void);
+	return 0;
+}
 
 int vnp_callback(Extension *extension, ExtensionEvent event,
                   intptr_t data1, intptr_t data2)
@@ -620,49 +683,8 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 			return 0;
 		}
 		case PR_getsockname:
-		case PR_getpeername: {
-			word_t sockfd = peek_reg(tracee, CURRENT, SYSARG_1);
-			word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
-			word_t addrlen_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
-			VnpFdEntry *entry = vnp_find_fd(config, (int)sockfd);
-
-			if (entry != NULL && addr_ptr != 0) {
-				if (entry->orig_domain == AF_INET6) {
-					struct sockaddr_in6 fake6;
-					memset(&fake6, 0, sizeof(fake6));
-					fake6.sin6_family = AF_INET6;
-					fake6.sin6_port = htons(entry->virtual_port);
-					fake6.sin6_addr = in6addr_loopback;
-					if (write_data(tracee, addr_ptr, &fake6, sizeof(fake6)) == 0) {
-						if (addrlen_ptr != 0) {
-							uint32_t cur_len = peek_uint32(tracee, addrlen_ptr);
-							if (cur_len >= sizeof(struct sockaddr_in6))
-								poke_uint32(tracee, addrlen_ptr, sizeof(struct sockaddr_in6));
-						}
-					}
-				} else {
-					struct sockaddr_in fake;
-					memset(&fake, 0, sizeof(fake));
-					fake.sin_family = AF_INET;
-					fake.sin_port = htons(entry->virtual_port);
-					fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-					if (write_data(tracee, addr_ptr, &fake, sizeof(fake)) == 0) {
-						if (addrlen_ptr != 0) {
-							uint32_t cur_len = peek_uint32(tracee, addrlen_ptr);
-							if (cur_len >= sizeof(struct sockaddr_in))
-								poke_uint32(tracee, addrlen_ptr, sizeof(struct sockaddr_in));
-						}
-					}
-				}
-
-				/* Void the syscall: set result to 0 and change sysnum to PR_void.
-				 * The void handler in exit.c (lines 78-89) will restore result to 0
-				 * from MODIFIED registers when the EXIT ptrace event fires. */
-				poke_reg(tracee, SYSARG_RESULT, 0);
-				set_sysnum(tracee, PR_void);
-			}
-			return 0;
-		}
+		case PR_getpeername:
+			return vnp_handle_get_name(tracee, config);
 		default:
 			return 0;
 		}
@@ -695,7 +717,8 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 				listen_fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
 				addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
 				addrlen_ptr = peek_reg(tracee, ORIGINAL, SYSARG_3);
-			} else {
+			}
+			else {
 				listen_fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
 				addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
 				addrlen_ptr = peek_reg(tracee, ORIGINAL, SYSARG_3);
@@ -742,9 +765,9 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 	}
 }
 
-/* ================================================================
+/* ===========================================================================
  * Public API
- * ================================================================ */
+ * =========================================================================== */
 
 int vnp_configure(Tracee *tracee, const char *proxy_name)
 {

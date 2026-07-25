@@ -80,7 +80,7 @@ typedef enum {
 	 * something went wrong.  If the extension returns < 0, then
 	 * PRoot cancels the syscall and reports this errno to the
 	 * tracee.  */
-	SYSCALL_ENTER_END,
+	SYSCALL_ENTER_END,	/* Called after syscall enter phase */
 
 	/* The tracee exits a syscall, and PRoot hasn't do anything
 	 * yet.  If the extension returns > 0, then PRoot skips its
@@ -91,7 +91,7 @@ typedef enum {
 	/* The tracee exits a syscall, and PRoot has already handled
 	 * it.  If the extension returns < 0, then PRoot reports this
 	 * errno to the tracee.  */
-	SYSCALL_EXIT_END,
+	SYSCALL_EXIT_END,	/* Called after syscall exit phase */
 
 	/* The tracee is stopped either because of a syscall or a
 	 * signal: "(int) data1" is its new status as reported by
@@ -130,35 +130,35 @@ typedef enum {
 	/* Initialize the extension: "(const char *) data1" is its
 	 * argument that was passed to the command-line interface.  If
 	 * the extension returns < 0, then PRoot removed it.  */
-	INITIALIZATION,
+	INITIALIZATION,		/* Called once when extension is first loaded */
 
 	/* The extension is not attached to its tracee anymore
 	 * (destructor).  */
-	REMOVED,
+	REMOVED,		/* Called when extension is being torn down */
 
 	/* Print the current configuration of the extension.  See
 	 * print_config() as an example.  */
-	PRINT_CONFIG,
+	PRINT_CONFIG,		/* Called to print extension configuration */
 
 	/* Print the usage of the extension: "(bool) data1" is true
 	 * for a detailed usage.  See print_usage() as an example.  */
-	PRINT_USAGE,
+	PRINT_USAGE,		/* Called to print extension usage info */
 
-	/* A SIGSYS has occurred and we are going to see if any of the extensions wants to handle it for us*/
+	/* A SIGSYS has occurred and we are going to see if any of the
+	 * extensions wants to handle it for us.  */
 	SIGSYS_OCC,
 
-        /* link2symlink notifies other extensions when it is moving
-         * a file */
-        LINK2SYMLINK_RENAME,
+	/* link2symlink notifies other extensions when it is moving
+	 * a file.  */
+	LINK2SYMLINK_RENAME,
 
-        /* link2symlink notifies other extensions when it is unlinking
-         * a file */
-        LINK2SYMLINK_UNLINK,
+	/* link2symlink notifies other extensions when it is unlinking
+	 * a file.  */
+	LINK2SYMLINK_UNLINK,
 
-	/* statx() syscall was used by tracee and is being replaced by proot
-	 * data1 argument contains pointer to statx_syscall_state struct
-	 * defined in tracee/statx.h
-	 * */
+	/* statx() syscall was used by tracee and is being replaced by
+	 * proot.  data1 argument contains pointer to statx_syscall_state
+	 * struct defined in tracee/statx.h.  */
 	STATX_SYSCALL,
 } ExtensionEvent;
 
@@ -193,6 +193,11 @@ extern Extension *get_extension(Tracee *tracee, extension_callback_t callback);
 /**
  * Notify all extensions of @tracee that the given @event occured.
  * See ExtensionEvent for the meaning of @data1 and @data2.
+ *
+ * Extensions are notified in registration order (the order they
+ * appear on the linked list).  If any extension returns non-zero,
+ * notification stops and that value is returned immediately (early
+ * exit).  Returns 0 if all extensions handled the event.
  */
 static inline int notify_extensions(Tracee *tracee, ExtensionEvent event,
 				intptr_t data1, intptr_t data2)
@@ -218,6 +223,7 @@ extern int hidden_files_callback(Extension *extension, ExtensionEvent event, int
 extern int port_switch_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 extern int link2symlink_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 extern int fix_symlink_size_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
+extern int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 #if defined(__ANDROID__) || defined(__BIONIC__)
 extern int ashmem_memfd_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 #endif /* defined(__ANDROID__) || defined(__BIONIC__) */

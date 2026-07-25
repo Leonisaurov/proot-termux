@@ -24,11 +24,17 @@
 #include <sys/socket.h> /* AF_*, SOCK_*, socket(2), bind(2), listen(2), accept(2), connect(2) */
 #include <sys/un.h>     /* struct sockaddr_un, */
 #include <netinet/in.h> /* struct sockaddr_in, htons(3) */
-#include <sys/select.h> /* select(2) */
+#include <poll.h>       /* poll(2) */
 #include <stdio.h>      /* snprintf(3) */
-#include <signal.h>     /* signal(2) */
+#include <signal.h>     /* sigaction(2) */
 
 #include "extension/virtual_net/virtual_net_internal.h"
+
+/* ================================================================
+ * Constants
+ * ================================================================ */
+
+#define BRIDGE_BUF_SIZE 4096
 
 /* ================================================================
  * Globals
@@ -49,7 +55,7 @@ static void helper_send_response(int result, uint16_t host_port)
 	memset(&resp, 0, sizeof(resp));
 	resp.result = result;
 	resp.host_port = host_port;
-	write(STDOUT_FILENO, &resp, sizeof(resp));
+	(void)write(STDOUT_FILENO, &resp, sizeof(resp));
 }
 
 /**
@@ -59,10 +65,13 @@ static void helper_send_response(int result, uint16_t host_port)
 static void build_abstract_name(char *sun_path, size_t pathlen,
                                  const char *proxy_name, uint16_t port)
 {
+	int len;
 	/* Abstract socket: first byte is '\0' */
 	sun_path[0] = '\0';
-	snprintf(&sun_path[1], pathlen - 1, "%s%s-%u",
+	len = snprintf(&sun_path[1], pathlen - 1, "%s%s-%u",
 		VNP_ABSTRACT_PREFIX, proxy_name, port);
+	if ((size_t)len >= pathlen - 1)
+		sun_path[pathlen - 1] = '\0'; /* ensure null termination */
 }
 
 /* ================================================================
@@ -71,26 +80,23 @@ static void build_abstract_name(char *sun_path, size_t pathlen,
 
 /**
  * Bridge data between client_fd (TCP) and unix_fd (abstract Unix socket).
- * Uses select() for bidirectional forwarding.
+ * Uses poll() for bidirectional forwarding.
  * Returns when either side closes or errors.
  */
 static void bridge_fds(int client_fd, int unix_fd)
 {
-	int maxfd = (client_fd > unix_fd ? client_fd : unix_fd) + 1;
-	char buf[4096];
+	struct pollfd fds[2];
+	char buf[BRIDGE_BUF_SIZE];
+
+	fds[0].fd = client_fd;
+	fds[0].events = POLLIN;
+	fds[1].fd = unix_fd;
+	fds[1].events = POLLIN;
 
 	while (1) {
-		fd_set rfds;
-		struct timeval tv;
 		int ret;
 
-		FD_ZERO(&rfds);
-		FD_SET(client_fd, &rfds);
-		FD_SET(unix_fd, &rfds);
-		tv.tv_sec = 30;  /* 30s timeout */
-		tv.tv_usec = 0;
-
-		ret = select(maxfd, &rfds, NULL, NULL, &tv);
+		ret = poll(fds, 2, 30000);  /* 30s timeout */
 		if (ret < 0) {
 			if (errno == EINTR)
 				continue;
@@ -100,7 +106,7 @@ static void bridge_fds(int client_fd, int unix_fd)
 			break;  /* timeout */
 
 		/* Client → Unix socket */
-		if (FD_ISSET(client_fd, &rfds)) {
+		if (fds[0].revents & POLLIN) {
 			ssize_t n = read(client_fd, buf, sizeof(buf));
 			if (n <= 0)
 				break;
@@ -109,7 +115,7 @@ static void bridge_fds(int client_fd, int unix_fd)
 		}
 
 		/* Unix socket → Client */
-		if (FD_ISSET(unix_fd, &rfds)) {
+		if (fds[1].revents & POLLIN) {
 			ssize_t n = read(unix_fd, buf, sizeof(buf));
 			if (n <= 0)
 				break;
@@ -127,28 +133,25 @@ static void bridge_fds(int client_fd, int unix_fd)
  * ================================================================ */
 
 /**
- * Handle EXPOSE command:
- * 1. Create TCP listener on 0.0.0.0:host_port
- * 2. Connect to abstract Unix socket @proxy_name-virtual_port
- * 3. Fork child to bridge data
+ * Create a TCP listener bound to 0.0.0.0:host_port.
+ * Returns fd on success, or -errno on error.
  */
-static void helper_handle_expose(uint16_t host_port, uint16_t virtual_port)
+static int create_tcp_listener(uint16_t host_port)
 {
 	int tcp_fd;
 	struct sockaddr_in tcp_addr;
 	int optval = 1;
-	struct sockaddr_un unix_addr;
-	int unix_fd;
-	pid_t pid;
 
-	/* Create TCP listener */
 	tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (tcp_fd < 0) {
-		helper_send_response(-errno, host_port);
-		return;
-	}
+	if (tcp_fd < 0)
+		return -errno;
 
-	setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+	if (setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR,
+		       &optval, sizeof(optval)) < 0) {
+		int saved = errno;
+		close(tcp_fd);
+		return -saved;
+	}
 
 	memset(&tcp_addr, 0, sizeof(tcp_addr));
 	tcp_addr.sin_family = AF_INET;
@@ -156,25 +159,33 @@ static void helper_handle_expose(uint16_t host_port, uint16_t virtual_port)
 	tcp_addr.sin_port = htons(host_port);
 
 	if (bind(tcp_fd, (struct sockaddr *)&tcp_addr, sizeof(tcp_addr)) < 0) {
+		int saved = errno;
 		close(tcp_fd);
-		helper_send_response(-errno, host_port);
-		return;
+		return -saved;
 	}
 
 	if (listen(tcp_fd, 16) < 0) {
+		int saved = errno;
 		close(tcp_fd);
-		helper_send_response(-errno, host_port);
-		return;
+		return -saved;
 	}
 
-	/* Success — tell tracer */
-	helper_send_response(0, host_port);
+	return tcp_fd;
+}
 
-	/* Accept loop: for each connection, connect to abstract Unix socket and bridge */
+/**
+ * Accept loop: for each incoming TCP connection, connect to the
+ * abstract Unix socket and fork a child to bridge data.
+ */
+static void handle_accept_loop(int tcp_fd, uint16_t virtual_port)
+{
 	while (1) {
 		struct sockaddr_in client_addr;
 		socklen_t client_len = sizeof(client_addr);
 		int client_fd;
+		struct sockaddr_un unix_addr;
+		int unix_fd;
+		pid_t pid;
 
 		client_fd = accept(tcp_fd, (struct sockaddr *)&client_addr, &client_len);
 		if (client_fd < 0) {
@@ -215,6 +226,27 @@ static void helper_handle_expose(uint16_t host_port, uint16_t virtual_port)
 		close(client_fd);
 		close(unix_fd);
 	}
+}
+
+/**
+ * Handle EXPOSE command:
+ * 1. Create TCP listener on 0.0.0.0:host_port
+ * 2. Spawn accept loop that bridges to abstract Unix socket
+ */
+static void helper_handle_expose(uint16_t host_port, uint16_t virtual_port)
+{
+	int tcp_fd;
+
+	tcp_fd = create_tcp_listener(host_port);
+	if (tcp_fd < 0) {
+		helper_send_response(tcp_fd, host_port);
+		return;
+	}
+
+	/* Success — tell tracer */
+	helper_send_response(0, host_port);
+
+	handle_accept_loop(tcp_fd, virtual_port);
 
 	close(tcp_fd);
 }
@@ -240,7 +272,10 @@ int vnp_helper_main(int argc, char *argv[])
 	strncpy(g_proxy_name, argv[2], VNP_MAX_NAME - 1);
 	g_proxy_name[VNP_MAX_NAME - 1] = '\0';
 
-	/* Ignore SIGCHLD to auto-reap bridged children */
+	/* Ignore SIGCHLD to auto-reap bridged children.
+	 * SA_NOCLDWAIT prevents zombies: when SIGCHLD is set to SIG_IGN,
+	 * terminated children are automatically reaped by the kernel
+	 * without the parent needing to call waitpid(). */
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = SIG_IGN;
 	sa.sa_flags = SA_NOCLDWAIT;
@@ -251,11 +286,23 @@ int vnp_helper_main(int argc, char *argv[])
 		struct VnpResponse resp;
 		memset(&resp, 0, sizeof(resp));
 		resp.result = 0;
-		write(STDOUT_FILENO, &resp, sizeof(resp));
+		if (write(STDOUT_FILENO, &resp, sizeof(resp)) != sizeof(resp))
+			_exit(1);
 	}
 
 	/* Main loop: read requests from stdin */
-	while (read(STDIN_FILENO, &req, sizeof(req)) == sizeof(req)) {
+	while (1) {
+		ssize_t n = read(STDIN_FILENO, &req, sizeof(req));
+		if (n == 0)
+			break;  /* EOF — pipe closed */
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			break;  /* error */
+		}
+		if ((size_t)n != sizeof(req))
+			break;  /* partial read — protocol error */
+
 		switch (req.opcode) {
 		case VNP_EXPOSE:
 			helper_handle_expose(req.host_port, req.virtual_port);

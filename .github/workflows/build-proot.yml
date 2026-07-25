@@ -1,5 +1,6 @@
 name: Build proot
 
+# ----- Trigger configuration -----
 on:
   push:
     paths:
@@ -14,14 +15,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# ----- Job configuration -----
 jobs:
   build:
     runs-on: ubuntu-26.04
+    timeout-minutes: 30
     steps:
-    - name: Clone repository
-      uses: actions/checkout@v7
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-    - name: Enable zram
+    - name: Enable zram swap
       uses: ./.github/actions/zram
       with:
         algorithm: zstd
@@ -29,6 +32,7 @@ jobs:
         priority: 100
         device_name: /dev/zram0
 
+    # ----- Cache build dependencies -----
     - name: Restore build cache
       uses: actions/cache@v4
       id: build-cache
@@ -41,11 +45,13 @@ jobs:
     - name: Prepare cache directory
       run: mkdir -p ~/.termux-build
 
-    - name: Build proot
+    # ----- Build proot package -----
+    - name: Build proot package
       env:
         TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
       run: ./scripts/run-docker.sh ./build-package.sh -I -a aarch64 --format pacman proot
 
+    # ----- Collect and publish artifacts -----
     - name: Collect package files
       if: always()
       run: |
@@ -53,7 +59,7 @@ jobs:
         mv output/*.pkg.tar.xz ./artifacts/ 2>/dev/null || true
 
     - name: Upload to GitHub Release
-      if: always()
+      if: success()
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
@@ -66,7 +72,7 @@ jobs:
           --latest \
           --notes "proot aarch64 from ${{ github.sha }}"
 
-    - name: Store package files
+    - name: Store package files as artifact
       if: always()
       uses: actions/upload-artifact@v6
       with:

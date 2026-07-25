@@ -376,69 +376,51 @@ static int handle_option_H(Tracee *tracee, const Cli *cli UNUSED, const char *va
 
 static int handle_option_port_mapping(Tracee *tracee, const Cli *cli UNUSED, const char *value)
 {
-        uint16_t host_port, container_port;
-        void *ext;
+	uint16_t host_port, container_port;
 
-        if (sscanf(value, "%hu:%hu", &host_port, &container_port) != 2) {
-                note(tracee, ERROR, USER, "invalid port mapping format: %s (expected host:container)", value);
-                return -1;
-        }
+	if (sscanf(value, "%hu:%hu", &host_port, &container_port) != 2) {
+		note(tracee, ERROR, USER, "invalid port mapping format: %s (expected host:container)", value);
+		return -1;
+	}
 
-        /* Si --proxy está activo, delegar a virtual_net */
-        {
-                extern int vnp_add_expose(Tracee *, uint16_t, uint16_t);
-                Extension *vnp_ext = get_extension(tracee, vnp_callback);
-                if (vnp_ext != NULL) {
-                        int ret = vnp_add_expose(tracee, host_port, container_port);
-                        if (ret == 0) {
-                                VERBOSE(tracee, 2,
-                                        "port mapping handled by virtual_net: "
-                                        "%d \u2192 virtual %d",
-                                        host_port, container_port);
-                                return 0;
-                        }
-                }
-        }
+	/* If --proxy active, delegate to virtual_net */
+	Extension *vnp_ext = get_extension(tracee, vnp_callback);
+	if (vnp_ext != NULL)
+		return vnp_add_expose(tracee, host_port, container_port);
 
-        ext = get_extension(tracee, port_switch_callback);
-        if (ext != NULL) {
-                PortSwitchConfig *config = talloc_get_type_abort(((Extension *)ext)->config, PortSwitchConfig);
-                if (config->count >= 64) {
-                        note(tracee, ERROR, USER, "too many port mappings (max 64)");
-                        return -1;
-                }
-                config->mappings[config->count].host_port = host_port;
-                config->mappings[config->count].container_port = container_port;
-                config->count++;
-                return 0;
-        }
+	/* Otherwise use port_switch */
+	Extension *ps_ext = get_extension(tracee, port_switch_callback);
+	if (ps_ext == NULL) {
+		initialize_extension(tracee, port_switch_callback, NULL);
+		ps_ext = get_extension(tracee, port_switch_callback);
+		if (ps_ext == NULL)
+			return -1;
+	}
 
-        (void) initialize_extension(tracee, port_switch_callback, NULL);
-        ext = get_extension(tracee, port_switch_callback);
-        if (ext != NULL) {
-                PortSwitchConfig *config = talloc_get_type_abort(((Extension *)ext)->config, PortSwitchConfig);
-                config->mappings[0].host_port = host_port;
-                config->mappings[0].container_port = container_port;
-                config->count = 1;
-        }
-        return 0;
+	PortSwitchConfig *config = talloc_get_type_abort(((Extension *)ps_ext)->config, PortSwitchConfig);
+	if (config->count >= 64) {
+		note(tracee, ERROR, USER, "too many port mappings (max 64)");
+		return -1;
+	}
+	config->mappings[config->count].host_port = host_port;
+	config->mappings[config->count].container_port = container_port;
+	config->count++;
+	return 0;
 }
 
 static int handle_option_p(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
 {
-        void *ext = get_extension(tracee, port_switch_callback);
-        if (ext != NULL) {
-                PortSwitchConfig *config = talloc_get_type_abort(((Extension *)ext)->config, PortSwitchConfig);
-                config->auto_redirect = true;
-                return 0;
-        }
-        (void) initialize_extension(tracee, port_switch_callback, NULL);
-        ext = get_extension(tracee, port_switch_callback);
-        if (ext != NULL) {
-                PortSwitchConfig *config = talloc_get_type_abort(((Extension *)ext)->config, PortSwitchConfig);
-                config->auto_redirect = true;
-        }
-        return 0;
+	Extension *ext = get_extension(tracee, port_switch_callback);
+	if (ext == NULL) {
+		initialize_extension(tracee, port_switch_callback, NULL);
+		ext = get_extension(tracee, port_switch_callback);
+		if (ext == NULL)
+			return -1;
+	}
+
+	PortSwitchConfig *config = talloc_get_type_abort(((Extension *)ext)->config, PortSwitchConfig);
+	config->auto_redirect = true;
+	return 0;
 }
 
 /**

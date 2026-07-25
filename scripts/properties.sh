@@ -23,7 +23,7 @@ fi
 # for important variables, especially specific path variables against
 # `TERMUX_REGEX__SAFE_*_PATH` regexes to reduce any potential damage.
 #
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#file-path-limits
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#file-path-limits
 ###
 
 ##
@@ -191,7 +191,7 @@ TERMUX_REGEX__SINGLE_OR_DOUBLE_DOT_CONTAINING_PATH='((^\./)|(^\.\./)|(/\.$)|(/\.
 #
 # - https://refspecs.linuxfoundation.org/FHS_3.0/fhs-3.0.html
 # - https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-private-app-data-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-private-app-data-directory
 ##
 TERMUX_REGEX__INVALID_TERMUX_ROOTFS_PATHS='^((/bin(/.*)?)|(/boot(/.*)?)|(/dev(/.*)?)|(/etc(/.*)?)|(/home)|(/lib(/.*)?)|(/lib[^/]+(/.*)?)|(/media)|(/mnt)|(/opt)|(/proc(/.*)?)|(/root)|(/run(/.*)?)|(/sbin(/.*)?)|(/srv(/.*)?)|(/sys(/.*)?)|(/tmp(/.*)?)|(/usr)|(/usr/local)|(((/usr/)|(/usr/local/))((bin)|(games)|(include)|(lib)|(libexec)|(lib[^/]+)|(sbin)|(share)|(src)|(X11R6))(/.*)?)|(/var(/.*)?)|(/bin.usr-is-merged)|(/lib.usr-is-merged)|(/sbin.usr-is-merged)|(/.dockerinit)|(/.dockerenv))$'
 
@@ -256,7 +256,7 @@ TERMUX_REGEX__APP_PACKAGE_NAME="^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+
 #  to be installed on a removable/portable volume/sd card being used as
 #  adoptable storage.
 #
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-private-app-data-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-private-app-data-directory
 ##
 TERMUX_REGEX__APP_DATA_DIR_PATH='^(((/data/data)|(/data/user/[0-9]+)|(/mnt/expand/[^/]+/user/[0-9]+))/[^/]+)$'
 
@@ -269,7 +269,7 @@ TERMUX_REGEX__APP_DATA_DIR_PATH='^(((/data/data)|(/data/user/[0-9]+)|(/mnt/expan
 ###
 
 ##
-# The path to the `termux-packages` repo root directory.
+# The path to the \`proot-termux\` repo root directory.
 ##
 TERMUX_PKGS__BUILD__REPO_ROOT_DIR="${TERMUX_PKGS__BUILD__REPO_ROOT_DIR:-}"
 
@@ -460,7 +460,7 @@ TERMUX__REPOS_HOST_ORG_URL="https://github.com/$TERMUX__REPOS_HOST_ORG_NAME"
 # **See Also:**
 # - `TERMUX_APP__NAMESPACE`.
 # - https://developer.android.com/build/configure-app-module#set-application-id
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-private-app-data-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-private-app-data-directory
 #
 # Default value: `com.termux`
 ##
@@ -529,7 +529,7 @@ __termux_build_props__add_variables_validator_actions "TERMUX__PROJECT_SUBDIR" "
 # a library, so that Termux files do not interfere with other files
 # of Termux app forks or apps that may use the Termux library.
 #
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-project-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-project-directory
 #
 # Default value: `/data/data/com.termux/termux`
 ##
@@ -553,7 +553,7 @@ TERMUX__CORE_SUBDIR="core"
 # This contains Termux core files for the Termux app, like user settings and configs for the app,
 # which and are independent of any specific rootfs.
 #
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-core-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-core-directory
 #
 # Default value: `/data/data/com.termux/termux/core`
 ##
@@ -580,7 +580,7 @@ TERMUX__APPS_SUBDIR="app"
 # filesystem/pathname socket files of servers created by the apps.
 # - https://man7.org/linux/man-pages/man7/unix.7.html
 #
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-apps-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-apps-directory
 #
 # Default value: `/data/data/com.termux/termux/app`
 ##
@@ -773,7 +773,7 @@ __termux_build_props__add_variables_validator_actions "TERMUX__ROOTFS_SUBDIR" "a
 # Termux rootfs directory path under `TERMUX_APP__DATA_DIR` that
 # contains the Linux environment rootfs provided by Termux.
 #
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-rootfs-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-rootfs-directory
 # - https://refspecs.linuxfoundation.org/FHS_3.0/fhs/ch03.html
 #
 # The Termux rootfs must not be set to path in
@@ -824,7 +824,7 @@ __termux_build_props__add_variables_validator_actions "TERMUX__HOME_SUBDIR" "saf
 #
 # It serves the same purpose as the `/home` directory on Linux distros.
 #
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-home-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-home-directory
 # - https://refspecs.linuxfoundation.org/FHS_3.0/fhs/ch03s08.html
 #
 # Check `TERMUX__PREFIX` variable docs for rules that apply depending
@@ -871,7 +871,7 @@ __termux_build_props__add_variables_validator_actions "TERMUX__PREFIX_SUBDIR" "a
 # and contains the `bin`, `etc`, `include`, `lib`, `libexec`, `opt`,
 # `share`, `tmp` and `var` sub directories.
 #
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-prefix-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-prefix-directory
 # - https://refspecs.linuxfoundation.org/FHS_3.0/fhs/ch04.html
 #
 # If `TERMUX__ROOTFS` is not equal to `/`, then by default Termux
@@ -939,8 +939,8 @@ __termux_build_props__add_variables_validator_actions "TERMUX__PREFIX_SUBDIR" "a
 # `termux_step_setup_variables` if `TERMUX_PACKAGE_LIBRARY` equals `glibc`.
 # However, `TERMUX__PREFIX_CLASSICAL` retains the original value
 # set below for `TERMUX__PREFIX`.
-# - https://github.com/termux/termux-packages/pull/16901
-# - https://github.com/termux/termux-packages/pull/20864
+# - https://github.com/Leonisaurov/proot-termux/pull/16901
+# - https://github.com/Leonisaurov/proot-termux/pull/20864
 #
 # Default value: `/data/data/com.termux/files/usr`
 ##
@@ -1023,7 +1023,7 @@ TERMUX__PREFIX__BIN_DIR___MAX_LEN="$((TERMUX__PREFIX_DIR___MAX_LEN + 1 + 3))" # 
 # `logcat` if linker debugging is enabled.
 #
 # **See Also:**
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#file-path-limits
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#file-path-limits
 # - https://github.com/termux/termux-core-package/blob/master/lib/termux-core_nos_c/tre/include/termux/termux_core__nos__c/v1/termux/file/TermuxFile.h
 # - https://github.com/termux/termux-exec-package/blob/master/lib/termux-exec_nos_c/tre/include/termux/termux_exec__nos__c/v1/termux/api/termux_exec/service/ld_preload/direct/exec/ExecIntercept.h
 #
@@ -1088,7 +1088,7 @@ TERMUX__PREFIX__BIN_SUBDIR="bin"
 ##
 # Termux bin directory path under `TERMUX__PREFIX`.
 #
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-bin-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-bin-directory
 #
 # Default value: `/data/data/com.termux/files/usr/bin`
 ##
@@ -1198,7 +1198,7 @@ TERMUX__PREFIX__LIB_SUBDIR="$TERMUX__PREFIX__BASE_LIB_SUBDIR"
 ##
 # Termux lib directory path under `TERMUX__PREFIX`.
 #
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-lib-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-lib-directory
 #
 # Default value: `/data/data/com.termux/files/usr/lib` (`$TERMUX__PREFIX__BASE_LIB_DIR`)
 ##
@@ -1367,7 +1367,7 @@ TERMUX__CACHE_SUBDIR="cache"
 # Currently this is primarily used for packages cache files of package
 # managers (`apt`/`pacman`).
 #
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-app-cache-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-app-cache-directory
 #
 # Default value: `/data/data/com.termux/cache`
 ##
@@ -1767,20 +1767,20 @@ TERMUX_ENV__S_TERMUX_AM_SOCKET="${TERMUX_ENV__S_ROOT}${TERMUX_ENV__SS_TERMUX_AM_
 ####
 # Variables for the Termux packages.
 #
-# - https://github.com/termux/termux-packages
+# - https://github.com/Leonisaurov/proot-termux
 ####
 
 ##
 # Termux packages repo name.
 #
-# Default value: `termux-packages`
+# Default value: `proot-termux`
 ##
-TERMUX_PKGS__REPO_NAME="termux-packages"
+TERMUX_PKGS__REPO_NAME="proot-termux"
 
 ##
 # Termux packages repo url.
 #
-# Default value: `https://github.com/termux/termux-packages`
+# Default value: `https://github.com/Leonisaurov/proot-termux`
 ##
 TERMUX_PKGS__REPO_URL="$TERMUX__REPOS_HOST_ORG_URL/$TERMUX_PKGS__REPO_NAME"
 
@@ -1962,7 +1962,7 @@ __termux_build_props__add_variables_validator_actions "TERMUX_APP__AM_SOCKET__SE
 # **See Also:**
 # - `TERMUX_API_APP__NAMESPACE`.
 # - https://developer.android.com/build/configure-app-module#set-application-id
-# - https://github.com/termux/termux-packages/wiki/Termux-file-system-layout#termux-private-app-data-directory
+# - https://github.com/Leonisaurov/proot-termux/wiki/Termux-file-system-layout#termux-private-app-data-directory
 #
 # Default value: `com.termux.api`
 ##
@@ -2198,7 +2198,7 @@ TERMUX_REPO_URL=()
 TERMUX_REPO_DISTRIBUTION=()
 TERMUX_REPO_COMPONENT=()
 
-# FIXME: Move `repo.json` file to under `scripts/` directory and COPY it to `/tmp/termux-packages` in `Dockerfile`.
+# FIXME: Move \`repo.json\` file to under \`scripts/\` directory and COPY it to \`/tmp/proot-termux\` in \`Dockerfile\`.
 if [[ ! -f "$TERMUX_PKGS__BUILD__REPO_ROOT_DIR/repo.json" ]]; then
     if [[ "${TERMUX_PKGS__BUILD__IS_DOCKER_BUILD:-}" != "true" ]]; then
         echo "The 'repo.json' file not found at the '$TERMUX_PKGS__BUILD__REPO_ROOT_DIR/repo.json' path." 1>&2

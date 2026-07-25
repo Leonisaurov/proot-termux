@@ -6,8 +6,8 @@ TERMUX_SCRIPTDIR=$(cd "$(realpath "$(dirname "$0")")"; cd ..; pwd)
 : ${CONTAINER_NAME:=termux-package-builder}
 : ${TERMUX_DOCKER_RUN_EXTRA_ARGS:=}
 : ${TERMUX_DOCKER_EXEC_EXTRA_ARGS:=}
-BUILDSCRIPT_NAME=build-package.sh
-CONTAINER_HOME_DIR=/home/builder
+readonly BUILDSCRIPT_NAME=build-package.sh
+readonly CONTAINER_HOME_DIR=/home/builder
 
 _show_usage() {
 	echo "Usage: $0 [OPTIONS] [COMMAND]"
@@ -64,10 +64,9 @@ while (( $# != 0 )); do
 	esac
 done
 
-# If 'build-package-dry-run-simulation.sh' does not return 85 (EX_C__NOOP), or if
-# $1 (the first argument passed to this script which runs docker) does not contain
-# $BUILDSCRIPT_NAME, this condition will evaluate false and this script which
-# runs docker will continue.
+# Dry-run mode: simulate the build to check if any packages would actually be
+# built before running the Docker container. If the simulation script returns
+# 85 (EX_C__NOOP), no packages need building and we exit early.
 if [ "${dry_run}" = "true" ]; then
 	case "${1:-}" in
 		*"/$BUILDSCRIPT_NAME")
@@ -105,9 +104,9 @@ fi
 # To reset, use "restorecon -Fr ."
 # To check, use "ls -Z ."
 if [ -n "$(command -v getenforce)" ] && [ "$(getenforce)" = Enforcing ]; then
-	VOLUME=$REPOROOT:$CONTAINER_HOME_DIR/termux-packages:z
+	VOLUME=$REPOROOT:$CONTAINER_HOME_DIR/proot-termux:z
 else
-	VOLUME=$REPOROOT:$CONTAINER_HOME_DIR/termux-packages
+	VOLUME=$REPOROOT:$CONTAINER_HOME_DIR/proot-termux
 fi
 
 USER=builder
@@ -173,7 +172,7 @@ __change_container_pid_max() {
 		else
 			# On kernel versions >= 6.14, the pid_max value is pid namespaced, so we need to set it in the container namespace instead of host.
 			# But some distributions may backport the pid namespacing to older kernels, so we check whether it's effective by checking the value in the container after setting it.
-			$SUDO docker run --privileged --pid="container:$CONTAINER_NAME" --rm "$TERMUX_BUILDER_IMAGE_NAME" sh -c "echo 65535 | sudo tee /proc/sys/kernel/pid_max > /dev/null" || :
+			$SUDO docker run --privileged --pid="container:$CONTAINER_NAME" --rm "$TERMUX_BUILDER_IMAGE_NAME" sh -c "echo 65535 | sudo tee /proc/sys/kernel/pid_max > /dev/null" || true
 			if [[ "$($SUDO docker exec $CONTAINER_NAME cat /proc/sys/kernel/pid_max)" -eq 65535 ]]; then
 				echo "Successfully changed /proc/sys/kernel/pid_max for container namespace"
 			else

@@ -1,15 +1,15 @@
 #ifndef VIRTUAL_NET_INTERNAL_H
 #define VIRTUAL_NET_INTERNAL_H
 
-#include <stdint.h>
+#include <stdint.h>   /* uint*_t, */
 #include <sys/types.h>
 #include <sys/un.h>
-#include <string.h>  /* memset(3), memcpy(3) */
-#include <stdio.h>   /* snprintf(3) */
+#include <string.h>   /* memset(3), memcpy(3) */
+#include <stdio.h>    /* snprintf(3) */
 
-/* ================================================================
- * Paths & Limits
- * ================================================================ */
+/* ========================================================================= */
+/*  Paths & Limits                                                           */
+/* ========================================================================= */
 
 #define VNP_TMP_DIR      "/data/data/com.termux/files/usr/tmp/proot-net"
 #define VNP_MAX_NAME     64
@@ -23,9 +23,9 @@
  * Max sun_path = 108 bytes, '@' + prefix + name + '-' + port digits < 108 */
 #define VNP_ABSTRACT_PREFIX "proot-vnet-"
 
-/* ================================================================
- * Opcodes: communication tracer ↔ helper (via pipe)
- * ================================================================ */
+/* ========================================================================= */
+/*  Opcodes: communication tracer ↔ helper (via pipe)                        */
+/* ========================================================================= */
 
 enum VnpOpcode {
 	VNP_HELLO    = 0x01,
@@ -34,9 +34,9 @@ enum VnpOpcode {
 	VNP_UNEXPOSE = 0x51,
 };
 
-/* ================================================================
- * Requests / Responses (tracer ↔ helper via pipe)
- * ================================================================ */
+/* ========================================================================= */
+/*  Requests / Responses (tracer ↔ helper via pipe)                          */
+/* ========================================================================= */
 
 struct VnpRequest {
 	uint32_t opcode;
@@ -49,9 +49,9 @@ struct VnpResponse {
 	uint16_t host_port;
 };
 
-/* ================================================================
- * Virtual socket fd tracking (in tracer memory)
- * ================================================================ */
+/* ========================================================================= */
+/*  Virtual socket fd tracking (in tracer memory)                            */
+/* ========================================================================= */
 
 typedef struct {
 	int      fd;            /* Tracee's file descriptor */
@@ -60,38 +60,39 @@ typedef struct {
 	int      orig_domain;   /* Original AF_INET before we changed to AF_UNIX */
 } VnpFdEntry;
 
-/* ================================================================
- * Exposed port entry (in config)
- * ================================================================ */
+/* ========================================================================= */
+/*  Exposed port entry (in config)                                           */
+/* ========================================================================= */
 
 typedef struct {
 	uint16_t host_port;     /* TCP port on host (0.0.0.0:host_port) */
 	uint16_t virtual_port;  /* Virtual port (abstract Unix socket) */
 } VnpExposeEntry;
 
-/* ================================================================
- * Extension configuration (talloc'd per tracee)
- * ================================================================ */
+/* ========================================================================= */
+/*  Extension configuration (talloc'd per tracee)                            */
+/* ========================================================================= */
 
 typedef struct {
-	char          proxy_name[VNP_MAX_NAME];
-	uint32_t      instance_token;    /* Unique per-instance token */
-	VnpFdEntry    fd_map[VNP_MAX_FDS];
-	int           fd_count;
-	VnpExposeEntry expose_map[VNP_EXPOSE_MAX];
-	int           expose_count;
+	char          proxy_name[VNP_MAX_NAME];    /* Proxy namespace identifier    */
+	uint32_t      instance_token;              /* Unique per-instance token    */
+	VnpFdEntry    fd_map[VNP_MAX_FDS];         /* Virtual fd tracking table    */
+	int           fd_count;                    /* Number of active fds         */
+	VnpExposeEntry expose_map[VNP_EXPOSE_MAX]; /* Exposed port mappings        */
+	int           expose_count;                /* Number of exposed ports      */
 
 	/* Helper process management */
-	int           helper_pid;
-	int           helper_pipe_in;   /* tracer → helper (write end) */
-	int           helper_pipe_out;  /* tracer ← helper (read end) */
+	int           helper_pid;                  /* PID of helper process        */
+	int           helper_pipe_in;              /* tracer → helper (write end)  */
+	int           helper_pipe_out;             /* tracer ← helper (read end)   */
 } VnpConfig;
 
-/* ================================================================
- * Cross-instance Registry (shared file with flock)
- * Each bind creates a unique abstract socket name.
- * Registry maps virtual_port = unique_name for cross-instance connect.
- * ================================================================ */
+/* ========================================================================= */
+/*  Cross-instance Registry (shared file with flock)                          */
+/*                                                                           */
+/*  Each bind creates a unique abstract socket name.                         */
+/*  Registry maps virtual_port → unique_name for cross-instance connect.     */
+/* ========================================================================= */
 
 #define VNP_REG_MAGIC   0x50524F4E /* "PRON" */
 #define VNP_REG_MAX     512
@@ -111,9 +112,9 @@ struct VnpRegistryHeader {
 	struct VnpRegistryEntry entries[VNP_REG_MAX];
 };
 
-/* ================================================================
- * Inline helpers
- * ================================================================ */
+/* ========================================================================= */
+/*  Inline helpers                                                           */
+/* ========================================================================= */
 
 /**
  * Build abstract Unix socket name for a virtual port.
@@ -137,6 +138,8 @@ static inline int vnp_abstract_name(const char *proxy_name, uint16_t port,
  * Fill a struct sockaddr_un for a unique abstract Unix socket.
  * Name format: \0proot-vnet-{proxy_name}-{port}-{token}
  * The token ensures uniqueness across proot instances.
+ *
+ * Note: the sun_path[0] = '\0' prefix makes this an abstract socket per unix(7)
  */
 static inline void vnp_fill_abstract_sa(struct sockaddr_un *sa, const char *proxy_name,
                                          uint16_t port, uint32_t token)
@@ -184,6 +187,7 @@ static inline VnpFdEntry *vnp_add_fd(VnpConfig *config, int fd, uint16_t virtual
 
 /**
  * Remove an fd entry from the config's fd_map.
+ * Uses swap-with-last strategy (O(1)) to avoid O(n) memmove.
  */
 static inline void vnp_remove_fd(VnpConfig *config, int fd)
 {

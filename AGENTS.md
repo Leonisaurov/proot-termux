@@ -1,8 +1,8 @@
-# AGENTS.md — termux-packages (proot-only fork)
+# AGENTS.md — proot-termux (proot-only fork)
 
 ## Project Overview
 
-Proot-only fork of termux-packages. Cross-compiles proot for Android aarch64 using NDK r29 via Docker.
+Proot-only fork focused exclusively on proot. Cross-compiles proot for Android aarch64 using NDK r29 via Docker.
 
 The source lives directly in `proot-source/` — no patches, no downloads.
 
@@ -19,6 +19,19 @@ The source lives directly in `proot-source/` — no patches, no downloads.
 ```
 
 ## Proot Package
+
+## Critical Rules
+
+### ⚠️ ALWAYS bump TERMUX_PKG_REVISION before commit
+
+**Cada vez que modifiques archivos en `proot-source/src/` o `packages/proot/`, DEBES incrementar `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES de hacer commit.**
+
+Sin esto, el workflow de CI no se disparará correctamente y los usuarios no recibirán la actualización.
+
+Regla:
+1. Editas código → 2. Bump REVISION → 3. Commit → 4. Push → 5. Verificar con `gita notify build-proot.yml`
+
+**NUNCA hagas commit sin bumpear la revisión.** Es el error más común y el que más tiempo hace perder.
 
 ### Location
 - `packages/proot/build.sh` — package definition
@@ -116,7 +129,7 @@ struct VnpRegistryEntry {
 }; // Total: 116 bytes
 ```
 
-#### Bugs Fixed (revisions 12-16)
+#### Bugs Fixed (revisions 12-17)
 
 | Bug | Revision | Symptom | Fix |
 |-----|----------|---------|-----|
@@ -127,6 +140,7 @@ struct VnpRegistryEntry {
 | socket() protocol=IPPROTO_TCP | 15 | Socket creation fails for AF_UNIX | Zero protocol arg when changing domain |
 | REMOVED handler corrupts registry | 16 | 2nd curl sees count=0 in registry | Remove registry write from REMOVED handler |
 | Missing closing brace | 14 | Compilation error | Add `}` in getpeername else block |
+| Code polish across extension files | 17 | Redundant code, macros, style | Extracted `handle_port_translation()`, removed `DETAIL`/`APPEND` macros, `select()`→`poll()`, POSIX macros for IPv6, lazy init patterns |
 
 ### Modified Source Files
 
@@ -151,7 +165,7 @@ struct VnpRegistryEntry {
 - **Steps**: Clone → zram → restore cache → prepare → build → collect → release → save cache → artifact
 - **Caching**: `~/.termux-build` mounted into Docker via `TERMUX_DOCKER_RUN_EXTRA_ARGS`
 - **Cache key**: hash of `packages/proot/build.sh`, `packages/libtalloc/build.sh`, `packages/libandroid-shmem/build.sh`
-- **Downloads**: `gh release download proot-latest -R Leonisaurov/termux-packages -p "*.pkg.tar.xz"`
+- **Downloads**: `gh release download proot-latest -R Leonisaurov/proot-termux -p "*.pkg.tar.xz"`
 
 ### `docker_image.yml`
 - Builds/pushes `ghcr.io/leonisaurov/package-builder:latest`
@@ -161,7 +175,7 @@ struct VnpRegistryEntry {
 Siempre que se lance un workflow, usar `gita notify` para esperar el resultado y leer los logs:
 
 ```bash
-cd /data/data/com.termux/files/home/Develop/Clones/termux-packages
+cd /data/data/com.termux/files/home/Develop/Clones/proot-termux
 gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Success)'
 ```
 
@@ -172,9 +186,10 @@ gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Succ
 ## Development
 
 1. Edit files in `proot-source/src/`
-2. Bump `TERMUX_PKG_REVISION` in `packages/proot/build.sh`
-3. Push — workflow triggers automatically
-4. Siempre verificar con `gita notify build-proot.yml`
+2. Bump `TERMUX_PKG_REVISION` in `packages/proot/build.sh` ← **IMPORTANTE: no olvidar**
+3. Commit with descriptive message
+4. Push — workflow triggers automatically
+5. Siempre verificar con `gita notify build-proot.yml`
 
 ### Commit Guidelines
 

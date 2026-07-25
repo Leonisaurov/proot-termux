@@ -40,7 +40,8 @@
 static int remove_extension(Extension *extension)
 {
 	LIST_REMOVE(extension, link);
-	extension->callback(extension, REMOVED, 0, 0);
+	if (extension->callback != NULL)
+		extension->callback(extension, REMOVED, 0, 0);
 
 	bzero(extension, sizeof(Extension));
 	return 0;
@@ -105,13 +106,23 @@ int initialize_extension(Tracee *tracee, extension_callback_t callback, const ch
 	Extension *extension;
 	int status;
 
+	if (callback == NULL) {
+		note(tracee, WARNING, INTERNAL, "can't initialize a NULL extension callback");
+		return -1;
+	}
+
 	extension = new_extension(tracee, callback);
 	if (extension == NULL) {
 		note(tracee, WARNING, INTERNAL, "can't create a new extension");
 		return -1;
 	}
 
-	/* Remove the new extension if its initialized has failed.  */
+	/* Extension lifecycle:
+	 * - INITIALIZATION: called right after allocation.
+	 * - REMOVED: called during teardown (talloc destructor).
+	 * - Other events: called during tracee execution.
+	 *
+	 * Remove the new extension if its initialization has failed.  */
 	status = extension->callback(extension, INITIALIZATION, (intptr_t) cli, 0);
 	if (status < 0) {
 		TALLOC_FREE(extension);

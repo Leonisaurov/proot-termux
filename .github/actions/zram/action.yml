@@ -1,5 +1,16 @@
+# zram — compressed RAM-based swap for GitHub Actions runners
+#
+# zram creates a compressed block device in RAM used as swap space.
+# This allows the system to handle memory pressure via compression
+# instead of disk I/O, significantly improving build performance on
+# memory-constrained runners without adding disk latency.
 name: zram
 description: Enable zram module on GitHub hosted runner
+
+branding:
+  icon: activity
+  color: green
+
 inputs:
   algorithm:
     description: The compression algorithm to use with zram
@@ -13,6 +24,7 @@ inputs:
   device_name:
     description: Name of swap device
     default: '/dev/zram0'
+
 runs:
   using: composite
   steps:

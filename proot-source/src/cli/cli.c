@@ -44,7 +44,6 @@
 #include "path/binding.h"
 #include "path/canon.h"
 #include "path/path.h"
-#include <extension/extension.h>
 #include <extension/sysvipc/sysvipc.h>
 #include <extension/virtual_net/virtual_net_helper.h>
 
@@ -59,11 +58,11 @@ void print_usage(Tracee *tracee, const Cli *cli, bool detailed)
 	const Option *options;
 	size_t i, j;
 
-#define DETAIL(a) if (detailed) a
-
-	DETAIL(printf("%s %s: %s.\n\n", cli->name, cli->version, cli->subtitle));
+	if (detailed)
+		printf("%s %s: %s.\n\n", cli->name, cli->version, cli->subtitle);
 	printf("Usage:\n  %s\n", cli->synopsis);
-	DETAIL(printf("\n"));
+	if (detailed)
+		printf("\n");
 
 	options = cli->options;
 	for (i = 0; options[i].class != NULL; i++) {
@@ -71,7 +70,8 @@ void print_usage(Tracee *tracee, const Cli *cli, bool detailed)
 			const Argument *argument = &(options[i].arguments[j]);
 
 			if (!argument->name || (!detailed && j != 0)) {
-				DETAIL(printf("\n"));
+				if (detailed)
+					printf("\n");
 				printf("\t%s\n", options[i].description);
 				if (detailed) {
 					if (options[i].detail != NULL && options[i].detail[0] != '\0')
@@ -162,6 +162,17 @@ static void print_error_separator(const Tracee *tracee, const Argument *argument
 			argument->name, argument->separator);
 }
 
+static void append_str(char *string, size_t size, const char *post)
+{
+	size_t current_len = strlen(string);
+	size_t post_len = strlen(post);
+
+	if (current_len + post_len >= size)
+		return;
+
+	memcpy(string + current_len, post, post_len + 1);
+}
+
 static void print_argv(const Tracee *tracee, const char *prompt, char *const argv[])
 {
 	char string[ARG_MAX] = "";
@@ -170,23 +181,13 @@ static void print_argv(const Tracee *tracee, const char *prompt, char *const arg
 	if (!argv)
 		return;
 
-#define APPEND(post)							\
-	do {								\
-		ssize_t length = sizeof(string) - (strlen(string) + strlen(post)); \
-		if (length <= 0)					\
-			return;						\
-		strncat(string, post, length);				\
-	} while (0)
-
-	APPEND(prompt);
-	APPEND(" =");
+	append_str(string, sizeof(string), prompt);
+	append_str(string, sizeof(string), " =");
 	for (i = 0; argv[i] != NULL; i++) {
-		APPEND(" ");
-		APPEND(argv[i]);
+		append_str(string, sizeof(string), " ");
+		append_str(string, sizeof(string), argv[i]);
 	}
 	string[sizeof(string) - 1] = '\0';
-
-#undef APPEND
 
 	note(tracee, INFO, USER, "%s", string);
 }
@@ -291,6 +292,20 @@ static int initialize_exe(Tracee *tracee, const char *exe)
 	talloc_set_name_const(tracee->exe, "$exe");
 
 	return 0;
+}
+
+static int run_config_hook(Tracee *tracee, const Cli *cli,
+			initialization_hook_t hook,
+			size_t argc, char *const argv[], size_t cursor)
+{
+	if (hook == NULL)
+		return cursor;
+
+	int status = hook(tracee, cli, argc, argv, cursor);
+	if (status < 0)
+		return -1;
+
+	return status;
 }
 
 /**
@@ -398,17 +413,9 @@ static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
 	}
 	argc_offset = i;
 
-#define HOOK_CONFIG(callback)						\
-	do {								\
-		if (cli->callback != NULL) {				\
-			status = cli->callback(tracee, cli, argc, argv, i); \
-			if (status < 0)					\
-				return -1;				\
-			i = status;					\
-		}							\
-	} while (0)
-
-	HOOK_CONFIG(pre_initialize_bindings);
+	i = run_config_hook(tracee, cli, cli->pre_initialize_bindings, argc, argv, i);
+	if (i < 0)
+		return -1;
 
 	/* The guest rootfs is now known: bindings specified by the
 	 * user (tracee->bindings.user) can be canonicalized.  */
@@ -416,8 +423,12 @@ static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
 	if (status < 0)
 		return -1;
 
-	HOOK_CONFIG(post_initialize_bindings);
-	HOOK_CONFIG(pre_initialize_cwd);
+	i = run_config_hook(tracee, cli, cli->post_initialize_bindings, argc, argv, i);
+	if (i < 0)
+		return -1;
+	i = run_config_hook(tracee, cli, cli->pre_initialize_cwd, argc, argv, i);
+	if (i < 0)
+		return -1;
 
 	/* Bindings are now installed (tracee->bindings.guest &
 	 * tracee->bindings.host): the current working directory can
@@ -426,8 +437,12 @@ static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
 	if (status < 0)
 		return -1;
 
-	HOOK_CONFIG(post_initialize_cwd);
-	HOOK_CONFIG(pre_initialize_exe);
+	i = run_config_hook(tracee, cli, cli->post_initialize_cwd, argc, argv, i);
+	if (i < 0)
+		return -1;
+	i = run_config_hook(tracee, cli, cli->pre_initialize_exe, argc, argv, i);
+	if (i < 0)
+		return -1;
 
 	/* Bindings are now installed and the current working
 	 * directory is canonicalized: resolve path to @tracee->exe
@@ -436,8 +451,9 @@ static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
 	if (status < 0)
 		return -1;
 
-	HOOK_CONFIG(post_initialize_exe);
-#undef HOOK_CONFIG
+	i = run_config_hook(tracee, cli, cli->post_initialize_exe, argc, argv, i);
+	if (i < 0)
+		return -1;
 
 	print_config(tracee, &argv[argc_offset]);
 
@@ -520,12 +536,13 @@ int parse_integer_option(const Tracee *tracee, int *variable, const char *value,
 	char *end_ptr = NULL;
 
 	errno = 0;
-	*variable = strtol(value, &end_ptr, 10);
-	if (errno != 0 || end_ptr == value) {
-		note(tracee, ERROR, USER, "option `%s` expects an integer value.", option);
+	long val = strtol(value, &end_ptr, 10);
+	if (errno != 0 || end_ptr == value || val < INT_MIN || val > INT_MAX) {
+		note(tracee, ERROR, USER, "option '%s' expects an integer value.", option);
 		return -1;
 	}
 
+	*variable = (int)val;
 	return 0;
 }
 
