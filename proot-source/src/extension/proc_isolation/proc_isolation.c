@@ -37,6 +37,7 @@
 #include "syscall/sysnum.h"
 #include "syscall/seccomp.h"
 #include "syscall/syscall.h"
+#include "tracee/seccomp.h"
 #include "path/path.h"
 #include "cli/note.h"
 
@@ -65,6 +66,10 @@ static FilteredSysnum hpc_filtered_sysnums[] = {
     { PR_perf_event_open,   0 },
     { PR_open_by_handle_at, 0 },
     { PR_openat,            0 },
+    { PR_process_vm_readv,  0 },
+    { PR_process_vm_writev, 0 },
+    { PR_unshare,           0 },
+    { PR_mount,             0 },
     FILTERED_SYSNUM_END,
 };
 
@@ -289,6 +294,30 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
             }
         }
 
+        if (config->flags & ISOLATE_PROC) {
+            if (num == PR_unshare) {
+                set_sysnum(tracee, PR_void);
+                poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
+                VERBOSE(tracee, 2, "proc_isolation: unshare blocked (ENOSYS)");
+                return 1;
+            }
+            if (num == PR_mount) {
+                set_sysnum(tracee, PR_void);
+                poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
+                VERBOSE(tracee, 2, "proc_isolation: mount blocked (ENOSYS)");
+                return 1;
+            }
+            if (num == PR_socket) {
+                word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
+                if (domain == AF_NETLINK) {
+                    set_sysnum(tracee, PR_void);
+                    poke_reg(tracee, SYSARG_RESULT, -EACCES);
+                    VERBOSE(tracee, 2, "proc_isolation: netlink socket blocked");
+                    return 1;
+                }
+            }
+        }
+
         return 0;
     }
 
@@ -401,9 +430,50 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
             }
             return 0;
 
+        case PR_process_vm_readv:
+        case PR_process_vm_writev:
+            if (config->flags & ISOLATE_PTRACE) {
+                pid_t target_pid = (pid_t)peek_reg(tracee, CURRENT, SYSARG_1);
+                if (target_pid > 0 && !hpc_is_proot_pid(target_pid)) {
+                    set_sysnum(tracee, PR_void);
+                    poke_reg(tracee, SYSARG_RESULT, -ESRCH);
+                    VERBOSE(tracee, 2, "proc_isolation: blocked process_vm to host pid %d", target_pid);
+                }
+            }
+            return 0;
+
         default:
             return 0;
         }
+    }
+
+    case SYSCALL_EXIT_START: {
+        Tracee *tracee = TRACEE(extension);
+        HpcConfig *config = (HpcConfig *)extension->config;
+        Sysnum num;
+
+        if (config == NULL)
+            return 0;
+
+        num = get_sysnum(tracee, ORIGINAL);
+
+        /* The built-in exit handler overwrites PR_unshare/PR_mount
+         * result to 0 (see exit.c).  Skip it entirely to preserve
+         * our -ENOSYS result from SYSCALL_ENTER_START.  */
+        if (config->flags & ISOLATE_PROC) {
+            if (num == PR_unshare || num == PR_mount) {
+                word_t modified_sysnum = peek_reg(tracee, MODIFIED, SYSARG_NUM);
+                word_t original_sysnum = peek_reg(tracee, ORIGINAL, SYSARG_NUM);
+                if (modified_sysnum == SYSCALL_AVOIDER && modified_sysnum != original_sysnum) {
+                    poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
+                    VERBOSE(tracee, 3, "proc_isolation: skipping exit handler for %s",
+                        num == PR_unshare ? "unshare" : "mount");
+                    return 1;
+                }
+            }
+        }
+
+        return 0;
     }
 
     case SYSCALL_EXIT_END: {
@@ -421,6 +491,40 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
         default:
             return 0;
         }
+    }
+
+    case SIGSYS_OCC: {
+        Tracee *tracee = TRACEE(extension);
+        HpcConfig *config = (HpcConfig *)extension->config;
+        Sysnum num;
+
+        if (config == NULL)
+            return 0;
+
+        num = get_sysnum(tracee, CURRENT);
+
+        if ((config->flags & ISOLATE_PROC) && num == PR_mount) {
+            set_result_after_seccomp(tracee, -ENOSYS);
+            VERBOSE(tracee, 2, "proc_isolation: mount blocked via SIGSYS (ENOSYS)");
+            return 2;
+        }
+
+        if ((config->flags & ISOLATE_PROC) && num == PR_unshare) {
+            set_result_after_seccomp(tracee, -ENOSYS);
+            VERBOSE(tracee, 2, "proc_isolation: unshare blocked via SIGSYS (ENOSYS)");
+            return 2;
+        }
+
+        if ((config->flags & ISOLATE_PROC) && num == PR_socket) {
+            word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
+            if (domain == AF_NETLINK) {
+                set_result_after_seccomp(tracee, -EACCES);
+                VERBOSE(tracee, 2, "proc_isolation: netlink socket blocked via SIGSYS (EACCES)");
+                return 2;
+            }
+        }
+
+        return 0;
     }
 
     case REMOVED:
