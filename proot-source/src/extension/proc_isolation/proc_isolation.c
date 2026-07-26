@@ -64,6 +64,7 @@ static FilteredSysnum hpc_filtered_sysnums[] = {
     { PR_bpf,               0 },
     { PR_perf_event_open,   0 },
     { PR_open_by_handle_at, 0 },
+    { PR_openat,            0 },
     FILTERED_SYSNUM_END,
 };
 
@@ -261,10 +262,33 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
     case SYSCALL_ENTER_START: {
         Tracee *tracee = TRACEE(extension);
         HpcConfig *config = (HpcConfig *)extension->config;
+        Sysnum num;
 
-        if (config && (config->flags & ISOLATE_PTRACE)
-            && get_sysnum(tracee, CURRENT) == PR_ptrace)
+        if (config == NULL)
+            return 0;
+
+        num = get_sysnum(tracee, CURRENT);
+
+        if ((config->flags & ISOLATE_PTRACE) && num == PR_ptrace)
             return hpc_handle_ptrace_enter(tracee);
+
+        if ((config->flags & ISOLATE_PROC) && num == PR_openat) {
+            char path[64];
+            word_t path_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+            if (path_addr != 0 && read_data(tracee, path, path_addr, sizeof(path)) >= 0) {
+                path[sizeof(path) - 1] = '\0';
+                if (strcmp(path, "/proc/cpuinfo") == 0 ||
+                    strcmp(path, "/proc/meminfo") == 0 ||
+                    strcmp(path, "/proc/self/mountinfo") == 0 ||
+                    strcmp(path, "/proc/self/environ") == 0) {
+                    VERBOSE(tracee, 2, "proc_isolation: blocked %s (ENOENT)", path);
+                    set_sysnum(tracee, PR_void);
+                    poke_reg(tracee, SYSARG_RESULT, -ENOENT);
+                    return 1;
+                }
+            }
+        }
+
         return 0;
     }
 
@@ -376,6 +400,7 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
                 VERBOSE(tracee, 1, "proc_isolation: open_by_handle_at blocked (EOPNOTSUPP)");
             }
             return 0;
+
         default:
             return 0;
         }
