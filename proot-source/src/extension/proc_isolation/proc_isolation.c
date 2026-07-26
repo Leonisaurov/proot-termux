@@ -7,7 +7,7 @@
  * Provides fine-grained isolation flags:
  *   ISOLATE_PROC     — /proc/ only shows proot-owned PIDs
  *   ISOLATE_PTRACE   — ptrace() to host PIDs returns ESRCH
- *   ISOLATE_REBOOT   — reboot() returns 0 (no-op)
+ *   ISOLATE_REBOOT   — reboot() re-exec's proot (real reboot)
  *   ISOLATE_SWAP     — swapon/swapoff returns ENOSYS
  *   ISOLATE_KEXEC    — kexec_load returns 0 (no-op)
  *   ISOLATE_IOPORT   — iopl/ioperm returns 0 (no-op)
@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <talloc.h>
 #include <linux/limits.h>
 #include <stdint.h>
@@ -291,24 +292,44 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
             return 0;
         case PR_reboot:
             if (config->flags & ISOLATE_REBOOT) {
+                /* Kill all other tracees */
                 Tracees *list = get_tracees_list_head();
                 if (list != NULL) {
-                    Tracee *t, *tmp;
-                    int count = 0;
-                    t = LIST_FIRST(list);
-                    while (t != NULL) {
-                        tmp = LIST_NEXT(t, link);
-                        if (t->pid != tracee->pid) {
+                    Tracee *t;
+                    LIST_FOREACH(t, list, link) {
+                        if (t->pid != tracee->pid)
                             kill(t->pid, SIGKILL);
-                            count++;
-                        }
-                        t = tmp;
                     }
-                    VERBOSE(tracee, 1, "proc_isolation: reboot killed %d processes", count);
                 }
+                /* Void syscall — caller sees success */
                 set_sysnum(tracee, PR_void);
                 poke_reg(tracee, SYSARG_RESULT, 0);
-                kill(tracee->pid, SIGKILL);
+                VERBOSE(tracee, 1, "proc_isolation: reboot initiated");
+
+                /* Re-exec proot with same arguments (restart sandbox) */
+                {
+                    char buf[4096];
+                    int fd = open("/proc/self/cmdline", O_RDONLY);
+                    if (fd >= 0) {
+                        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+                        close(fd);
+                        if (n > 0) {
+                            char *argv[128];
+                            int argc = 0;
+                            char *p = buf;
+                            buf[n] = '\0';
+                            while (p < buf + n && argc < 126) {
+                                argv[argc++] = p;
+                                p += strlen(p) + 1;
+                            }
+                            argv[argc] = NULL;
+                            /* This replaces the proot process */
+                            execvp(argv[0], argv);
+                        }
+                    }
+                }
+                /* If exec fails, just exit */
+                _exit(0);
             }
             return 0;
         case PR_swapon:

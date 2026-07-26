@@ -17,6 +17,8 @@
 typedef struct {
     unsigned int flags;
     int          proc_fd_count;
+    char       **reboot_argv;
+    int          reboot_argc;
 } HpcConfig;
 
 extern int hpc_callback(Extension *extension, ExtensionEvent event,
