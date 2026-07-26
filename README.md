@@ -142,6 +142,23 @@ re-reads all registers when a rewinded PC re-executes the `SVC` instruction.
 virtual network isolation (all sockets become AF_UNIX, no internet access).
 To access the internet, run proot without `--proxy`.
 
+### Android: reboot() blocked by kernel seccomp
+
+On Android, the kernel's seccomp filter (configured by `init.rc`) blocks
+the `reboot()` syscall (NR 142) with `SECCOMP_RET_KILL` before proot or
+any ptrace tracer can intercept it. This is a kernel-level restriction
+that cannot be bypassed from userspace.
+
+As a result, `--reboot-isolated` cannot emulate `reboot()` on Android.
+The handler is correct and tested on standard Linux, but on Android the
+syscall never reaches proot. The calling process is killed by the kernel
+seccomp filter before any interception occurs.
+
+Other isolation flags (`--proc-isolated`, `--ptrace-isolated`,
+`--swap-isolated`, `--bpf-isolated`, `--perf-isolated`,
+`--kexec-isolated`, `--ioport-isolated`, `--handle-isolated`) work
+correctly on Android.
+
 ---
 
 ## Planned Features

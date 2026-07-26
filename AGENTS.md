@@ -340,3 +340,11 @@ Types: `fix`, `enhance`, `chore`, `ci`
 ## Agent Configuration
 
 The orchestrator agent lives at `~/.config/opencode/agent/orquestador.md`.
+
+### Notes for the orchestrator
+
+- Do not close the session after completing tasks unless explicitly
+  asked by the user. The user decides when the session ends.
+- Keep the working state available — the user may want to continue
+  with additional features or adjustments.
+- When in doubt, ask "¿Algo más?" instead of assuming completion.
