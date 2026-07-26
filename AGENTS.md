@@ -348,3 +348,50 @@ The orchestrator agent lives at `~/.config/opencode/agent/orquestador.md`.
 - Keep the working state available — the user may want to continue
   with additional features or adjustments.
 - When in doubt, ask "¿Algo más?" instead of assuming completion.
+
+## Isolation Features
+
+### Available Flags
+
+| Flag | What it blocks | Error returned |
+|------|---------------|----------------|
+| `--proc-isolated` | Host processes in /proc/, /proc/cpuinfo, meminfo, mountinfo, environ, netlink sockets, unshare, mount | ENOENT, filtered, ENOSYS, EACCES |
+| `--ptrace-isolated` | ptrace, process_vm_readv/writev, kill to host PIDs | ESRCH |
+| `--reboot-isolated` | reboot syscall | Re-exec's proot with same args (actual restart) |
+| `--swap-isolated` | swapon, swapoff | ENOSYS |
+| `--kexec-isolated` | kexec_load | ENOSYS |
+| `--ioport-isolated` | iopl, ioperm (ARM64 no-op) | 0 (success) |
+| `--bpf-isolated` | bpf syscall | ENOSYS |
+| `--perf-isolated` | perf_event_open | ENOENT |
+| `--handle-isolated` | open_by_handle_at | EOPNOTSUPP |
+| `--proc-isolation` | (legacy) Combines --proc-isolated + --ptrace-isolated |
+
+### Escape Attempt Results (all blocked)
+
+| Attack vector | Result |
+|--------------|--------|
+| ptrace to host PID (1) | ESRCH |
+| process_vm_readv to host PID | ESRCH |
+| socket(AF_NETLINK) | EACCES |
+| unshare(CLONE_NEWNS) | ENOSYS |
+| mount() | ENOSYS |
+| chroot() | ENOENT |
+| bpf() | ENOSYS |
+| perf_event_open() | ENOENT |
+| open_by_handle_at() | EOPNOTSUPP |
+| kexec_load() | ENOSYS |
+| io_uring_setup() | ENOSYS |
+| userfaultfd() | EPERM |
+| setns(host namespace) | ENOENT |
+| /proc/cpuinfo, meminfo, mountinfo, environ | ENOENT |
+| /proc/1/ (host processes) | Filtered out |
+
+### ARM64 Limitations
+
+- **Chained syscall mechanism** (socket → connect → dup3 → close, needed for --allow-internet) does not work on ARM64. The kernel does not re-read argument registers (x0-x5) when the PC is rewound via ptrace. Only x8 (syscall number) can be changed via NT_ARM_SYSTEM_CALL.
+- **reboot()** on Android is blocked by kernel seccomp filter before proot can intercept it. Works on standard Linux.
+- **process_vm_writev** to other proot processes is currently allowed (not a host escape, but intra-sandbox).
+
+### Commit History (recent)
+
+For full commit history: `git log --oneline`
