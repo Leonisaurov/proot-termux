@@ -9,7 +9,7 @@ readonly TEMPLATE_CHROOT="$PROJECT_DIR/packages/proot/termux-chroot"
 
 readonly PKG_NAME="proot"
 readonly PKG_VERSION="5.1.107.87"
-readonly PKG_REVISION=15
+readonly PKG_REVISION=16
 readonly PKG_ARCH="aarch64"
 readonly PKG_FULLVER="${PKG_VERSION}-${PKG_REVISION}"
 readonly PKG_FILENAME="${PKG_NAME}-${PKG_FULLVER}-${PKG_ARCH}.pkg.tar.xz"
@@ -94,8 +94,11 @@ _build() {
     # Export build variables
     export CC=gcc
     export CPPFLAGS="-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I. -DARG_MAX=131072 -DVERSION=\"${PKG_VERSION}\""
-    export CFLAGS="-Wall -Wextra -O2"
-    export LDFLAGS="-ltalloc -Wl,-z,noexecstack"
+    # Flags de optimización agresiva (-O3 + LTO + sections + NDEBUG):
+    export CFLAGS="-Wall -Wextra -O3 -flto -fvisibility=hidden -ffunction-sections -fdata-sections -DNDEBUG"
+
+    # LDFLAGS con LTO en linkeo, gc-sections e ICF:
+    export LDFLAGS="-ltalloc -flto -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--icf=safe"
     export PROOT_UNBUNDLE_LOADER="$PREFIX/libexec/proot"
 
     echo ">>> Compiling with make -j${JOBS}..."

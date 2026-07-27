@@ -521,7 +521,9 @@ int main(int argc, char *const argv[])
 		exit(ret);
 	}
 
-	if (NULL == getenv("PROOT_NO_MOUNTINFO"))
+	if (NULL == getenv("PROOT_NO_MOUNTINFO")
+	    && tracee->fs != NULL
+	    && tracee->fs->bindings.guest != NULL)
 		initialize_extension(tracee, mountinfo_callback, NULL);
 
 	/* Start the first tracee.  */

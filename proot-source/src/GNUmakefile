@@ -22,6 +22,28 @@ ifdef PROOT_WITH_LIBANDROID_SHMEM
   LDFLAGS += -landroid-shmem
 endif
 
+# ──────────────────────────────────────────────
+# Flags de optimización agresiva
+# ──────────────────────────────────────────────
+# OPTIMIZATION_FLAGS puede overridearse desde entorno (útil para debugging)
+OPTIMIZATION_FLAGS ?= -O3 -flto -fvisibility=hidden -ffunction-sections -fdata-sections -DNDEBUG
+
+# Detección de arquitectura para flags específicos de aarch64
+# NOTA: Cuando CROSS_COMPILE está definida, CC será ej. aarch64-linux-android-gcc
+# y -dumpmachine retornará "aarch64-linux-android"
+IS_AARCH64 := $(shell $(CC) -dumpmachine 2>/dev/null | grep -q aarch64 && echo true)
+ifdef IS_AARCH64
+  OPTIMIZATION_FLAGS += -march=armv8-a+crc -mtune=cortex-a76
+endif
+
+# Aplicar flags de optimización a compilación y linkeo
+CFLAGS += $(OPTIMIZATION_FLAGS)
+LDFLAGS += -flto -Wl,--gc-sections
+
+# --icf=safe (Identical Code Folding) — soportado por gold/lld, no por BFD ld
+ICF_SAFE := $(shell printf 'int main(void){return 0;}\n' | $(LD) -xc - -Wl,--icf=safe -o /dev/null >/dev/null 2>&1 && echo '-Wl,--icf=safe')
+LDFLAGS += $(ICF_SAFE)
+
 OBJECTS += \
 	cli/cli.o		\
 	cli/proot.o		\
@@ -218,7 +240,7 @@ $(eval $(call define_from_arch.h,$1,LOADER_ARCH_CFLAGS))
 $(eval $(call define_from_arch.h,$1,LOADER_ADDRESS))
 
 LOADER_CFLAGS$1  += -fPIC -ffreestanding $(LOADER_ARCH_CFLAGS$1)
-LOADER_LDFLAGS$1 += -static -nostdlib -Wl$(BUILD_ID_NONE),-Ttext=$(LOADER_ADDRESS$1)$(ROSEGMENT),-z,noexecstack
+LOADER_LDFLAGS$1 += -static -nostdlib -Wl$(BUILD_ID_NONE),-Ttext=$(LOADER_ADDRESS$1)$(ROSEGMENT),-z,noexecstack,--gc-sections
 
 loader/loader$1.o: loader/loader.c
 	@mkdir -p $$(dir $$@)

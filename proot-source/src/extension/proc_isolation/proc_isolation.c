@@ -44,33 +44,26 @@
 #define HPC_MAX_BUF 4096
 
 /* ================================================================
- * Filtered sysnums — ensures seccomp intercepts these syscalls.
- * Installed once at init; cannot be changed after seccomp attach.
- * Always includes all syscalls regardless of which flags are set.
+ * Flag-to-sysnum mapping — filtered_sysnums is built dynamically
+ * from this table based on which isolation flags are active.
  * ================================================================ */
 
-static FilteredSysnum hpc_filtered_sysnums[] = {
-    { PR_getdents64,        FILTER_SYSEXIT },
-    { PR_getdents,          FILTER_SYSEXIT },
-    { PR_ptrace,            0 },
-    { PR_kill,              0 },
-    { PR_tkill,             0 },
-    { PR_tgkill,            0 },
-    { PR_reboot,            0 },
-    { PR_swapon,            0 },
-    { PR_swapoff,           0 },
-    { PR_kexec_load,        0 },
-    { PR_iopl,              0 },
-    { PR_ioperm,            0 },
-    { PR_bpf,               0 },
-    { PR_perf_event_open,   0 },
-    { PR_open_by_handle_at, 0 },
-    { PR_openat,            0 },
-    { PR_process_vm_readv,  0 },
-    { PR_process_vm_writev, 0 },
-    { PR_unshare,           0 },
-    { PR_mount,             0 },
-    FILTERED_SYSNUM_END,
+typedef struct {
+    unsigned int flag;       /* ISOLATE_* flag bit */
+    int sysnums[12];         /* Syscall numbers, -1 terminated */
+} FlagSysnumMap;
+
+static const FlagSysnumMap flag_sysnum_map[] = {
+    { ISOLATE_PROC,   { PR_getdents64, PR_getdents, PR_kill, PR_tkill, PR_tgkill,
+                        PR_openat, PR_unshare, PR_mount, -1 } },
+    { ISOLATE_PTRACE, { PR_ptrace, PR_process_vm_readv, PR_process_vm_writev, -1 } },
+    { ISOLATE_REBOOT, { PR_reboot, -1 } },
+    { ISOLATE_SWAP,   { PR_swapon, PR_swapoff, -1 } },
+    { ISOLATE_KEXEC,  { PR_kexec_load, -1 } },
+    { ISOLATE_IOPORT, { PR_iopl, PR_ioperm, -1 } },
+    { ISOLATE_BPF,    { PR_bpf, -1 } },
+    { ISOLATE_PERF,   { PR_perf_event_open, -1 } },
+    { ISOLATE_HANDLE, { PR_open_by_handle_at, -1 } },
 };
 
 /* ================================================================
@@ -260,7 +253,47 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
         config->flags = init_flags;
         config->proc_fd_count = 0;
         extension->config = config;
-        extension->filtered_sysnums = hpc_filtered_sysnums;
+
+        /* Build filtered_sysnums dynamically based on active flags.
+         * Only syscalls for active isolation flags are included,
+         * reducing seccomp traps when few flags are enabled. */
+        int count = 0;
+        unsigned int i;
+        for (i = 0; i < sizeof(flag_sysnum_map) / sizeof(flag_sysnum_map[0]); i++) {
+            if (init_flags & flag_sysnum_map[i].flag) {
+                int j;
+                for (j = 0; flag_sysnum_map[i].sysnums[j] != -1; j++)
+                    count++;
+            }
+        }
+
+        FilteredSysnum *dynamic_sysnums = talloc_array(extension, FilteredSysnum, count + 1);
+        if (dynamic_sysnums == NULL)
+            return -ENOMEM;
+
+        int idx = 0;
+        for (i = 0; i < sizeof(flag_sysnum_map) / sizeof(flag_sysnum_map[0]); i++) {
+            if (init_flags & flag_sysnum_map[i].flag) {
+                int j;
+                for (j = 0; flag_sysnum_map[i].sysnums[j] != -1; j++) {
+                    int sysnum = flag_sysnum_map[i].sysnums[j];
+                    word_t flags = 0;
+                    /* PR_getdents64 and PR_getdents need FILTER_SYSEXIT
+                     * (filter at exit for /proc/ PID filtering) */
+                    if (flag_sysnum_map[i].flag == ISOLATE_PROC &&
+                        (sysnum == PR_getdents64 || sysnum == PR_getdents))
+                        flags = FILTER_SYSEXIT;
+                    dynamic_sysnums[idx].value = (Sysnum)sysnum;
+                    dynamic_sysnums[idx].flags = flags;
+                    idx++;
+                }
+            }
+        }
+        /* Terminate the array */
+        dynamic_sysnums[idx].value = PR_void;
+        dynamic_sysnums[idx].flags = 0;
+
+        extension->filtered_sysnums = dynamic_sysnums;
         return 0;
     }
 
