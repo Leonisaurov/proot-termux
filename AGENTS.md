@@ -18,6 +18,15 @@ The source lives directly in `proot-source/` — no patches, no downloads.
 ./scripts/run-docker.sh ./build-package.sh -I -a aarch64 --format pacman proot
 ```
 
+### ⚠️ CI Disabled — Local Build Only
+
+**CI/CD está deshabilitado temporalmente.** Todo el desarrollo usa compilación nativa en Termux.
+
+```bash
+./scripts/build-native.sh        # Compila + empaqueta
+./scripts/build-native.sh -i     # Compila + instala + empaqueta
+```
+
 ## Proot Package
 
 ## Critical Rules
@@ -264,7 +273,9 @@ process 'server' killed by signal 9 (started 120s)
 3. `make` compiles with all features built-in (no patches)
 4. Package step creates `.pkg.tar.xz`
 
-## GitHub Actions Workflow
+## GitHub Actions Workflow (Deshabilitado)
+
+⚠️ **Actualmente deshabilitado.** El workflow no se ejecuta en push. Para usarlo, quitar `if: false` del job.
 
 ### `build-proot.yml`
 - **Trigger**: Push to `packages/proot/**` or `proot-source/**`
@@ -289,6 +300,8 @@ gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Succ
 - `gita notify` bloquea hasta que el workflow termina (o retorna inmediatamente si ya terminó)
 - NO usar `timeout`
 
+> ⚠️ **Workflows deshabilitados.** `gita notify` no aplica hasta que se re-activen.
+
 ### Repositorios
 
 Hay dos remotes configurados:
@@ -309,8 +322,8 @@ git push origin master
 1. Edit files in `proot-source/src/`
 2. Bump `TERMUX_PKG_REVISION` in `packages/proot/build.sh` ← **IMPORTANTE: no olvidar**
 3. Commit with descriptive message
-4. Push to `origin` — workflow triggers automatically
-5. Siempre verificar con `gita notify build-proot.yml`
+4. Build local → `./scripts/build-native.sh -i`
+5. Opcional: crear package → `./scripts/build-native.sh`
 
 ### Commit Guidelines
 
@@ -336,6 +349,52 @@ Types: `fix`, `enhance`, `chore`, `ci`
 - **`/data` mount**: Not used in CI. `-m` flag in `run-docker.sh` mounts `/data` from host which causes permission issues on GHA runners. Cache is mounted via `TERMUX_DOCKER_RUN_EXTRA_ARGS`.
 - **First CI run**: ~5 min (seeds cache). Subsequent runs: ~20-30s with cache hit.
 - **Registry cleanup**: Stale entries in `registry.lock` are not cleaned up (they don't affect functionality). To manually clean: delete `/data/data/com.termux/files/usr/tmp/proot-net/`.
+
+## Local Build (método actual)
+
+### build-native.sh
+
+El script `scripts/build-native.sh` automatiza la compilación nativa de proot en Termux.
+
+```bash
+# Uso básico — compila + empaqueta
+./scripts/build-native.sh
+
+# Compilar e instalar al sistema
+./scripts/build-native.sh -i
+
+# Clean build (make clean previo) + instalar
+./scripts/build-native.sh -c -i
+
+# Solo empaquetar desde binarios existentes
+./scripts/build-native.sh --skip-build
+
+# Configurar paralelismo (default: 2, seguro contra OOM)
+./scripts/build-native.sh -j4
+```
+
+### Requisitos
+
+Los paquetes Termux necesarios ya están instalados:
+- `clang` (compilador, vía symlink `gcc`)
+- `make`, `binutils`
+- `libtalloc`, `libandroid-shmem` (librerías)
+- `bsdtar`, `xz-utils` (para empaquetado)
+
+### Output
+
+| Tipo | Ruta |
+|------|------|
+| Binario | `$PREFIX/bin/proot` |
+| Loaders | `$PREFIX/libexec/proot/{loader,loader32}` |
+| Script | `$PREFIX/bin/termux-chroot` |
+| Paquete | `proot-<version>-<revision>-aarch64.pkg.tar.xz` (en raíz del repo) |
+
+### Notas
+
+- **No requiere Docker.** Compila directamente con clang de Termux.
+- **OOM-safe.** Por defecto usa `-j2`. En dispositivos con <4GB RAM, puedes forzar `-j1`.
+- **No produce Release en GitHub.** Es solo para uso local/desarrollo.
 
 ## Agent Configuration
 
