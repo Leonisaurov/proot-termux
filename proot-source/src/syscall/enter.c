@@ -1240,6 +1240,7 @@ static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
 	size_t off = 0;
 
 	tracee->fake_netlink_reply_len = 0;
+	tracee->fake_netlink_reply_off = 0;
 
 	if (buf_addr == 0 || buf_len < sizeof(hdr))
 		return;
@@ -1321,15 +1322,76 @@ static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
 }
 
 /**
- * Copy the pending fake netlink reply into the tracee's recvmsg iovec
- * array (@iov_ptr, @iov_count), walking segments until the reply is
+ * Length of the next datagram to hand to the tracee out of the @len
+ * bytes of reply left at @reply.
+ *
+ * A dump doesn't reach a netlink socket as one blob: the kernel fills a
+ * socket buffer, sends it, and closes the sequence with an NLMSG_DONE
+ * of its own.  Callers count on that framing -- fastfetch's
+ * default-route lookup stops walking a datagram as soon as it has the
+ * route it was after, then reads again to reach the NLMSG_DONE that
+ * ends the loop.  Concatenating everything into a single datagram
+ * leaves such a caller blocked on a substitute socket that will never
+ * receive anything, so keep the terminator in a datagram of its own.
+ */
+static size_t fake_netlink_datagram_len(const uint8_t *reply, size_t len)
+{
+	size_t off = 0;
+
+	while (off + NLMSG_HDRLEN <= len) {
+		const struct nlmsghdr *nlh = (const struct nlmsghdr *) (reply + off);
+		size_t mlen = nlh->nlmsg_len;
+
+		if (mlen < NLMSG_HDRLEN || off + mlen > len)
+			break;
+		if (nlh->nlmsg_type == NLMSG_DONE)
+			break;
+		off += NLMSG_ALIGN(mlen);
+	}
+
+	/* No terminator in sight (a plain ack, or a truncated dump): the
+	 * whole remainder is one datagram.  Reaching it at @off == 0 means
+	 * the terminator is what's left, and it goes out on its own.  */
+	return (off == 0 || off > len) ? len : off;
+}
+
+/**
+ * Point @reply at the datagram @tracee is about to deliver and return its
+ * length, or 0 when that socket has nothing pending.
+ */
+static size_t pending_fake_netlink_datagram(const Tracee *tracee,
+					    const uint8_t **reply)
+{
+	if (tracee->fake_netlink_reply_len == 0)
+		return 0;
+
+	*reply = tracee->fake_netlink_reply + tracee->fake_netlink_reply_off;
+
+	return fake_netlink_datagram_len(*reply, tracee->fake_netlink_reply_len - tracee->fake_netlink_reply_off);
+}
+
+/* Drop the datagram just delivered; a datagram socket discards whatever
+ * didn't fit in the caller's buffer, so @datagram is consumed whole.  */
+static void consume_fake_netlink_datagram(Tracee *tracee, size_t datagram)
+{
+	tracee->fake_netlink_reply_off += datagram;
+	if (tracee->fake_netlink_reply_off >= tracee->fake_netlink_reply_len) {
+		tracee->fake_netlink_reply_len = 0;
+		tracee->fake_netlink_reply_off = 0;
+	}
+}
+
+/**
+ * Copy the @reply_len bytes at @reply into the tracee's recvmsg iovec
+ * array (@iov_ptr, @iov_count), walking segments until the datagram is
  * exhausted.  Returns the number of bytes actually scattered (which may
- * be less than the reply when the caller's buffers are too small).
+ * be less than the datagram when the caller's buffers are too small).
  */
 static size_t scatter_fake_netlink_reply(Tracee *tracee, word_t iov_ptr,
-					 word_t iov_count)
+					 word_t iov_count,
+					 const uint8_t *reply,
+					 size_t reply_len)
 {
-	size_t reply_len = tracee->fake_netlink_reply_len;
 	size_t w = sizeof_word(tracee);
 	size_t done = 0;
 	word_t i;
@@ -1344,8 +1406,7 @@ static size_t scatter_fake_netlink_reply(Tracee *tracee, word_t iov_ptr,
 		if (chunk > len)
 			chunk = len;
 		if (base != 0 && chunk > 0) {
-			if (write_data(tracee, base,
-				       tracee->fake_netlink_reply + done, chunk) < 0)
+			if (write_data(tracee, base, reply + done, chunk) < 0)
 				break;
 		}
 		done += chunk;
@@ -1789,24 +1850,33 @@ int translate_syscall_enter(Tracee *tracee)
 			int    flags     = (int) peek_reg(tracee, CURRENT, SYSARG_4);
 			word_t addr_ptr  = peek_reg(tracee, CURRENT, SYSARG_5);
 			word_t size_ptr  = peek_reg(tracee, CURRENT, SYSARG_6);
-			size_t reply_len = tracee->fake_netlink_reply_len;
+			const uint8_t *reply = NULL;
+			size_t datagram  = pending_fake_netlink_datagram(tracee, &reply);
 			size_t copied    = 0;
 			size_t result;
 
-			if (reply_len > 0 && buf != 0) {
-				copied = len < reply_len ? len : reply_len;
+			/* An empty receive queue is reported by the substitute
+			 * socket itself, never as a zero-length netlink
+			 * message.  */
+			if (datagram == 0) {
+				status = 0;
+				break;
+			}
+
+			if (buf != 0) {
+				copied = len < datagram ? len : datagram;
 				if (copied > 0 &&
-				    write_data(tracee, buf,
-					       tracee->fake_netlink_reply, copied) < 0)
+				    write_data(tracee, buf, reply, copied) < 0)
 					copied = 0;
 			}
 
-			/* MSG_PEEK leaves the reply pending for the real read
-			 * that follows; MSG_TRUNC asks for the untruncated
-			 * length (the libnetlink size-probe pattern).  */
+			/* MSG_PEEK leaves the datagram pending for the real
+			 * read that follows; MSG_TRUNC asks for the
+			 * untruncated length (the libnetlink size-probe
+			 * pattern).  */
 			if (!(flags & MSG_PEEK))
-				tracee->fake_netlink_reply_len = 0;
-			result = (flags & MSG_TRUNC) ? reply_len : copied;
+				consume_fake_netlink_datagram(tracee, datagram);
+			result = (flags & MSG_TRUNC) ? datagram : copied;
 
 			/* Hand back a kernel sockaddr_nl (nl_pid == 0) source
 			 * rather than the AF_UNIX address of our substitute.  */
@@ -1832,9 +1902,18 @@ int translate_syscall_enter(Tracee *tracee)
 			size_t w = sizeof_word(tracee);
 			word_t msg_name = 0;
 			word_t iov_ptr = 0, iov_count = 0;
-			size_t reply_len = tracee->fake_netlink_reply_len;
+			const uint8_t *reply = NULL;
+			size_t datagram  = pending_fake_netlink_datagram(tracee, &reply);
 			size_t scattered = 0;
 			size_t result;
+
+			/* An empty receive queue is reported by the substitute
+			 * socket itself, never as a zero-length netlink
+			 * message.  */
+			if (datagram == 0) {
+				status = 0;
+				break;
+			}
 
 			if (msghdr_addr != 0) {
 				msg_name  = peek_word(tracee, msghdr_addr);
@@ -1847,14 +1926,16 @@ int translate_syscall_enter(Tracee *tracee)
 
 			if (iov_ptr != 0 && iov_count > 0)
 				scattered = scatter_fake_netlink_reply(tracee, iov_ptr,
-								       iov_count);
+								       iov_count,
+								       reply, datagram);
 
-			/* MSG_PEEK leaves the reply pending for the real read
-			 * that follows; MSG_TRUNC asks for the untruncated
-			 * length (iproute2's libnetlink size-probe pattern).  */
+			/* MSG_PEEK leaves the datagram pending for the real
+			 * read that follows; MSG_TRUNC asks for the
+			 * untruncated length (iproute2's libnetlink size-probe
+			 * pattern).  */
 			if (!(flags & MSG_PEEK))
-				tracee->fake_netlink_reply_len = 0;
-			result = (flags & MSG_TRUNC) ? reply_len : scattered;
+				consume_fake_netlink_datagram(tracee, datagram);
+			result = (flags & MSG_TRUNC) ? datagram : scattered;
 
 			/* glibc's getifaddrs() and friends inspect the
 			 * source address: hand them a sockaddr_nl from the
@@ -1879,10 +1960,11 @@ int translate_syscall_enter(Tracee *tracee)
 
 			/* msg_flags (offset 6 words in struct msghdr, both
 			 * ABIs): report MSG_TRUNC iff the caller's buffers
-			 * couldn't hold the whole reply, like the kernel.  */
+			 * couldn't hold the whole datagram, like the
+			 * kernel.  */
 			if (msghdr_addr != 0) {
 				poke_uint32(tracee, msghdr_addr + 6 * w,
-					    scattered < reply_len ? MSG_TRUNC : 0);
+					    scattered < datagram ? MSG_TRUNC : 0);
 				errno = 0;
 			}
 
