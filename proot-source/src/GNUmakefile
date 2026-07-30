@@ -264,6 +264,14 @@ endef
 
 $(eval $(build_loader))
 
+# On aarch64, pokedata_workaround (defined in assembly.S) has no internal
+# callers and would be discarded by --gc-sections, but it is needed at
+# runtime by the pokedata workaround in mem.c.  Mark it as an undefined
+# (root) symbol so the linker preserves it.
+ifdef IS_AARCH64
+  LOADER_LDFLAGS += -Wl,--undefined=pokedata_workaround
+endif
+
 ifdef HAS_LOADER_32BIT
 $(eval $(call build_loader,-m32))
 endif
