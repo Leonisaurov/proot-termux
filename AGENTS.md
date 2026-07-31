@@ -18,13 +18,15 @@ The source lives directly in `proot-source/` — no patches, no downloads.
 ./scripts/run-docker.sh ./build-package.sh -I -a aarch64 --format pacman proot
 ```
 
-### ⚠️ CI Disabled — Local Build Only
+### ✅ CI Activo — build-proot.yml
 
-**CI/CD está deshabilitado temporalmente.** Todo el desarrollo usa compilación nativa en Termux.
+El workflow `build-proot.yml` está ACTIVO y se ejecuta automáticamente en pushes que toquen `packages/proot/**` o `proot-source/**`. Usar `gita notify build-proot.yml` para monitorear. La compilación local (`build-native.sh`) sigue disponible para desarrollo rápido.
+
+El workflow `docker_image.yml` (imagen del builder) SÍ sigue deshabilitado con `if: false`.
 
 ```bash
-./scripts/build-native.sh        # Compila + empaqueta
-./scripts/build-native.sh -i     # Compila + instala + empaqueta
+./scripts/build-native.sh        # Compila + empaqueta (desarrollo local)
+./scripts/build-native.sh -i     # Compila + instala + empaqueta (desarrollo local)
 ```
 
 ## Proot Package
@@ -273,15 +275,15 @@ process 'server' killed by signal 9 (started 120s)
 3. `make` compiles with all features built-in (no patches)
 4. Package step creates `.pkg.tar.xz`
 
-## GitHub Actions Workflow (Deshabilitado)
+## GitHub Actions Workflow
 
-⚠️ **Actualmente deshabilitado.** El workflow no se ejecuta en push. Para usarlo, quitar `if: false` del job.
+El workflow `build-proot.yml` está ACTIVO y se ejecuta en cada push que toque `packages/proot/**` o `proot-source/**`.
 
 ### `build-proot.yml`
-- **Trigger**: Push to `packages/proot/**` or `proot-source/**`
+- **Trigger**: Push a `packages/proot/**` o `proot-source/**`
 - **Steps**: Clone → zram → restore cache → prepare → build → collect → release → save cache → artifact
 - **Caching**: `~/.termux-build` mounted into Docker via `TERMUX_DOCKER_RUN_EXTRA_ARGS`
-- **Cache key**: hash of `packages/proot/build.sh`, `packages/libtalloc/build.sh`, `packages/libandroid-shmem/build.sh`
+- **Cache key**: hash de `packages/proot/build.sh`, `packages/libtalloc/build.sh`, `packages/libandroid-shmem/build.sh`
 - **Downloads**: `gh release download proot-latest -R Leonisaurov/proot-termux -p "*.pkg.tar.xz"`
 
 ### `docker_image.yml`
@@ -299,8 +301,6 @@ gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Succ
 - Exit code 0 = éxito, 1 = falló, 2 = cancelado
 - `gita notify` bloquea hasta que el workflow termina (o retorna inmediatamente si ya terminó)
 - NO usar `timeout`
-
-> ⚠️ **Workflows deshabilitados.** `gita notify` no aplica hasta que se re-activen.
 
 ### Repositorios
 
@@ -396,6 +396,22 @@ Los paquetes Termux necesarios ya están instalados:
 - **OOM-safe.** Por defecto usa `-j2`. En dispositivos con <4GB RAM, puedes forzar `-j1`.
 - **No produce Release en GitHub.** Es solo para uso local/desarrollo.
 
+## Pentest / Hardening Testing
+
+El repo incluye un kit de pentest y un reporte de vulneraciones:
+
+- **`pentest/`** — 5 programas C (p_fs, p_sys, p_proc, p_net, p_kernel) que prueban escapes del sandbox. Compilados con gcc dentro del rootfs alpine.
+- **`vulneration-report.md`** — reporte completo de hallazgos y emulaciones implementadas.
+- **Wrappers de prueba** (NO commitear): `alpine_rootfs` (escenario default) y `alpine_rootfs_hardened` (con isolation flags). Ambos usan el rootfs de proot-distro (`$PREFIX/var/lib/proot-distro/containers/alpine/rootfs`) y bindean `pentest/` → `/pentest`.
+
+Uso:
+```bash
+./alpine_rootfs /pentest/p_sys           # escenario default
+./alpine_rootfs_hardened /pentest/p_sys  # escenario hardened
+```
+
+Nota: el wrapper usa `env -i` que BORRA PROOT_VERBOSE — para debug verbose hay que inyectarla dentro del env del wrapper.
+
 ## Agent Configuration
 
 The orchestrator agent lives at `~/.config/opencode/agent/orquestador.md`.
@@ -418,36 +434,45 @@ The orchestrator agent lives at `~/.config/opencode/agent/orquestador.md`.
 | `--ptrace-isolated` | ptrace, process_vm_readv/writev, kill to host PIDs | ESRCH |
 | `--reboot-isolated` | reboot syscall | Re-exec's proot with same args (actual restart) |
 | `--swap-isolated` | swapon, swapoff | ENOSYS |
-| `--kexec-isolated` | kexec_load | ENOSYS |
+| `--kexec-isolated` | kexec_load | 0 (void, éxito emulado) |
 | `--ioport-isolated` | iopl, ioperm (ARM64 no-op) | 0 (success) |
 | `--bpf-isolated` | bpf syscall | ENOSYS |
 | `--perf-isolated` | perf_event_open | ENOENT |
 | `--handle-isolated` | open_by_handle_at | EOPNOTSUPP |
 | `--proc-isolation` | (legacy) Combines --proc-isolated + --ptrace-isolated |
 
-### Escape Attempt Results (all blocked)
+### Philosophy: Emulate, Never Deny
 
-| Attack vector | Result |
-|--------------|--------|
-| ptrace to host PID (1) | ESRCH |
-| process_vm_readv to host PID | ESRCH |
-| socket(AF_NETLINK) | EACCES |
-| unshare(CLONE_NEWNS) | ENOSYS |
-| mount() | ENOSYS |
-| chroot() | ENOENT |
-| bpf() | ENOSYS |
-| perf_event_open() | ENOENT |
-| open_by_handle_at() | EOPNOTSUPP |
-| kexec_load() | ENOSYS |
-| io_uring_setup() | ENOSYS |
-| userfaultfd() | EPERM |
-| setns(host namespace) | ENOENT |
-| /proc/cpuinfo, meminfo, mountinfo, environ | ENOENT |
-| /proc/1/ (host processes) | Filtered out |
+NUNCA responder "Operation not permitted" (EPERM) o "Function not implemented" (ENOSYS)
+cuando se puede EMULAR un resultado natural. Un proceso con `--change-id=0:0` cree que es
+root — nunca debe ver un guardián negándole nada, solo errores naturales (ESRCH = "no
+existe") o éxito emulado (0) sin efecto real.
+
+| Vector | Resultado (hardened) | Mecanismo |
+|--------|----------------------|-----------|
+| ptrace a PID host | ESRCH | --ptrace-isolated |
+| process_vm_readv/writev a PID host | ESRCH | --ptrace-isolated |
+| pidfd_open a PID host | ESRCH | --ptrace-isolated (añadido en 97884c26) |
+| kill a PID host | ESRCH | --ptrace-isolated |
+| unshare(CLONE_NEWNS) | 0 (emulado, sin namespace real) | --proc-isolated void+0 |
+| mount(tmpfs) | 0 (emulado, sin mount real) | --proc-isolated (built-in emula bindings) |
+| socket(AF_NETLINK) | AF_UNIX fake (SO_DOMAIN=AF_UNIX) | --proc-isolated sustituye dominio |
+| /proc/self/maps | guest-pure (loader eliminado + paths host→guest) | --proc-isolated (a85c0d0) |
+| /proc/cpuinfo, meminfo, mountinfo, environ | ENOENT | --proc-isolated |
+| /proc listado | solo pids propios | --proc-isolated (getdents filtrado) |
+| bpf() | ENOSYS | --bpf-isolated |
+| perf_event_open() | ENOENT | --perf-isolated |
+| open_by_handle_at() | EOPNOTSUPP | --handle-isolated |
+| kexec_load() | 0 (void) | --kexec-isolated |
+| io_uring_setup() | ENOSYS | bloqueado por defecto |
+| userfaultfd() | EPERM | kernel Android |
+| chroot() | ENOENT | traducción de paths |
+| /dev/mem, /dev/kmem, /dev/port | ENOENT | no existen en rootfs |
+| mknod() | nodo creado pero open→ENOENT | kernel/SELinux (sin fix necesario) |
 
 ### ARM64 Limitations
 
-- **Chained syscall mechanism** (socket → connect → dup3 → close, needed for --allow-internet) does not work on ARM64. The kernel does not re-read argument registers (x0-x5) when the PC is rewound via ptrace. Only x8 (syscall number) can be changed via NT_ARM_SYSTEM_CALL.
+- **Chained syscall mechanism** (socket → connect → dup3 → close) does not work on ARM64. The kernel does not re-read argument registers (x0-x5) when the PC is rewound via ptrace. Only x8 (syscall number) can be changed via NT_ARM_SYSTEM_CALL. (This was the reason `--allow-internet` was removed in f516c4b87f.)
 - **reboot()** on Android is blocked by kernel seccomp filter before proot can intercept it. Works on standard Linux.
 - **process_vm_writev** to other proot processes is currently allowed (not a host escape, but intra-sandbox).
 
