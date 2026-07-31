@@ -57,3 +57,6 @@ proot-source/src/.check_*
 proot-source/src/loader/loader
 proot-source/src/loader/loader-m32
 proot-source/src/loader/loader-info.c
+
+# Escape tests
+proot-escape-test*

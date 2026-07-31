@@ -266,6 +266,7 @@ typedef struct tracee {
 	 * calls on it can have AT_EXECFN patched (fallback for kernels < 6.4
 	 * that don't support prctl(PR_GET_AUXV)). -1 when not active. */
 	int auxv_fd;
+	int maps_fd;
 
 #ifdef HAS_POKEDATA_WORKAROUND
 	word_t pokedata_workaround_stub_addr;

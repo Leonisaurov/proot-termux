@@ -414,6 +414,7 @@ void translate_execve_exit(Tracee *tracee)
 	int status;
 
 	tracee->auxv_fd = -1;
+	tracee->maps_fd = -1;
 
 	if (tracee->skip_proot_loader) {
 		tracee->restore_original_regs = false;

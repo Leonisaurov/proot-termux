@@ -2531,6 +2531,8 @@ int translate_syscall_enter(Tracee *tracee)
 		/* Stop tracking auxv_fd once the tracee closes it. */
 		if (tracee->auxv_fd >= 0 && closed_fd == tracee->auxv_fd)
 			tracee->auxv_fd = -1;
+		if (tracee->maps_fd >= 0 && closed_fd == tracee->maps_fd)
+			tracee->maps_fd = -1;
 
 		/* Drop the fd from the fake-AF_NETLINK tracking set,
 		 * otherwise its number could be reused for an unrelated

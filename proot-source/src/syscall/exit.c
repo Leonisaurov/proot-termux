@@ -21,6 +21,7 @@
  */
 
 #include <errno.h>       /* errno(3), E* */
+#include <stdio.h>       /* snprintf(3), */
 #include <sys/utsname.h> /* struct utsname, */
 #include <linux/net.h>   /* SYS_*, */
 #include <linux/ioctl.h> /* _IOW, */
@@ -46,6 +47,7 @@
 #include "ptrace/ptrace.h"
 #include "ptrace/wait.h"
 #include "extension/extension.h"
+#include "extension/proc_isolation/proc_isolation.h"
 #include "arch.h"
 
 /**
@@ -496,22 +498,57 @@ void translate_syscall_exit(Tracee *tracee)
 	case PR_openat2:
 	case PR_openat:
 	case PR_open: {
-		/* Track /proc/self/auxv opens so read() results can be patched.
-		 * Needed on kernels < 6.4 where prctl(PR_GET_AUXV) is absent and
-		 * rustix falls back to reading /proc/self/auxv directly. */
-		char path_buf[sizeof("/proc/self/auxv")];
+		/* Track opens of the guest's proc maps file so read() results
+		 * can be filtered/patched.  The maps tracking must run
+		 * unconditionally, BEFORE the execfn early return below:
+		 * execfn_addr is only set after a successful execve, but the
+		 * initial shell may open its maps file before that, which
+		 * left maps_fd unregistered (and the filter silent).
+		 *
+		 * NOTE: the path is read from the ORIGINAL register, so it
+		 * may be the untranslated "/proc/self/maps" OR the translated
+		 * "/proc/<pid>/maps" depending on when the extension ran;
+		 * accept both.  The buffer must be big enough for "/proc/" +
+		 * pid + "/maps" (up to 19 bytes). */
+		char path_buf[64];
 		Reg path_reg = (syscall_number == PR_open) ? SYSARG_1 : SYSARG_2;
 
 		if ((int) syscall_result < 0)
-			goto end;
-		if (tracee->execfn_addr == 0)
 			goto end;
 		if (read_string(tracee, path_buf,
 		                peek_reg(tracee, ORIGINAL, path_reg),
 		                sizeof(path_buf)) <= 0)
 			goto end;
-		if (strcmp(path_buf, "/proc/self/auxv") != 0)
+		/* Track opens of the guest's proc maps file so read() results
+		 * can be filtered/patched.  Accept both the original path
+		 * ("/proc/self/maps") and the translated one
+		 * ("/proc/<pid>/maps"). */
+		{
+			char expected_pid[32];
+			int elen = snprintf(expected_pid, sizeof(expected_pid),
+			                    "/proc/%d/maps", tracee->pid);
+			if (strcmp(path_buf, "/proc/self/maps") == 0
+			    || (elen > 0 && (size_t) elen < sizeof(expected_pid)
+			        && strcmp(path_buf, expected_pid) == 0))
+				tracee->maps_fd = (int) syscall_result;
+		}
+		if (tracee->execfn_addr == 0)
 			goto end;
+		/* Track opens of the guest's auxv file so read() results can
+		 * be patched.  Accept both the original path
+		 * ("/proc/self/auxv") and the translated one
+		 * ("/proc/<pid>/auxv").  Needed on kernels < 6.4 where
+		 * prctl(PR_GET_AUXV) is absent and rustix falls back to
+		 * reading /proc/self/auxv directly. */
+		{
+			char expected_pid[32];
+			int elen = snprintf(expected_pid, sizeof(expected_pid),
+			                    "/proc/%d/auxv", tracee->pid);
+			if (strcmp(path_buf, "/proc/self/auxv") != 0
+			    && !(elen > 0 && (size_t) elen < sizeof(expected_pid)
+			         && strcmp(path_buf, expected_pid) == 0))
+				goto end;
+		}
 
 		tracee->auxv_fd = (int) syscall_result;
 		tracee->sysexit_pending = true;
@@ -523,18 +560,23 @@ void translate_syscall_exit(Tracee *tracee)
 		/* Patch AT_EXECFN in data read from /proc/self/auxv. */
 		word_t fd, buf_addr, result, offset, entry_size, type;
 
+		fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
+		result = syscall_result;
+		buf_addr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+
+		/* NOTE: /proc/self/maps filtering moved to the proc_isolation
+		 * extension (hpc_handle_maps_read_exit, SYSCALL_EXIT_END), so
+		 * the guest sees a fully guest-pure maps file. */
+
 		if (tracee->auxv_fd < 0 || tracee->execfn_addr == 0)
 			goto end;
 
-		result = syscall_result;
 		if ((word_t) result == 0 || (ssize_t) result < 0)
 			goto end;
 
-		fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
 		if ((int) fd != tracee->auxv_fd)
 			goto end;
 
-		buf_addr   = peek_reg(tracee, ORIGINAL, SYSARG_2);
 		entry_size = 2 * sizeof_word(tracee);
 
 		for (offset = 0; offset + entry_size <= result; offset += entry_size) {

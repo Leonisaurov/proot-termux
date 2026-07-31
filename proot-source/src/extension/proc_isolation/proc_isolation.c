@@ -28,6 +28,8 @@
 #include <talloc.h>
 #include <linux/limits.h>
 #include <stdint.h>
+#include <sys/socket.h>
+#include <linux/netlink.h>
 
 #include "extension/proc_isolation/proc_isolation.h"
 #include "extension/extension.h"
@@ -55,8 +57,9 @@ typedef struct {
 
 static const FlagSysnumMap flag_sysnum_map[] = {
     { ISOLATE_PROC,   { PR_getdents64, PR_getdents, PR_kill, PR_tkill, PR_tgkill,
-                        PR_openat, PR_unshare, PR_mount, -1 } },
-    { ISOLATE_PTRACE, { PR_ptrace, PR_process_vm_readv, PR_process_vm_writev, -1 } },
+                        PR_open, PR_openat, PR_openat2, PR_read, -1 } },
+    { ISOLATE_PTRACE, { PR_ptrace, PR_process_vm_readv, PR_process_vm_writev,
+                         PR_pidfd_open, -1 } },
     { ISOLATE_REBOOT, { PR_reboot, -1 } },
     { ISOLATE_SWAP,   { PR_swapon, PR_swapoff, -1 } },
     { ISOLATE_KEXEC,  { PR_kexec_load, -1 } },
@@ -237,6 +240,93 @@ static int hpc_handle_getdents_exit(Tracee *tracee, Sysnum num)
     return 0;
 }
 
+/**
+ * Guest-pure /proc/self/maps: remove lines that reference the proot
+ * loader.  The tracee sees a maps indistinguishable from a native
+ * process of the guest rootfs.
+ */
+static int hpc_handle_maps_read_exit(Tracee *tracee)
+{
+    int fd = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
+    char proc_path[PATH_MAX];
+    int status;
+
+    if (tracee->maps_fd < 0 || fd != tracee->maps_fd)
+        return 0;
+
+    /* Confirm the fd really points at a maps file (robust against
+     * fd reuse after close/execve). */
+    status = readlink_proc_pid_fd(tracee->pid, fd, proc_path);
+    if (status < 0 || strstr(proc_path, "/maps") == NULL)
+        return 0;
+
+    {
+        word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+        word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
+        char *data;
+        size_t result_len;
+        size_t nleft = 0;
+        char *p;
+        char *end;
+
+        if ((int)result <= 0 || buf == 0)
+            return 0;
+        result_len = (size_t) result;
+
+        /* Dynamic buffer (talloc): no fixed 64KB cap, so reads larger
+         * than that can no longer bypass the loader-line filter. */
+        data = talloc_size(tracee->ctx, result_len);
+        if (data == NULL)
+            return 0;
+
+        if (read_data(tracee, data, buf, result_len) < 0) {
+            talloc_free(data);
+            return 0;
+        }
+
+        const char *marker = "/libexec/proot/loader";
+        size_t marker_len = strlen(marker);
+        p = data;
+        end = data + result_len;
+
+        while (p < end) {
+            char *nl = memchr(p, '\n', end - p);
+            char *line_end = (nl != NULL) ? nl : end;
+            size_t line_len = (size_t)(line_end - p);
+            bool keep = true;
+
+            if (line_len >= marker_len) {
+                for (size_t i = 0; i + marker_len <= line_len; i++) {
+                    if (memcmp(p + i, marker, marker_len) == 0) {
+                        keep = false;
+                        break;
+                    }
+                }
+            }
+
+            if (keep) {
+                size_t copy_len = line_len + (nl != NULL ? 1 : 0);
+                if (p != data + nleft)
+                    memmove(data + nleft, p, copy_len);
+                nleft += copy_len;
+            }
+
+            p = (nl != NULL) ? nl + 1 : end;
+        }
+
+        if (nleft < result_len) {
+            if (nleft > 0)
+                write_data(tracee, buf, data, nleft);
+            poke_reg(tracee, SYSARG_RESULT, (word_t)nleft);
+            VERBOSE(tracee, 3, "proc_isolation: filtered maps %zu -> %zu bytes",
+                    result_len, nleft);
+        }
+
+        talloc_free(data);
+    }
+    return 0;
+}
+
 /* ================================================================
  * Callback
  * ================================================================ */
@@ -278,10 +368,14 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
                 for (j = 0; flag_sysnum_map[i].sysnums[j] != -1; j++) {
                     int sysnum = flag_sysnum_map[i].sysnums[j];
                     word_t flags = 0;
-                    /* PR_getdents64 and PR_getdents need FILTER_SYSEXIT
-                     * (filter at exit for /proc/ PID filtering) */
+                    /* PR_getdents64, PR_getdents, PR_read and the open
+                     * family need FILTER_SYSEXIT (filter at exit for /proc/
+                     * PID and maps filtering) */
                     if (flag_sysnum_map[i].flag == ISOLATE_PROC &&
-                        (sysnum == PR_getdents64 || sysnum == PR_getdents))
+                        (sysnum == PR_getdents64 || sysnum == PR_getdents ||
+                         sysnum == PR_read ||
+                         sysnum == PR_open || sysnum == PR_openat ||
+                         sysnum == PR_openat2))
                         flags = FILTER_SYSEXIT;
                     dynamic_sysnums[idx].value = (Sysnum)sysnum;
                     dynamic_sysnums[idx].flags = flags;
@@ -310,6 +404,18 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
         if ((config->flags & ISOLATE_PTRACE) && num == PR_ptrace)
             return hpc_handle_ptrace_enter(tracee);
 
+        if ((config->flags & ISOLATE_PTRACE) && num == PR_pidfd_open) {
+            pid_t target_pid = (pid_t)peek_reg(tracee, CURRENT, SYSARG_1);
+            if (target_pid > 0 && !hpc_is_proot_pid(target_pid)) {
+                /* Host process: emulate "no such process" instead of
+                 * revealing the host's existence. */
+                set_sysnum(tracee, PR_void);
+                poke_reg(tracee, SYSARG_RESULT, -ESRCH);
+                VERBOSE(tracee, 1, "proc_isolation: pidfd_open(%d) -> ESRCH (host pid)", target_pid);
+                return 1;
+            }
+        }
+
         if ((config->flags & ISOLATE_PROC) && num == PR_openat) {
             char path[64];
             word_t path_addr = peek_reg(tracee, CURRENT, SYSARG_2);
@@ -328,24 +434,28 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
         }
 
         if (config->flags & ISOLATE_PROC) {
-            if (num == PR_unshare) {
-                set_sysnum(tracee, PR_void);
-                poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
-                VERBOSE(tracee, 2, "proc_isolation: unshare blocked (ENOSYS)");
-                return 1;
-            }
-            if (num == PR_mount) {
-                set_sysnum(tracee, PR_void);
-                poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
-                VERBOSE(tracee, 2, "proc_isolation: mount blocked (ENOSYS)");
-                return 1;
-            }
             if (num == PR_socket) {
-                word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
+                int domain = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+                int type   = (int) peek_reg(tracee, CURRENT, SYSARG_2);
+
                 if (domain == AF_NETLINK) {
-                    set_sysnum(tracee, PR_void);
-                    poke_reg(tracee, SYSARG_RESULT, -EACCES);
-                    VERBOSE(tracee, 2, "proc_isolation: netlink socket blocked");
+                    /* Emulate AF_NETLINK with an AF_UNIX datagram socket
+                     * (kernel-compatible: responses are synthesised by the
+                     * fake_netlink machinery in enter.c/exit.c).  The tracee
+                     * believes it has a netlink socket; it never touches the
+                     * host's netlink. */
+                    int protocol = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+
+                    poke_reg(tracee, SYSARG_1, AF_UNIX);
+                    poke_reg(tracee, SYSARG_2, SOCK_DGRAM | (type & SOCK_CLOEXEC));
+                    poke_reg(tracee, SYSARG_3, 0);
+
+                    tracee->pending_fake_netlink_socket = true;
+                    tracee->sysexit_pending = true;
+                    tracee->restart_how = PTRACE_SYSCALL;
+
+                    VERBOSE(tracee, 1, "proc_isolation: AF_NETLINK(%d) -> AF_UNIX emulation",
+                            protocol);
                     return 1;
                 }
             }
@@ -480,34 +590,9 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
         }
     }
 
-    case SYSCALL_EXIT_START: {
-        Tracee *tracee = TRACEE(extension);
-        HpcConfig *config = (HpcConfig *)extension->config;
-        Sysnum num;
-
-        if (config == NULL)
-            return 0;
-
-        num = get_sysnum(tracee, ORIGINAL);
-
-        /* The built-in exit handler overwrites PR_unshare/PR_mount
-         * result to 0 (see exit.c).  Skip it entirely to preserve
-         * our -ENOSYS result from SYSCALL_ENTER_START.  */
-        if (config->flags & ISOLATE_PROC) {
-            if (num == PR_unshare || num == PR_mount) {
-                word_t modified_sysnum = peek_reg(tracee, MODIFIED, SYSARG_NUM);
-                word_t original_sysnum = peek_reg(tracee, ORIGINAL, SYSARG_NUM);
-                if (modified_sysnum == SYSCALL_AVOIDER && modified_sysnum != original_sysnum) {
-                    poke_reg(tracee, SYSARG_RESULT, -ENOSYS);
-                    VERBOSE(tracee, 3, "proc_isolation: skipping exit handler for %s",
-                        num == PR_unshare ? "unshare" : "mount");
-                    return 1;
-                }
-            }
-        }
-
+    case SYSCALL_EXIT_START:
+        /* No filtering needed on syscall entry side of exit. */
         return 0;
-    }
 
     case SYSCALL_EXIT_END: {
         Tracee *tracee = TRACEE(extension);
@@ -521,44 +606,16 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
             return hpc_handle_getdents_exit(tracee, PR_getdents64);
         case PR_getdents:
             return hpc_handle_getdents_exit(tracee, PR_getdents);
+        case PR_read:
+            return hpc_handle_maps_read_exit(tracee);
         default:
             return 0;
         }
     }
 
-    case SIGSYS_OCC: {
-        Tracee *tracee = TRACEE(extension);
-        HpcConfig *config = (HpcConfig *)extension->config;
-        Sysnum num;
-
-        if (config == NULL)
-            return 0;
-
-        num = get_sysnum(tracee, CURRENT);
-
-        if ((config->flags & ISOLATE_PROC) && num == PR_mount) {
-            set_result_after_seccomp(tracee, -ENOSYS);
-            VERBOSE(tracee, 2, "proc_isolation: mount blocked via SIGSYS (ENOSYS)");
-            return 2;
-        }
-
-        if ((config->flags & ISOLATE_PROC) && num == PR_unshare) {
-            set_result_after_seccomp(tracee, -ENOSYS);
-            VERBOSE(tracee, 2, "proc_isolation: unshare blocked via SIGSYS (ENOSYS)");
-            return 2;
-        }
-
-        if ((config->flags & ISOLATE_PROC) && num == PR_socket) {
-            word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
-            if (domain == AF_NETLINK) {
-                set_result_after_seccomp(tracee, -EACCES);
-                VERBOSE(tracee, 2, "proc_isolation: netlink socket blocked via SIGSYS (EACCES)");
-                return 2;
-            }
-        }
-
+    case SIGSYS_OCC:
+        /* No signal filtering needed. */
         return 0;
-    }
 
     case REMOVED:
         return 0;
