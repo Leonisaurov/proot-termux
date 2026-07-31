@@ -99,6 +99,15 @@ static int vnp_start_helper(VnpConfig *config, const char *proxy_name)
 		dup2(pipe_helper2main[1], STDOUT_FILENO);
 		close(pipe_main2helper[0]);
 		close(pipe_helper2main[1]);
+
+		/* Close inherited fds; helper doesn't need parent's tracee/ptrace fds */
+		{
+			int max_fd = (int)sysconf(_SC_OPEN_MAX);
+			if (max_fd < 0) max_fd = 1024;
+			for (int i = 3; i < max_fd; i++)
+				close(i);
+		}
+
 		char tokbuf[16];
 		snprintf(namebuf, sizeof(namebuf), "%s", proxy_name);
 		snprintf(tokbuf, sizeof(tokbuf), "%u", config->instance_token);
@@ -197,6 +206,24 @@ static uint32_t vnp_generate_token(void)
 }
 
 /**
+ * Ensure the base tmp dir and per-proxy subdirectory exist.
+ */
+static int vnp_ensure_directories(const char *proxy_name)
+{
+	/* Create base directory */
+	if (mkdir(VNP_TMP_DIR, 0755) < 0 && errno != EEXIST)
+		return -1;
+
+	/* Create per-proxy subdirectory */
+	char proxy_dir[VNP_SOCKBUF_LEN];
+	vnp_net_path(proxy_name, proxy_dir, sizeof(proxy_dir));
+	if (mkdir(proxy_dir, 0755) < 0 && errno != EEXIST)
+		return -1;
+
+	return 0;
+}
+
+/**
  * Open registry file with the given lock type.
  * Returns fd, or -1 on error.
  */
@@ -209,22 +236,11 @@ static int vnp_registry_open(const char *proxy_name, int lock_type)
 	snprintf(path, sizeof(path), "%s/%s/%s",
 		 VNP_TMP_DIR, proxy_name, VNP_REG_LOCK);
 
-	/* Ensure all parent directories exist (mkdir -p equivalent) */
-	snprintf(dir, sizeof(dir), "%s", VNP_TMP_DIR);
-	if (access(dir, F_OK) < 0) {
-		if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
-			note(NULL, WARNING, INTERNAL,
-				"virtual_net: failed to create registry base dir %s", dir);
-			return -1;
-		}
-	}
-	snprintf(dir, sizeof(dir), "%s/%s", VNP_TMP_DIR, proxy_name);
-	if (access(dir, F_OK) < 0) {
-		if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
-			note(NULL, WARNING, INTERNAL,
-				"virtual_net: failed to create registry dir %s", dir);
-			return -1;
-		}
+	/* Ensure all parent directories exist */
+	if (vnp_ensure_directories(proxy_name) < 0) {
+		note(NULL, WARNING, INTERNAL,
+			"virtual_net: failed to create registry dirs");
+		return -1;
 	}
 
 	fd = open(path, O_CREAT | O_RDWR, 0644);
@@ -487,6 +503,59 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 }
 
 /**
+ * Check if a virtual port is known locally or in the shared registry.
+ * Used by connect() to determine if a destination port is virtual.
+ *
+ * Returns true if the port is virtual, false otherwise.
+ * When returning true, 'abstract_name' is filled with the abstract Unix
+ * socket name to connect to. For local ports (our own bind), the name
+ * is reconstructed via vnp_fill_abstract_sa(). For cross-instance ports,
+ * the name is read from the shared registry.
+ */
+static bool vnp_lookup_virtual_port(VnpConfig *config, uint16_t port, char *abstract_name)
+{
+	int i;
+
+	/* Check if port belongs to a local socket (our own bind) */
+	for (i = 0; i < config->fd_count; i++) {
+		if (config->fd_map[i].virtual_port == port) {
+			struct sockaddr_un sa;
+			vnp_fill_abstract_sa(&sa, config->proxy_name, port, config->instance_token);
+			memcpy(abstract_name, sa.sun_path, sizeof(sa.sun_path));
+			return true;
+		}
+	}
+
+	/* Check if port is exposed via -p */
+	for (i = 0; i < config->expose_count; i++) {
+		if (config->expose_map[i].virtual_port == port) {
+			struct sockaddr_un sa;
+			vnp_fill_abstract_sa(&sa, config->proxy_name, port, config->instance_token);
+			memcpy(abstract_name, sa.sun_path, sizeof(sa.sun_path));
+			return true;
+		}
+	}
+
+	/* Check shared registry for cross-instance ports */
+	{
+		int reg_fd = vnp_registry_open(config->proxy_name, LOCK_SH);
+		if (reg_fd >= 0) {
+			struct VnpRegistryHeader hdr;
+			vnp_registry_read(reg_fd, &hdr);
+			struct VnpRegistryEntry *reg_entry = vnp_registry_find(&hdr, port);
+			if (reg_entry != NULL) {
+				memcpy(abstract_name, reg_entry->abstract_name, sizeof(reg_entry->abstract_name));
+				vnp_registry_close(reg_fd);
+				return true;
+			}
+			vnp_registry_close(reg_fd);
+		}
+	}
+
+	return false;
+}
+
+/**
  * Handle connect() — translate to abstract Unix socket for virtual ports.
  */
 static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
@@ -497,6 +566,7 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	VnpFdEntry *entry;
 	sa_family_t family;
 	uint16_t port;
+	char abstract_name[108];
 
 	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
 		return 0;
@@ -524,41 +594,9 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 		return 0;
 	}
 
-	/* Check if this port is virtual */
-	{
-		int is_virtual = 0;
-		int i;
-		for (i = 0; i < config->fd_count; i++) {
-			if (config->fd_map[i].virtual_port == port) {
-				is_virtual = 1;
-				break;
-			}
-		}
-
-		if (!is_virtual) {
-			for (i = 0; i < config->expose_count; i++) {
-				if (config->expose_map[i].virtual_port == port) {
-					is_virtual = 1;
-					break;
-				}
-			}
-		}
-
-		if (!is_virtual) {
-			/* Check registry for cross-instance ports (bound by other proots) */
-			int reg_fd = vnp_registry_open(config->proxy_name, LOCK_SH);
-			if (reg_fd >= 0) {
-				struct VnpRegistryHeader hdr;
-				vnp_registry_read(reg_fd, &hdr);
-				if (vnp_registry_find(&hdr, port) != NULL)
-					is_virtual = 1;
-				vnp_registry_close(reg_fd);
-			}
-		}
-
-		if (!is_virtual)
-			return 0;
-	}
+	/* Check if this port is virtual (local bind, expose, or cross-instance) */
+	if (!vnp_lookup_virtual_port(config, port, abstract_name))
+		return 0;
 
 	/* Track this fd */
 	entry = vnp_find_fd(config, sockfd, tracee->pid);
@@ -572,30 +610,19 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 		entry->orig_domain = family;
 	}
 
-	/* Look up registry to find the unique abstract socket for this port */
+	/* Overwrite sockaddr args with abstract Unix socket */
 	{
-		int reg_fd = vnp_registry_open(config->proxy_name, LOCK_SH);
-		if (reg_fd >= 0) {
-			struct VnpRegistryHeader hdr;
-			vnp_registry_read(reg_fd, &hdr);
-			struct VnpRegistryEntry *reg_entry = vnp_registry_find(&hdr, port);
-			if (reg_entry != NULL) {
-				/* Overwrite sockaddr args with abstract Unix socket */
-				struct sockaddr_un sa_unix;
-				memset(&sa_unix, 0, sizeof(sa_unix));
-				sa_unix.sun_family = AF_UNIX;
-				memcpy(sa_unix.sun_path, reg_entry->abstract_name,
-				       sizeof(reg_entry->abstract_name));
+		struct sockaddr_un sa_unix;
+		memset(&sa_unix, 0, sizeof(sa_unix));
+		sa_unix.sun_family = AF_UNIX;
+		memcpy(sa_unix.sun_path, abstract_name, sizeof(abstract_name));
 
-				word_t new_addr = alloc_mem(tracee, sizeof(sa_unix));
-				if (new_addr != 0) {
-					if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
-						return 0;
-					poke_reg(tracee, SYSARG_2, new_addr);
-					poke_reg(tracee, SYSARG_3, sizeof(sa_unix));
-				}
-			}
-			vnp_registry_close(reg_fd);
+		word_t new_addr = alloc_mem(tracee, sizeof(sa_unix));
+		if (new_addr != 0) {
+			if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
+				return 0;
+			poke_reg(tracee, SYSARG_2, new_addr);
+			poke_reg(tracee, SYSARG_3, sizeof(sa_unix));
 		}
 	}
 
@@ -672,45 +699,114 @@ static int vnp_handle_get_name(Tracee *tracee, VnpConfig *config)
 	word_t addrlen_ptr = peek_reg(tracee, CURRENT, SYSARG_3);
 	VnpFdEntry *entry = vnp_find_fd(config, (int)sockfd, tracee->pid);
 
-	if (entry == NULL || addr_ptr == 0)
+	if (entry == NULL)
 		return 0;
 
 	VERBOSE(tracee, 2, "vnet: %s fd %lu -> 127.0.0.1:%u",
 		get_sysnum(tracee, CURRENT) == PR_getsockname ? "getsockname" : "getpeername",
 		(unsigned long)sockfd, entry->virtual_port);
 
+	/* Build fake sockaddr matching the original domain */
+	struct sockaddr_in  fake_in;
+	struct sockaddr_in6 fake_in6;
+	const void *fake_addr;
+	socklen_t fake_len;
+
 	if (entry->orig_domain == AF_INET6) {
-		struct sockaddr_in6 fake6;
-		memset(&fake6, 0, sizeof(fake6));
-		fake6.sin6_family = AF_INET6;
-		fake6.sin6_port = htons(entry->virtual_port);
-		fake6.sin6_addr = in6addr_loopback;
-		if (vnp_write_to_tracee(tracee, addr_ptr, &fake6, sizeof(fake6)) == 0) {
-			if (addrlen_ptr != 0) {
-				uint32_t addrlen_val = (uint32_t)sizeof(struct sockaddr_in6);
-				vnp_write_to_tracee(tracee, addrlen_ptr, &addrlen_val, sizeof(addrlen_val));
-			}
-		}
+		memset(&fake_in6, 0, sizeof(fake_in6));
+		fake_in6.sin6_family = AF_INET6;
+		fake_in6.sin6_port = htons(entry->virtual_port);
+		fake_in6.sin6_addr = in6addr_loopback;
+		fake_addr = &fake_in6;
+		fake_len = sizeof(fake_in6);
+	} else {
+		memset(&fake_in, 0, sizeof(fake_in));
+		fake_in.sin_family = AF_INET;
+		fake_in.sin_port = htons(entry->virtual_port);
+		fake_in.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		fake_addr = &fake_in;
+		fake_len = sizeof(fake_in);
 	}
-	else {
-		struct sockaddr_in fake;
-		memset(&fake, 0, sizeof(fake));
-		fake.sin_family = AF_INET;
-		fake.sin_port = htons(entry->virtual_port);
-		fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-		if (vnp_write_to_tracee(tracee, addr_ptr, &fake, sizeof(fake)) == 0) {
-			if (addrlen_ptr != 0) {
-				uint32_t addrlen_val = (uint32_t)sizeof(struct sockaddr_in);
-				vnp_write_to_tracee(tracee, addrlen_ptr, &addrlen_val, sizeof(addrlen_val));
-			}
-		}
+
+	/* Read caller's buffer size (addrlen) */
+	uint32_t in_len = 0;
+	if (addrlen_ptr != 0) {
+		in_len = peek_uint32(tracee, addrlen_ptr);
+		if (errno != 0)
+			in_len = 0;
 	}
+
+	/* Limit copy to caller's buffer, but report the real length (kernel semantics) */
+	size_t copy = (in_len < (uint32_t)fake_len) ? in_len : (uint32_t)fake_len;
+	if (addr_ptr != 0 && copy > 0) {
+		if (vnp_write_to_tracee(tracee, addr_ptr, fake_addr, copy) < 0)
+			return -EFAULT;
+	}
+	if (addrlen_ptr != 0)
+		poke_uint32(tracee, addrlen_ptr, (uint32_t)fake_len);
 
 	/* Void the syscall: set result to 0 and change sysnum to PR_void.
 	 * The void handler in exit.c (lines 78-89) will restore result to 0
 	 * from MODIFIED registers when the EXIT ptrace event fires. */
 	poke_reg(tracee, SYSARG_RESULT, 0);
 	set_sysnum(tracee, PR_void);
+	return 0;
+}
+
+/**
+ * Handle accept/accept4 exit — write fake AF_INET/AF_INET6 loopback
+ * address into the tracee's buffer so the caller thinks it got a
+ * real TCP connection from localhost.
+ *
+ * Supports both AF_INET and AF_INET6 based on the listening socket's
+ * original domain.
+ */
+static int vnp_handle_accept_exit(Tracee *tracee, VnpConfig *config,
+                                   VnpFdEntry *listen_entry, int newfd,
+                                   word_t addr_ptr, word_t addrlen_ptr)
+{
+	/* Track the new fd with same virtual port */
+	VnpFdEntry *entry = vnp_find_fd(config, newfd, tracee->pid);
+	if (entry == NULL) {
+		entry = vnp_add_fd(config, tracee->pid, newfd, listen_entry->virtual_port,
+				    listen_entry->orig_domain);
+		if (entry != NULL)
+			entry->exposed_port = listen_entry->exposed_port;
+	}
+
+	/* Fake the client address as AF_INET or AF_INET6 loopback,
+	 * matching the original domain of the listening socket.
+	 * We use raw PTRACE_POKEDATA instead of write_data or
+	 * process_vm_writev because on Android/aarch64:
+	 * - process_vm_writev may be blocked by SELinux
+	 * - write_data's ptrace workaround does PTRACE_CONT
+	 *   which is unsafe in the EXIT handler context */
+	if (addr_ptr != 0 && addrlen_ptr != 0) {
+		bool write_ok = true;
+		if (listen_entry->orig_domain == AF_INET6) {
+			struct sockaddr_in6 fake6;
+			memset(&fake6, 0, sizeof(fake6));
+			fake6.sin6_family = AF_INET6;
+			fake6.sin6_port = 0;
+			fake6.sin6_addr = in6addr_loopback;
+			if (vnp_write_to_tracee(tracee, addr_ptr, &fake6, sizeof(fake6)) < 0)
+				write_ok = false;
+		} else {
+			struct sockaddr_in fake;
+			memset(&fake, 0, sizeof(fake));
+			fake.sin_family = AF_INET;
+			fake.sin_port = 0;
+			fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+			if (vnp_write_to_tracee(tracee, addr_ptr, &fake, sizeof(fake)) < 0)
+				write_ok = false;
+		}
+		if (write_ok) {
+			uint32_t addrlen_val = (listen_entry->orig_domain == AF_INET6)
+				? (uint32_t)sizeof(struct sockaddr_in6)
+				: (uint32_t)sizeof(struct sockaddr_in);
+			vnp_write_to_tracee(tracee, addrlen_ptr, &addrlen_val, sizeof(addrlen_val));
+		}
+	}
 	return 0;
 }
 
@@ -804,62 +900,17 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 		}
 		case PR_accept:
 		case PR_accept4: {
-			word_t listen_fd;
-			word_t addr_ptr;
-			word_t addrlen_ptr;
+			word_t listen_fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
+			word_t addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
+			word_t addrlen_ptr = peek_reg(tracee, ORIGINAL, SYSARG_3);
 			int newfd = (int)result;
-
-			listen_fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
-			addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
-			addrlen_ptr = peek_reg(tracee, ORIGINAL, SYSARG_3);
 
 			VnpFdEntry *listen_entry = vnp_find_fd(config, (int)listen_fd, tracee->pid);
 			if (listen_entry == NULL || listen_entry->virtual_port == 0)
 				return 0;
 
-			/* Track the new fd with same virtual port */
-			VnpFdEntry *entry = vnp_find_fd(config, newfd, tracee->pid);
-			if (entry == NULL) {
-				entry = vnp_add_fd(config, tracee->pid, newfd, listen_entry->virtual_port,
-						    listen_entry->orig_domain);
-				if (entry != NULL)
-					entry->exposed_port = listen_entry->exposed_port;
-			}
-
-			/* Fake the client address as AF_INET or AF_INET6 loopback,
-			 * matching the original domain of the listening socket.
-			 * We use raw PTRACE_POKEDATA instead of write_data or
-			 * process_vm_writev because on Android/aarch64:
-			 * - process_vm_writev may be blocked by SELinux
-			 * - write_data's ptrace workaround does PTRACE_CONT
-			 *   which is unsafe in the EXIT handler context */
-		if (addr_ptr != 0 && addrlen_ptr != 0) {
-			bool write_ok = true;
-			if (listen_entry->orig_domain == AF_INET6) {
-				struct sockaddr_in6 fake6;
-				memset(&fake6, 0, sizeof(fake6));
-				fake6.sin6_family = AF_INET6;
-				fake6.sin6_port = 0;
-				fake6.sin6_addr = in6addr_loopback;
-				if (vnp_write_to_tracee(tracee, addr_ptr, &fake6, sizeof(fake6)) < 0)
-					write_ok = false;
-			} else {
-				struct sockaddr_in fake;
-				memset(&fake, 0, sizeof(fake));
-				fake.sin_family = AF_INET;
-				fake.sin_port = 0;
-				fake.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-				if (vnp_write_to_tracee(tracee, addr_ptr, &fake, sizeof(fake)) < 0)
-					write_ok = false;
-			}
-			if (write_ok) {
-				uint32_t addrlen_val = (listen_entry->orig_domain == AF_INET6)
-					? (uint32_t)sizeof(struct sockaddr_in6)
-					: (uint32_t)sizeof(struct sockaddr_in);
-				vnp_write_to_tracee(tracee, addrlen_ptr, &addrlen_val, sizeof(addrlen_val));
-			}
-		}
-			return 0;
+			return vnp_handle_accept_exit(tracee, config, listen_entry, newfd,
+						      addr_ptr, addrlen_ptr);
 		}
 		default:
 			return 0;
@@ -896,17 +947,10 @@ int vnp_configure(Tracee *tracee, const char *proxy_name)
 		}
 	}
 
-	{
-		char dirpath[VNP_SOCKBUF_LEN];
-		vnp_net_path(proxy_name, dirpath, sizeof(dirpath));
-		if (mkdir(VNP_TMP_DIR, 0755) < 0 && errno != EEXIST) {
-			note(NULL, WARNING, INTERNAL,
-			     "virtual_net: cannot create %s", VNP_TMP_DIR);
-		}
-		if (mkdir(dirpath, 0755) < 0 && errno != EEXIST) {
-			note(NULL, WARNING, INTERNAL,
-			     "virtual_net: cannot create %s", dirpath);
-		}
+	if (vnp_ensure_directories(proxy_name) < 0) {
+		note(tracee, WARNING, SYSTEM, "vnet: can't create %s/%s: %s",
+		     VNP_TMP_DIR, proxy_name, strerror(errno));
+		return -1;
 	}
 
 	status = initialize_extension(tracee, vnp_callback, proxy_name);

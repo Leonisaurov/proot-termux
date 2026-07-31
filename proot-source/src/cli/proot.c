@@ -496,7 +496,7 @@ static int handle_proc_isolation_flag(Tracee *tracee, unsigned int flag)
 
 	Extension *ext = get_extension(tracee, hpc_callback);
 	if (ext != NULL) {
-		HpcConfig *config = talloc_get_type_abort(ext->config, HpcConfig);
+		HpcConfig *config = talloc_get_type(ext->config, HpcConfig);
 		if (config != NULL) {
 			config->flags |= flag;
 			VERBOSE(tracee, 2, "proc_isolation: added flag 0x%x (now 0x%x)", flag, config->flags);
@@ -505,8 +505,10 @@ static int handle_proc_isolation_flag(Tracee *tracee, unsigned int flag)
 	}
 
 	status = initialize_extension(tracee, hpc_callback, (void *)(uintptr_t)flag);
-	if (status < 0)
+	if (status < 0) {
 		note(tracee, WARNING, INTERNAL, "proc_isolation not initialized");
+		return -1;
+	}
 
 	return 0;
 }

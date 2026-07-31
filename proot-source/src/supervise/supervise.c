@@ -46,12 +46,6 @@
 #include "path/binding.h"
 #include "extension/extension.h"
 
-/* NULL tracee for VERBOSE calls in this file.
- * We use a typed variable instead of NULL literal because the Android NDK
- * defines NULL as (void*)0, and the VERBOSE macro accesses tracee->verbose
- * which the compiler rejects on void* even with short-circuit evaluation. */
-static const Tracee *supervise_tracee;
-
 /* ===========================================================================
  * Internal state
  * =========================================================================== */
@@ -156,8 +150,7 @@ int supervise_init(int *ctl_fd, int *sig_fd, int verbose_level)
 
 	build_sockaddr(&sa, own_pid);
 
-	/* Remove stale socket (shouldn't exist, be safe) */
-	unlink(sa.sun_path);
+	/* Abstract sockets have no filesystem entry; no unlink needed. */
 
 	ret = bind(fd, (struct sockaddr *)&sa, sizeof(sa));
 	if (ret < 0) {
@@ -208,16 +201,6 @@ void supervise_fini(void)
 		}
 		num_exec_clients = 0;
 	}
-
-	int i;
-	/* Close all pending client sockets */
-	for (i = 0; i < num_exec_clients; i++) {
-		if (exec_clients[i].active) {
-			close(exec_clients[i].fd);
-			exec_clients[i].active = false;
-		}
-	}
-	num_exec_clients = 0;
 
 	if (ctl_fd_global >= 0) {
 		close(ctl_fd_global);
@@ -314,9 +297,22 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 		if (client_fds[1] >= 0) dup2(client_fds[1], STDOUT_FILENO);
 		if (client_fds[2] >= 0) dup2(client_fds[2], STDERR_FILENO);
 
+		/* Close original SCM_RIGHTS fds; dup2 copies are enough. */
+		for (int j = 0; j < EXEC_FD_MAX; j++) {
+			if (client_fds[j] >= 0
+			    && client_fds[j] != STDIN_FILENO
+			    && client_fds[j] != STDOUT_FILENO
+			    && client_fds[j] != STDERR_FILENO) {
+				close(client_fds[j]);
+			}
+		}
+
 		/* Change to requested cwd if provided */
-		if (req.cwd[0] != '\0')
-			chdir(req.cwd);
+		if (req.cwd[0] != '\0') {
+			if (chdir(req.cwd) < 0) {
+				VERBOSE(root_tracee, 1, "supervise: chdir(%s): %s", req.cwd, strerror(errno));
+			}
+		}
 
 		/* Exec the command */
 		execvp(argv_ptrs[0], argv_ptrs);
@@ -364,10 +360,16 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 			TALLOC_FREE(child_tracee->fs);
 			child_tracee->fs = talloc_zero(child_tracee, FileSystemNameSpace);
 			if (child_tracee->fs != NULL && root_tracee->fs != NULL) {
-				child_tracee->fs->cwd = talloc_strdup(child_tracee->fs,
-					root_tracee->fs->cwd ?: ".");
+			child_tracee->fs->cwd = talloc_strdup(child_tracee->fs,
+				root_tracee->fs->cwd ?: ".");
 
-				/* Deep-copy bindings (same as new_child
+			/* Override cwd if the exec request specified one */
+			if (req.cwd[0] != '\0') {
+				TALLOC_FREE(child_tracee->fs->cwd);
+				child_tracee->fs->cwd = talloc_strdup(child_tracee->fs, req.cwd);
+			}
+
+			/* Deep-copy bindings (same as new_child
 				 * with CLONE_NEWNS stripped) */
 				if (root_tracee->fs->bindings.guest != NULL) {
 					Binding *iter;
@@ -447,7 +449,11 @@ int supervise_tracee_exited(Tracee *root_tracee, pid_t pid, int status)
 			}
 
 			/* Send response to client */
-			write(exec_clients[i].fd, &resp, sizeof(resp));
+			ssize_t w = write(exec_clients[i].fd, &resp, sizeof(resp));
+			if (w != (ssize_t)sizeof(resp)) {
+				VERBOSE(root_tracee, 1, "supervise: failed to send response to client on fd=%d: %s",
+					exec_clients[i].fd, strerror(errno));
+			}
 			close(exec_clients[i].fd);
 			remove_client(i);
 
@@ -514,6 +520,8 @@ int exec_connect(pid_t target_pid, int argc, char *const argv[])
 	ssize_t n;
 	int i;
 	char *p;
+
+	signal(SIGPIPE, SIG_IGN);
 
 	/* Build the abstract socket address */
 	memset(&sa, 0, sizeof(sa));

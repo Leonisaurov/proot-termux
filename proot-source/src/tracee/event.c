@@ -363,6 +363,24 @@ int event_loop(Tracee *root_tracee)
 		}
 	}
 
+	/* Drain pre-existing tracee events lost before signalfd creation.
+	 * The initial fork() from launch_process() may have delivered
+	 * SIGCHLD before signalfd was set up; WNOHANG catches it. */
+	{
+		int _ws;
+		pid_t _pid;
+		while ((_pid = waitpid(-1, &_ws, WNOHANG | __WALL)) > 0) {
+			Tracee *tracee = get_tracee(NULL, _pid, false);
+			if (tracee == NULL)
+				continue;
+			tracee->running = false;
+			(void) handle_tracee_event(tracee, _ws);
+			if (tracee->terminated)
+				continue;
+			(void) restart_tracee(tracee, 0);
+		}
+	}
+
 	while (1) {
 		int tracee_status;
 		Tracee *tracee;
@@ -413,7 +431,8 @@ int event_loop(Tracee *root_tracee)
 				int wait_status;
 
 				/* Consume the signal */
-				read(sig_fd, &fdsi, sizeof(fdsi));
+				if (read(sig_fd, &fdsi, sizeof(fdsi)) != sizeof(fdsi))
+					continue;
 
 				/* Process all terminated tracees in non-blocking loop.
 				 * This mirrors the normal mode behaviour exactly, but

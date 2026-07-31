@@ -82,6 +82,27 @@ static void build_abstract_name(char *sun_path, size_t pathlen,
 }
 
 /* ================================================================
+ * Write all n bytes, retrying on short writes and EINTR
+ * ================================================================ */
+
+static ssize_t bridge_write_all(int fd, const void *buf, size_t n)
+{
+	const uint8_t *p = (const uint8_t *)buf;
+	size_t remaining = n;
+	while (remaining > 0) {
+		ssize_t ret = write(fd, p, remaining);
+		if (ret <= 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		p += ret;
+		remaining -= ret;
+	}
+	return (ssize_t)n;
+}
+
+/* ================================================================
  * Bridge: bidirectional data forwarding between two fds
  * ================================================================ */
 
@@ -112,7 +133,7 @@ static void bridge_fds(int client_fd, int unix_fd)
 			ssize_t n = read(client_fd, buf, sizeof(buf));
 			if (n <= 0)
 				break;
-			if (write(unix_fd, buf, n) != n)
+			if (bridge_write_all(unix_fd, buf, (size_t)n) < 0)
 				break;
 		}
 
@@ -123,7 +144,7 @@ static void bridge_fds(int client_fd, int unix_fd)
 			ssize_t n = read(unix_fd, buf, sizeof(buf));
 			if (n <= 0)
 				break;
-			if (write(client_fd, buf, n) != n)
+			if (bridge_write_all(client_fd, buf, (size_t)n) < 0)
 				break;
 		}
 	}
@@ -142,7 +163,7 @@ static int create_tcp_listener(uint16_t host_port)
 	struct sockaddr_in tcp_addr;
 	int optval = 1;
 
-	tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
+	tcp_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (tcp_fd < 0)
 		return -errno;
 
@@ -193,7 +214,7 @@ static void accept_and_fork(int listener_idx)
 		return;
 
 	/* Connect to the abstract Unix socket */
-	unix_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	unix_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (unix_fd < 0) {
 		close(client_fd);
 		return;
@@ -219,7 +240,14 @@ static void accept_and_fork(int listener_idx)
 	}
 
 	if (pid == 0) {
-		/* Child: bridge the two fds */
+		/* Child: close all inherited listener fds except our own */
+		{
+			int j;
+			for (j = 0; j < g_num_listeners; j++) {
+				if (g_listener_fds[j] != tcp_fd)
+					close(g_listener_fds[j]);
+			}
+		}
 		close(tcp_fd);
 		bridge_fds(client_fd, unix_fd);
 		_exit(0);
