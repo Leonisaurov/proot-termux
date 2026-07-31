@@ -306,6 +306,73 @@ static int hpc_handle_maps_read_exit(Tracee *tracee)
 
             if (keep) {
                 size_t copy_len = line_len + (nl != NULL ? 1 : 0);
+
+                /* Android kernels right-align the pathname column: the
+                 * inode is followed by ~24 spaces of padding before the
+                 * path.  Treat runs of spaces as a single field
+                 * separator so path_start lands on the pathname's '/'.
+                 * The pathname field (the part after the 5th space) is
+                 * then translated from a host path to a guest path so
+                 * the tracee never sees the host layout (rootfs prefix,
+                 * bindings).  detranslate_path() returns the new length
+                 * including the NUL terminator (>0), 0 when the path is
+                 * unchanged, or a negative error when the path is outside
+                 * the guest fs without a matching binding (keep the host
+                 * path then). */
+                char *path_start = NULL;
+                int fields = 0;
+                bool in_spaces = false;
+                for (size_t i = 0; i < line_len; i++) {
+                    if (p[i] == ' ') {
+                        if (!in_spaces) {
+                            in_spaces = true;
+                            fields++;
+                            if (fields == 5) {
+                                path_start = p + i + 1;
+                                while (path_start < line_end
+                                       && *path_start == ' ')
+                                    path_start++;
+                                break;
+                            }
+                        }
+                    }
+                    else
+                        in_spaces = false;
+                }
+
+                if (path_start != NULL && path_start < line_end
+                    && path_start[0] == '/') {
+                    size_t path_len = (size_t)(line_end - path_start);
+                    if (path_len > 0 && path_len < PATH_MAX) {
+                        char pbuf[PATH_MAX];
+                        memcpy(pbuf, path_start, path_len);
+                        pbuf[path_len] = '\0';
+                        int dstatus = detranslate_path(tracee, pbuf, NULL);
+                        if (dstatus > 0) {
+                            size_t new_len = (size_t)(dstatus - 1);
+                            /* The guest path is usually shorter than the
+                             * host one (the rootfs prefix is stripped),
+                             * so the line is compacted by shifting it
+                             * left.  If it were longer we'd keep the
+                             * host path to stay within the allocated
+                             * buffer. */
+                            if (new_len <= path_len) {
+                                /* The pathname is the last field of the
+                                 * line, so the only tail content is the
+                                 * trailing newline (if any). */
+                                size_t tail_len = (nl != NULL ? 1 : 0);
+                                memmove(path_start, pbuf, new_len);
+                                memmove(path_start + new_len,
+                                        path_start + path_len, tail_len);
+                                line_end = path_start + new_len + tail_len
+                                        - (nl != NULL ? 1 : 0);
+                                copy_len = (size_t)(line_end - p)
+                                        + (nl != NULL ? 1 : 0);
+                            }
+                        }
+                    }
+                }
+
                 if (p != data + nleft)
                     memmove(data + nleft, p, copy_len);
                 nleft += copy_len;
