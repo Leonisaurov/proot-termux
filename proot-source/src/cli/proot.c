@@ -22,7 +22,6 @@
 
 #include <string.h>    /* str*(3), */
 #include <assert.h>    /* assert(3), */
-#include <dirent.h>    /* opendir(3), readdir(3), closedir(3), */
 #include <errno.h>     /* errno, */
 #include <stdio.h>     /* printf(3), fflush(3), fopen(3), */
 #include <stdlib.h>    /* strtoull(3), */
@@ -30,7 +29,7 @@
 #include <limits.h>    /* ULLONG_MAX, PATH_MAX, */
 #include <sched.h>     /* sched_setaffinity(2), CPU_*, */
 #include <sys/resource.h> /* setpriority(2), prlimit64(2), RLIMIT_*, */
-#include <sys/types.h> /* uid_t, */
+#include <sys/types.h> /* pid_t, */
 
 #include "cli/cli.h"
 #include "cli/note.h"
@@ -612,7 +611,9 @@ struct ResourceConfig {
 	/* --fd-limit N: RLIMIT_NOFILE.  */
 	unsigned int fd_limit;	/* 0 = not set.  */
 
-	/* --proc-limit N: RLIMIT_NPROC (applies to the whole UID!).  */
+	/* --proc-limit N: max live tracees of this proot instance
+	 * (guest-side, applied by the resource_limit extension: fork/
+	 * clone/vfork answered with -EAGAIN past the limit).  */
 	unsigned int proc_limit;	/* 0 = not set.  */
 };
 
@@ -622,12 +623,13 @@ static struct ResourceConfig resource_config = {
 
 /**
  * Initialize the guest-side resource_limit extension (Phase 2: the guest
- * perceives only the limited CPU count via sched_getaffinity).
+ * perceives only the limited CPU count via sched_getaffinity and only the
+ * limited number of processes via fork/clone/vfork interception).
  *
  * The host-side limits were already applied by resource_config_apply() and
  * tracees inherit them through fork/exec, so a failure here is NOT fatal: it
- * only means the guest keeps seeing all host CPUs.  It must not be silent
- * either, hence the warning.
+ * only means the guest keeps seeing all host CPUs and unlimited processes.
+ * It must not be silent either, hence the warning.
  */
 static void init_guest_resource_limit(Tracee *tracee)
 {
@@ -637,7 +639,7 @@ static void init_guest_resource_limit(Tracee *tracee)
 	if (status < 0)
 		note(tracee, WARNING, SYSTEM,
 			"failed to initialize the resource_limit extension "
-			"(the guest will see all host CPUs)");
+			"(the guest will see all host CPUs and unlimited processes)");
 }
 
 static int handle_option_cpu_limit(Tracee *tracee, const Cli *cli UNUSED, const char *value)
@@ -788,56 +790,19 @@ static int handle_option_fd_limit(Tracee *tracee, const Cli *cli UNUSED, const c
 }
 
 /**
- * Count the processes currently running with @uid as their real UID,
- * by scanning /proc/<pid>/status.  Returns the count, or -1 if /proc
- * cannot be scanned (callers must then fall back to a minimal check).
+ * Handler for "--proc-limit N".
+ *
+ * Guest-side process cap: the value is stored in @resource_config and
+ * read by the resource_limit extension (resource_config_proc_limit()),
+ * which intercepts fork/clone/vfork at ENTER and answers -EAGAIN when
+ * the number of live tracees of this proot instance reaches N.  Only
+ * the sandbox's own processes+threads are counted, so the rest of the
+ * Termux UID is never affected (unlike the old host-side prlimit64
+ * RLIMIT_NPROC, which is gone).
  */
-static int count_processes_for_uid(uid_t uid)
-{
-	DIR *proc_dir;
-	struct dirent *entry;
-	int count = 0;
-
-	proc_dir = opendir("/proc");
-	if (proc_dir == NULL)
-		return -1;
-
-	while ((entry = readdir(proc_dir)) != NULL) {
-		char path[PATH_MAX];
-		FILE *status;
-		char line[256];
-		uid_t real_uid = (uid_t)-1;
-
-		/* Only numeric directory entries are PIDs.  */
-		if (entry->d_name[0] < '0' || entry->d_name[0] > '9')
-			continue;
-
-		snprintf(path, sizeof(path), "/proc/%s/status", entry->d_name);
-		status = fopen(path, "r");
-		if (status == NULL)
-			continue;
-
-		while (fgets(line, sizeof(line), status) != NULL) {
-			if (strncmp(line, "Uid:", 4) == 0) {
-				/* Format: "Uid:\treal\teffective\tsaved\tfs".  */
-				real_uid = (uid_t)strtoul(&line[4], NULL, 10);
-				break;
-			}
-		}
-		fclose(status);
-
-		if (real_uid == uid)
-			count++;
-	}
-
-	closedir(proc_dir);
-	return count;
-}
-
 static int handle_option_proc_limit(Tracee *tracee, const Cli *cli UNUSED, const char *value)
 {
 	int n;
-	int actual;
 
 	if (parse_integer_option(tracee, &n, value, "--proc-limit") < 0)
 		return -1;
@@ -847,22 +812,15 @@ static int handle_option_proc_limit(Tracee *tracee, const Cli *cli UNUSED, const
 		return -1;
 	}
 
-	/* RLIMIT_NPROC applies to the whole real UID: accepting a value
-	 * below the number of processes already running under our UID (plus
-	 * a headroom of 16) would make the very first fork() of proot fail
-	 * with EAGAIN and would block forks for the whole Termux UID.  If
-	 * /proc cannot be scanned, keep the minimal check above and accept
-	 * the value (don't block the option on a counting error).  */
-	actual = count_processes_for_uid(getuid());
-	if (actual >= 0 && n < actual + 16) {
-		note(tracee, ERROR, USER,
-			"--proc-limit %s too low: %d processes currently running for uid %d",
-			value, actual, getuid());
-		return -1;
-	}
-
 	resource_config.proc_limit = (unsigned int)n;
-	VERBOSE(tracee, 1, "--proc-limit: will cap processes at %d (WARNING: applies to the whole UID)", n);
+	VERBOSE(tracee, 1, "--proc-limit: will cap the sandbox at %d live process(es) "
+		"(guest-side, EAGAIN past the limit; the rest of the UID is not affected)", n);
+
+	/* Fase 2 (guest-side): make the guest pay the price: intercept
+	 * fork/clone/vfork and answer EAGAIN past the limit.  No-op when
+	 * no limit is set.  Also initializes the extension when only
+	 * --proc-limit is used (without --cpu-limit).  */
+	init_guest_resource_limit(tracee);
 	return 0;
 }
 
@@ -893,21 +851,6 @@ static int apply_fd_limit(const Tracee *tracee)
 	return 0;
 }
 
-static int apply_proc_limit(const Tracee *tracee)
-{
-	struct rlimit64 new_limit;
-
-	new_limit.rlim_cur = (rlim_t)resource_config.proc_limit;
-	new_limit.rlim_max = (rlim_t)resource_config.proc_limit;
-	if (prlimit64(0, RLIMIT_NPROC, &new_limit, NULL) < 0) {
-		note(tracee, ERROR, SYSTEM, "--proc-limit: prlimit64(RLIMIT_NPROC)");
-		return -1;
-	}
-
-	VERBOSE(tracee, 1, "applied RLIMIT_NPROC = %u (applies to the whole UID)", resource_config.proc_limit);
-	return 0;
-}
-
 /**
  * Apply the parsed HOST-side resource limits to the current (host) process.
  * Called from main() after parse_config() and before launch_process().
@@ -917,6 +860,11 @@ static int apply_proc_limit(const Tracee *tracee)
  * --mem-limit is deliberately NOT applied here: RLIMIT_AS on proot would
  * crash it (its VSZ is ~10 GiB on bionic).  It is applied per-tracee
  * after execve by the post-exec hook in execve/exit.c.
+ * --proc-limit is also NOT applied here anymore: instead of limiting
+ * the host process (RLIMIT_NPROC would affect the whole Termux UID),
+ * it is enforced guest-side by the resource_limit extension, which
+ * counts this proot's own tracees and answers -EAGAIN to fork/clone
+ * past the limit.
  * Returns 0 on success, -1 on fatal error.
  */
 int resource_config_apply(const Tracee *tracee)
@@ -948,14 +896,11 @@ int resource_config_apply(const Tracee *tracee)
 		VERBOSE(tracee, 1, "applied nice value %d", resource_config.nice_value);
 	}
 
-	/* 3. prlimits: fds and processes stay host-side.  --mem-limit is
-	 * NOT applied here (see the comment above); it is tracee-side.  */
+	/* 3. prlimits: only file descriptors stay host-side.  --mem-limit
+	 * and --proc-limit are NOT applied here (see the comments above):
+	 * mem is tracee-side (post-exec), proc is guest-side (extension).  */
 	if (resource_config.fd_limit > 0
 	    && apply_fd_limit(tracee) < 0)
-		return -1;
-
-	if (resource_config.proc_limit > 0
-	    && apply_proc_limit(tracee) < 0)
 		return -1;
 
 	return 0;
@@ -979,6 +924,17 @@ unsigned long long resource_config_mem_limit_bytes(void)
 int resource_config_cpu_limit(void)
 {
 	return resource_config.cpu_limit;
+}
+
+/**
+ * Return the --proc-limit value (0 when not set, else >= 1).  Used by
+ * the guest-side resource_limit extension (rlimit_callback) to cap the
+ * number of live tracees of this proot instance: fork/clone/vfork past
+ * the limit are answered with -EAGAIN.
+ */
+int resource_config_proc_limit(void)
+{
+	return resource_config.proc_limit;
 }
 
 /**

@@ -106,6 +106,10 @@ extern unsigned long long resource_config_mem_limit_bytes(void);
  * the resource_limit extension (rlimit_callback).  Defined in cli/proot.c.  */
 extern int resource_config_cpu_limit(void);
 
+/* Guest-side --proc-limit getter (0 when not set, else >= 1), consumed by
+ * the resource_limit extension (rlimit_callback).  Defined in cli/proot.c.  */
+extern int resource_config_proc_limit(void);
+
 static int pre_initialize_bindings(Tracee *, const Cli *, size_t, char *const *, size_t);
 static int post_initialize_exe(Tracee *, const Cli *, size_t, char *const *, size_t);
 
@@ -497,10 +501,19 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
 		{ .name = "--proc-limit", .separator = ' ', .value = "N" },
 		{ .name = NULL, .separator = '\0', .value = NULL } },
 	  .handler = handle_option_proc_limit,
-	  .description = "Cap the number of processes with RLIMIT_NPROC (host-side).",
-	  .detail = "\tWARNING: RLIMIT_NPROC applies to the whole UID, not just\n\
-\tproot: a low value can break the rest of Termux.  Use with care.\n\
-\tTracees inherit the limit through fork/exec.",
+	  .description = "Cap the sandbox at *N* live processes (guest-side).",
+	  .detail = "\tUnlike the other limits this one is NOT applied to the\n\
+\tproot process itself: instead the resource_limit extension\n\
+\tintercepts fork(2)/clone(2)/vfork(2) inside the guest and\n\
+\tcounts this proot instance's own live tracees (processes\n\
+\t+ threads, consistently with how the kernel's RLIMIT_NPROC\n\
+\tcounts tasks).  When the count reaches N, further forks are\n\
+\tanswered with EAGAIN (\"Resource temporarily unavailable\"),\n\
+\tthe same natural error the kernel returns for an exceeded\n\
+\tRLIMIT_NPROC.\n\
+\t\n\
+\tThe limit only applies to the sandbox: the rest of the Termux\n\
+\tUID is never affected.",
 	},
 	{ .class = "Resource limit options",
 	  .arguments = {

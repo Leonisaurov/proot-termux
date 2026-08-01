@@ -174,9 +174,9 @@ struct VnpRegistryEntry {
 - `proot-source/src/cli/cli.c` — `--vnp-helper` dispatch, `print_usage()` null-safety fix
 - `proot-source/src/extension/extension.h` — `vnp_callback` declaration
 - `proot-source/src/GNUmakefile` — `virtual_net.o` and `virtual_net_helper.o`
-- `proot-source/src/extension/resource_limit/` — Resource limits extension, guest-side (3 files: resource_limit.c/h/internal.h)
-- `proot-source/src/cli/proot.h` — `--cpu-limit`/`--single-core`/`--mem-limit`/`--nice`/`--fd-limit`/`--proc-limit`/`--resource-isolated` options, `resource_config_apply()` declaration
-- `proot-source/src/cli/proot.c` — `resource_config`, handlers, `resource_config_apply()`, `resource_config_mem_limit_bytes()`, `resource_config_cpu_limit()`
+- `proot-source/src/extension/resource_limit/` — Resource limits extension, guest-side: intercepción de `sched_getaffinity` (CPUs) y de `fork`/`clone`/`vfork` (proc-limit, `-EAGAIN`) (3 files: resource_limit.c/h/internal.h)
+- `proot-source/src/cli/proot.h` — `--cpu-limit`/`--single-core`/`--mem-limit`/`--nice`/`--fd-limit`/`--proc-limit`/`--resource-isolated` options, `resource_config_apply()` declaration, `resource_config_proc_limit()` getter
+- `proot-source/src/cli/proot.c` — `resource_config`, handlers, `resource_config_apply()` (solo affinity/nice/fd host-side), `init_guest_resource_limit()`, `resource_config_mem_limit_bytes()`, `resource_config_cpu_limit()`, `resource_config_proc_limit()`
 - `proot-source/src/cli/cli.c` — `resource_config_apply()` hook in main (config_status, no pisa argc_offset)
 - `proot-source/src/execve/exit.c` — `apply_mem_limit_to_tracee()` (post-exec, tracee-side)
 - `proot-source/src/extension/extension.h` — `rlimit_callback` declaration
@@ -288,7 +288,7 @@ Added in revision 9. Implementa límites de recursos con diseño **híbrido**: a
 | `--mem-limit N[KMG]` | RLIMIT_AS aplicado AL GUEST (tracee-side, post-exec) — el host NO se limita | guest |
 | `--nice N` | `setpriority(PRIO_PROCESS, 0, N)` (0..19, host) | host |
 | `--fd-limit N` | `prlimit64(RLIMIT_NOFILE)` (mínimo 32, host) | host |
-| `--proc-limit N` | `prlimit64(RLIMIT_NPROC)` con validación contra procesos actuales del uid + 16 (host) | host |
+| `--proc-limit N` | Intercepción guest-side de `fork`/`clone`/`vfork`: al superar N procesos/threads vivos de ESTE proot, responde `-EAGAIN` al guest (semántica RLIMIT_NPROC). El resto del uid de Termux NO se ve afectado | guest |
 | `--resource-isolated` | Combo: 1 core + nice 10 (sin mem/proc) | host + guest |
 
 ### Diseño híbrido (host-side vs tracee-side)
@@ -297,21 +297,36 @@ Los handlers de los flags (`handle_option_*` en `cli/proot.c`) solo guardan valo
 
 1. **`--cpu-limit`/`--single-core`**: `sched_setaffinity(0, ...)` a los primeros N cores.
 2. **`--nice`**: `setpriority(PRIO_PROCESS, 0, N)`.
-3. **`--fd-limit`**: `prlimit64(RLIMIT_NOFILE)`.
-4. **`--proc-limit`**: `prlimit64(RLIMIT_NPROC)`.
+3. **`--fd-limit`**: `prlimit64(RLIMIT_NOFILE)` (el único prlimit que queda host-side).
 
 Los tracees heredan estos límites automáticamente vía fork/exec — no hace falta propagarlos.
 
-**`--mem-limit` es el ÚNICO límite tracee-side**: `RLIMIT_AS` NO se aplica a proot porque su espacio de direcciones virtuales en bionic es enorme (~10 GiB) y un cap de `RLIMIT_AS` lo haría crashear (SIGSEGV/SIGABRT). En su lugar `apply_mem_limit_to_tracee()` (`execve/exit.c`) aplica `prlimit64(pid, RLIMIT_AS)` a CADA tracee justo después de su execve, cuando su VSZ es pequeño. El guest es el que recibe ENOMEM si intenta crecer más allá del límite.
+**`--mem-limit` y `--proc-limit` son los límites tracee-side/guest-side**:
 
-### Guest-side: intercepción de `sched_getaffinity`
+- **`--mem-limit`**: `RLIMIT_AS` NO se aplica a proot porque su espacio de direcciones virtuales en bionic es enorme (~10 GiB) y un cap de `RLIMIT_AS` lo haría crashear (SIGSEGV/SIGABRT). En su lugar `apply_mem_limit_to_tracee()` (`execve/exit.c`) aplica `prlimit64(pid, RLIMIT_AS)` a CADA tracee justo después de su execve, cuando su VSZ es pequeño. El guest es el que recibe ENOMEM si intenta crecer más allá del límite.
+- **`--proc-limit`**: el viejo `prlimit64(RLIMIT_NPROC)` host-side se eliminó porque era **por uid** — afectaba a TODAS las sesiones de Termux del mismo usuario. Ahora la extensión `resource_limit` intercepta `fork`/`clone`/`vfork` en ENTER, cuenta los **tracees vivos de ESTE proot** (`get_tracees_list_head()` + `LIST_FOREACH` + `!tracee->terminated`) y, si el conteo >= N, hace `set_sysnum(PR_void)` + `poke_reg(SYSARG_RESULT, -EAGAIN)`: el guest recibe el error natural del kernel "Resource temporarily unavailable" y el hijo nunca se crea. Solo se cuentan los procesos/threads del sandbox — el resto del uid no se ve afectado.
 
-La extensión `extension/resource_limit/` (callback `rlimit_callback`) hace que el guest perciba solo N cores:
+### Guest-side: intercepción de `sched_getaffinity` y `fork`/`clone`
+
+La extensión `extension/resource_limit/` (callback `rlimit_callback`) hace que el guest perciba solo N cores y solo N procesos/threads. Se inicializa con `--cpu-limit`/`--single-core`/`--resource-isolated` O con **solo `--proc-limit`** (`rlimit_configure()` no-op solo si ambos límites son 0).
+
+#### `sched_getaffinity` (límite de CPUs)
+
+La extensión hace que el guest perciba solo N cores:
 
 1. Se filtra `sched_getaffinity` vía `extension->filtered_sysnums` (`FILTER_SYSEXIT`) — solo cuando `cpu_limit > 0`, **cero overhead** sin `--cpu-limit`.
 2. El syscall real corre igual ("emulate, never deny"): el kernel resuelve pid 0 y devuelve el byte count.
 3. En `SYSCALL_EXIT_END` se reescribe la máscara: solo bits 0..N-1. El valor de retorno se deja intacto.
 4. El guest ve N cores: `nproc`, `taskset` y similares reportan el número limitado.
+
+#### `fork`/`clone`/`vfork` (límite de procesos)
+
+`--proc-limit N` limita los procesos/threads vivos de ESTE proot:
+
+1. Se filtran `PR_clone`/`PR_clone3`/`PR_fork`/`PR_vfork` vía `extension->filtered_sysnums` (flags 0, ENTER-only) — solo cuando `proc_limit > 0`, **cero overhead** sin `--proc-limit`.
+2. En `SYSCALL_ENTER_START` se cuenta los tracees vivos: `get_tracees_list_head()` + `LIST_FOREACH` + `!tracee->terminated`. El proceso actual ya cuenta (semántica RLIMIT_NPROC, que también cuenta threads).
+3. Si `count >= N`: `set_sysnum(tracee, PR_void)` + `poke_reg(tracee, SYSARG_RESULT, -EAGAIN)` — el guest recibe "Resource temporarily unavailable" y el hijo nunca se crea.
+4. En arm64 solo existen `PR_clone`/`PR_clone3` (`PR_fork`/`PR_vfork` se descartan vía `SYSCALL_AVOIDER`): toda creación de proceso/thread del guest pasa por `clone()`, que ya está en `proot_sysnums`.
 
 ### Decisiones clave
 
@@ -320,16 +335,17 @@ La extensión `extension/resource_limit/` (callback `rlimit_callback`) hace que 
   - `--cpu-limit N` con N > cores reales (`sysconf(_SC_NPROCESSORS_CONF)`) → error.
   - `--nice` solo 0..19 (subir prioridad requiere root).
   - `--fd-limit` mínimo 32 (proot necesita un número justo de fds).
-  - `--proc-limit` debe ser ≥ procesos actuales del uid + 16 (headroom), si no el primer `fork()` fallaría con EAGAIN.
+  - `--proc-limit` mínimo 1 (`n >= 1`): `--proc-limit 1` impide al guest crear cualquier hijo (el proceso actual ya cuenta) — semántica RLIMIT_NPROC correcta. Ya NO se valida contra los procesos actuales del uid (`count_processes_for_uid()` se eliminó con el viejo prlimit host-side).
 - **`--mem-limit` se aplica a CADA tracee post-exec**: cubre también los tracees nuevos de `--supervise`/`--exec`.
 - **`--resource-isolated`** deliberadamente NO fija mem/fd/proc.
 - **"Last option wins"**: si se combina `--resource-isolated` con un `--cpu-limit`/`--nice` explícito, gana el último; la extensión refresca su config en vez de crear una segunda (`rlimit_configure()` hace double-init guard).
-- **Fallo no fatal**: si la extensión guest-side no se inicializa, solo se avisa — el guest vería todos los cores del host, pero los límites host-side siguen aplicados.
+- **Fallo no fatal**: si la extensión guest-side no se inicializa, solo se avisa — el guest vería todos los cores del host y procesos ilimitados, pero los límites host-side (affinity, nice, fd) siguen aplicados.
 
 ### Interacción con `--supervise`/`--exec`
 
 - Los tracees nuevos que el supervisor `fork()`ea reciben `--mem-limit` (el hook post-exec está en `translate_execve_exit()`).
 - Los flags de resource limits del cliente `--exec` **NO se propagan**: el cliente solo conecta al supervisor y le envía el comando; **gana la configuración del supervisor**.
+- **Gap conocido (`--proc-limit`)**: la creación inicial de tracees por parte del supervisor (los procesos que spawn ea vía `--exec`) NO pasa por el gate guest-side de `fork`/`clone` — esos tracees no se cuentan ni se bloquean. Solo los `fork()`/`clone()` posteriores de esos tracees sí pasan por el conteo y el límite. Es una limitación aceptada: el supervisor crea tracees host-side, fuera del alcance del gate.
 
 ### ARM64 note
 

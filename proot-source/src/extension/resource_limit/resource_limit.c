@@ -1,20 +1,28 @@
 /* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
  *
- * resource_limit — guest-side perception of CPU resource limits.
+ * resource_limit — guest-side perception of CPU/process resource limits.
  *
- * Intercepts sched_getaffinity() so that a tracee only perceives the
- * first N CPUs, where N comes from the Fase 1 flags --cpu-limit N,
- * --single-core and --resource-isolated (stored in the static
- * resource_config in cli/proot.c and exposed through
+ * CPU side: intercepts sched_getaffinity() so that a tracee only
+ * perceives the first N CPUs, where N comes from the Fase 1 flags
+ * --cpu-limit N, --single-core and --resource-isolated (stored in the
+ * static resource_config in cli/proot.c and exposed through
  * resource_config_cpu_limit()).
  *
- * The real syscall is left to run ("emulate, never deny"): the kernel
- * resolves pid 0, applies the real (already restricted) affinity and
- * returns the byte count; only the mask content is rewritten at
- * SYSCALL_EXIT_END so the guest sees bits 0..N-1.  When cpu_limit is
- * not set the extension is never initialized, so there is zero seccomp
- * overhead (PR_sched_getaffinity is only filtered through
- * extension->filtered_sysnums).
+ * Process side: intercepts fork(2)/clone(2)/vfork(2) at ENTER so that
+ * --proc-limit N caps the number of live tracees of THIS proot
+ * instance (guest processes + threads).  When the limit is reached the
+ * syscall is voided and answered with -EAGAIN, the natural kernel error
+ * for an exceeded RLIMIT_NPROC.  Unlike the old host-side prlimit64
+ * RLIMIT_NPROC (removed), this never affects the rest of the Termux
+ * UID: only this sandbox's processes are counted.
+ *
+ * The real sched_getaffinity syscall is left to run ("emulate, never
+ * deny"): the kernel resolves pid 0, applies the real (already
+ * restricted) affinity and returns the byte count; only the mask
+ * content is rewritten at SYSCALL_EXIT_END so the guest sees bits
+ * 0..N-1.  When neither cpu_limit nor proc_limit is set the extension
+ * is never initialized, so there is zero seccomp overhead (the sysnums
+ * are only filtered through extension->filtered_sysnums).
  *
  * Copyright (C) 2026 Licensed under GPL v2 or later.
  */
@@ -45,13 +53,29 @@
  * to avoid pulling the whole generated CLI table.  */
 extern int resource_config_cpu_limit(void);
 
+/* proc_limit value stored by the --proc-limit handler in cli/proot.c.  */
+extern int resource_config_proc_limit(void);
+
 /* Syscalls filtered by this extension.  FILTER_SYSEXIT: the real
  * sched_getaffinity() must run first so the kernel resolves the pid
  * and returns the byte count; the mask is rewritten at
- * SYSCALL_EXIT_END.  Registered via extension->filtered_sysnums, i.e.
- * only when the extension is initialized (cpu_limit > 0).  */
+ * SYSCALL_EXIT_END.  flags == 0 (ENTER-only): fork/clone/vfork are
+ * intercepted before they execute, so the process-count check can
+ * answer -EAGAIN without the child ever being created.  Registered
+ * via extension->filtered_sysnums, i.e. only when the extension is
+ * initialized (cpu_limit or proc_limit > 0).
+ *
+ * PR_fork/PR_vfork only exist on some ABIs (x86_64, i386, ...); on
+ * arm64 they are discarded by detranslate_sysnum() (SYSCALL_AVOIDER)
+ * and every thread/process creation goes through PR_clone, which is
+ * already traced by proot_sysnums anyway.  PR_clone3 is included for
+ * the same reason (clone3(2) uses it on newer libcs).  */
 static FilteredSysnum syss[] = {
 	{ PR_sched_getaffinity, FILTER_SYSEXIT },
+	{ PR_clone, 0 },
+	{ PR_clone3, 0 },
+	{ PR_fork, 0 },
+	{ PR_vfork, 0 },
 	FILTERED_SYSNUM_END,
 };
 
@@ -127,6 +151,77 @@ static int rlimit_handle_sched_getaffinity(Tracee *tracee, const RlimitConfig *c
 	return 0;
 }
 
+/**
+ * Count the live tracees of this proot instance.
+ *
+ * Proot tracks every guest process AND thread as a Tracee (it sets
+ * PTRACE_O_TRACEFORK|TRACEVFORK|TRACECLONE), so counting the entries
+ * of the global tracees list that are not terminated yet gives the
+ * exact number of processes+threads currently running inside the
+ * guest.  This is consistent with the kernel's RLIMIT_NPROC, which
+ * also counts threads.
+ *
+ * The caller tracee is part of the list (it is alive), so the count
+ * includes the process that is about to fork/clone — matching the
+ * natural RLIMIT_NPROC semantics where the current task already
+ * counts towards the limit.
+ *
+ * @return the number of live tracees, or 0 if the list is empty.
+ */
+static int rlimit_count_live_tracees(void)
+{
+	Tracees *list = get_tracees_list_head();
+	Tracee *tracee;
+	int count = 0;
+
+	if (list == NULL)
+		return 0;
+
+	LIST_FOREACH(tracee, list, link) {
+		if (!tracee->terminated)
+			count++;
+	}
+
+	return count;
+}
+
+/**
+ * Enforce the --proc-limit N guest-side process cap at fork/clone/
+ * vfork enter time.
+ *
+ * When @config->proc_limit > 0 and the number of live tracees already
+ * reaches the limit, the syscall is voided and answered with -EAGAIN,
+ * the exact error the kernel returns when RLIMIT_NPROC is exceeded.
+ * The child is never created, so it can't spawn a runaway process
+ * tree inside the guest.
+ *
+ * The check happens at SYSCALL_ENTER_START (before the syscall runs):
+ * the new child does not exist yet, so the count reflects the current
+ * number of processes.  If count >= proc_limit the fork is refused.
+ *
+ * @return 1 when the syscall was voided (handled), 0 to pass through.
+ */
+static int rlimit_handle_fork_clone_enter(Tracee *tracee, const RlimitConfig *config)
+{
+	int count;
+
+	if (config == NULL || config->proc_limit <= 0)
+		return 0;
+
+	count = rlimit_count_live_tracees();
+	if (count < config->proc_limit)
+		return 0;
+
+	/* Limit reached: emulate "Resource temporarily unavailable",
+	 * the natural kernel error when RLIMIT_NPROC is exceeded.  */
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, -EAGAIN);
+	VERBOSE(tracee, 1,
+		"resource_limit: fork/clone refused (EAGAIN): %d live tracees, "
+		"proc-limit %d", count, config->proc_limit);
+	return 1;
+}
+
 int rlimit_callback(Extension *extension, ExtensionEvent event,
 		    intptr_t data1 UNUSED, intptr_t data2 UNUSED)
 {
@@ -139,17 +234,35 @@ int rlimit_callback(Extension *extension, ExtensionEvent event,
 		if (config == NULL)
 			return -ENOMEM;
 
-		/* The CLI handler stored cpu_limit in resource_config
-		 * *before* calling rlimit_configure(), so the getter
-		 * already reflects the requested value.  */
+		/* The CLI handler stored cpu_limit/proc_limit in
+		 * resource_config *before* calling rlimit_configure(), so
+		 * the getters already reflect the requested values.  */
 		config->cpu_limit = resource_config_cpu_limit();
+		config->proc_limit = resource_config_proc_limit();
 
 		extension->config = config;
 		extension->filtered_sysnums = syss;
 
 		VERBOSE(TRACEE(extension), 1,
-			"resource_limit: guest perceives %d CPU(s)", config->cpu_limit);
+			"resource_limit: guest perceives %d CPU(s), %d process(es)",
+			config->cpu_limit, config->proc_limit);
 		return 0;
+	}
+
+	case SYSCALL_ENTER_START: {
+		Tracee *tracee = TRACEE(extension);
+		RlimitConfig *config = talloc_get_type_abort(extension->config, RlimitConfig);
+		Sysnum num = get_sysnum(tracee, CURRENT);
+
+		switch (num) {
+		case PR_clone:
+		case PR_clone3:
+		case PR_fork:
+		case PR_vfork:
+			return rlimit_handle_fork_clone_enter(tracee, config);
+		default:
+			return 0;
+		}
 	}
 
 	case SYSCALL_EXIT_END: {
@@ -181,23 +294,26 @@ int rlimit_configure(Tracee *tracee)
 	RlimitConfig *config;
 	Extension *extension;
 
-	/* Nothing to do when no CPU limit was requested: the guest keeps
-	 * seeing the real machine, with zero overhead (no extension, no
-	 * seccomp entry for sched_getaffinity).  */
-	if (resource_config_cpu_limit() <= 0)
+	/* Nothing to do when no CPU and no process limit was requested:
+	 * the guest keeps seeing the real machine, with zero overhead (no
+	 * extension, no seccomp entry for sched_getaffinity/fork/clone).  */
+	if (resource_config_cpu_limit() <= 0
+	    && resource_config_proc_limit() <= 0)
 		return 0;
 
 	/* Double-init guard + "last option wins": if the extension is
-	 * already running (e.g. --resource-isolated followed by
-	 * --cpu-limit 4), refresh its config instead of creating a
+	 * already running (e.g. --cpu-limit 4 followed by
+	 * --proc-limit 8), refresh its config instead of creating a
 	 * second extension (same pattern as proc_isolation's
 	 * handle_proc_isolation_flag).  */
 	extension = get_extension(tracee, rlimit_callback);
 	if (extension != NULL) {
 		config = talloc_get_type_abort(extension->config, RlimitConfig);
 		config->cpu_limit = resource_config_cpu_limit();
-		VERBOSE(tracee, 2, "resource_limit: updated guest CPU perception to %d",
-			config->cpu_limit);
+		config->proc_limit = resource_config_proc_limit();
+		VERBOSE(tracee, 2,
+			"resource_limit: updated guest perception to %d CPU(s), "
+			"%d process(es)", config->cpu_limit, config->proc_limit);
 		return 0;
 	}
 
