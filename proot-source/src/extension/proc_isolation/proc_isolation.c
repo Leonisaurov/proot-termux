@@ -100,6 +100,92 @@ static bool hpc_is_proot_pid(pid_t pid)
 }
 
 /* ================================================================
+ * /proc/ direct-path helpers — close the information leak that the
+ * getdents listing filter cannot: opening "/proc/123/status" or
+ * "/proc/net/tcp" reads host data unconditionally, without ever
+ * listing the directory.
+ *
+ * KNOWN LIMITATION (pre-existing, shared with the 4-path filter):
+ * these checks run on the RAW path string before proot canonicalizes
+ * it, so non-canonical spellings ("/proc//net/tcp", relative lookups
+ * via openat() with a dirfd on /proc, or "/proc/<pid>/../net/tcp")
+ * can bypass them.  Closing that would require canonicalizing the
+ * path or tracking /proc fds — out of scope here.
+ * ================================================================ */
+
+/* Extract the numeric pid from a "/proc/<pid>[/...]" path.  Returns
+ * false when @path is not a direct pid path (e.g. "self",
+ * "thread-self", "net", a plain file such as "cpuinfo", or a path
+ * outside /proc).  When true, *pid_out holds the pid. */
+static bool hpc_proc_path_pid(const char *path, pid_t *pid_out)
+{
+    const char *p = path + 6;   /* after "/proc/" */
+    char *end;
+    long pid;
+
+    if (strncmp(path, "/proc/", 6) != 0)
+        return false;
+
+    errno = 0;
+    pid = strtol(p, &end, 10);
+    if (end == p || (*end != '\0' && *end != '/'))
+        return false;   /* non-numeric component */
+
+    /* An out-of-range pid is either rejected by strtol (ERANGE) or
+     * does not exist, in which case the kernel returns ENOENT on its
+     * own.  pid > INT32_MAX is only a cast safeguard for pid_t. */
+    if (errno == ERANGE || pid <= 0 || pid > INT32_MAX)
+        return false;
+
+    *pid_out = (pid_t)pid;
+    return true;
+}
+
+/* True when opening @path would leak a host resource that the
+ * getdents filter cannot hide: a file under /proc/net/ (host TCP/UDP
+ * connections, routes, arp cache, ...), a /proc/<pid>/... path of a
+ * process that is not a tracee of this proot instance, or the magic
+ * "net" directory of any process.  The kernel resolves the "net"
+ * component in the HOST's network namespace, so even
+ * /proc/self/net/ and /proc/<tracee-pid>/net/ leak host data.
+ * Returns false (allow) for /proc/self, /proc/thread-self and every
+ * other non-numeric entry, which resolve to the tracee's own files
+ * (their "net" children are caught above). */
+static bool hpc_is_host_proc_path(const char *path)
+{
+    pid_t pid;
+
+    /* /proc/net/ exposes the host's network stack.  Children only:
+     * /proc/net itself is left alone. */
+    if (strncmp(path, "/proc/net/", 9) == 0)
+        return true;
+
+    /* The "net" magic symlink of any process resolves to the host's
+     * network namespace, and /proc/sys/net/ holds the host's network
+     * sysctls.  Block their children unconditionally. */
+    if (strncmp(path, "/proc/self/net/", 15) == 0
+        || strncmp(path, "/proc/thread-self/net/", 22) == 0
+        || strncmp(path, "/proc/sys/net/", 14) == 0)
+        return true;
+
+    if (!hpc_proc_path_pid(path, &pid))
+        return false;
+
+    /* /proc/<pid>/net/ leaks the host netns for tracee pids too, so
+     * it is always blocked regardless of sandbox membership. */
+    {
+        const char *next = strchr(path + 6, '/');
+        if (next != NULL && next[1] == 'n' && next[2] == 'e'
+            && next[3] == 't' && (next[4] == '/' || next[4] == '\0'))
+            return true;
+    }
+
+    /* Tracee pids belong to the sandbox; every other numeric pid is a
+     * host process that must not be reachable by path. */
+    return !hpc_is_proot_pid(pid);
+}
+
+/* ================================================================
  * SYSCALL_ENTER_START — ptrace interception (before built-in handler)
  * ================================================================ */
 
@@ -483,15 +569,38 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
             }
         }
 
-        if ((config->flags & ISOLATE_PROC) && num == PR_openat) {
+        if ((config->flags & ISOLATE_PROC)
+            && (num == PR_open || num == PR_openat || num == PR_openat2)) {
             char path[64];
-            word_t path_addr = peek_reg(tracee, CURRENT, SYSARG_2);
-            if (path_addr != 0 && read_data(tracee, path, path_addr, sizeof(path)) >= 0) {
+            word_t path_addr = peek_reg(tracee, CURRENT,
+                    (num == PR_open) ? SYSARG_1 : SYSARG_2);
+            /* read_string reads up to the NUL in page-aligned chunks
+             * (never a fixed contiguous window), so a string whose
+             * NUL is mapped can no longer bypass the checks by having
+             * the buffer read cross an unmapped page.  The defensive
+             * terminator stays: read_string only NUL-terminates when
+             * it finds the NUL within max_size. */
+            if (path_addr != 0
+                && read_string(tracee, path, path_addr, sizeof(path) - 1) >= 0) {
                 path[sizeof(path) - 1] = '\0';
                 if (strcmp(path, "/proc/cpuinfo") == 0 ||
                     strcmp(path, "/proc/meminfo") == 0 ||
                     strcmp(path, "/proc/self/mountinfo") == 0 ||
                     strcmp(path, "/proc/self/environ") == 0) {
+                    VERBOSE(tracee, 2, "proc_isolation: blocked %s (ENOENT)", path);
+                    set_sysnum(tracee, PR_void);
+                    poke_reg(tracee, SYSARG_RESULT, -ENOENT);
+                    return 1;
+                }
+
+                /* Files under /proc/net/ (host network state) and
+                 * direct /proc/<pid>/... of host processes leak data
+                 * that the getdents listing filter cannot hide: the
+                 * path is read unconditionally, no directory listing
+                 * involved.  Both are blocked with ENOENT — a natural
+                 * "does not exist" error, never EPERM, per the
+                 * emulate-never-deny philosophy. */
+                if (hpc_is_host_proc_path(path)) {
                     VERBOSE(tracee, 2, "proc_isolation: blocked %s (ENOENT)", path);
                     set_sysnum(tracee, PR_void);
                     poke_reg(tracee, SYSARG_RESULT, -ENOENT);
