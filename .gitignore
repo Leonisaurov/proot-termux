@@ -60,3 +60,11 @@ proot-source/src/loader/loader-info.c
 
 # Escape tests
 proot-escape-test*
+
+# Helpers de sandbox/pentest (no se commitearn)
+/alpine_rootfs
+/alpine_rootfs_hardened
+/wrapper_v
+/termux-isolated
+/pentest/p_*
+/pentest/results/
