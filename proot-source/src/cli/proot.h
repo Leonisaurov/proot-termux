@@ -85,6 +85,27 @@ static int handle_option_bpf_isolated(Tracee *tracee, const Cli *cli, const char
 static int handle_option_perf_isolated(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_handle_isolated(Tracee *tracee, const Cli *cli, const char *value);
 
+/* Host-side resource limit options (Fase 1).  */
+static int handle_option_cpu_limit(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_single_core(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_mem_limit(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_nice(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_fd_limit(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_proc_limit(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_resource_isolated(Tracee *tracee, const Cli *cli, const char *value);
+
+/* Host-side resource limit hook, called from main() after parse_config()
+ * and before launch_process().  Defined in cli/proot.c.  */
+extern int resource_config_apply(const Tracee *tracee);
+
+/* Tracee-side --mem-limit getter (bytes, 0 when not set), consumed by the
+ * post-exec hook in execve/exit.c.  Defined in cli/proot.c.  */
+extern unsigned long long resource_config_mem_limit_bytes(void);
+
+/* Guest-side --cpu-limit getter (0 when not set, else >= 1), consumed by
+ * the resource_limit extension (rlimit_callback).  Defined in cli/proot.c.  */
+extern int resource_config_cpu_limit(void);
+
 static int pre_initialize_bindings(Tracee *, const Cli *, size_t, char *const *, size_t);
 static int post_initialize_exe(Tracee *, const Cli *, size_t, char *const *, size_t);
 
@@ -414,6 +435,83 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
           .description = "Block open_by_handle_at() syscall (returns EOPNOTSUPP).",
           .detail = "",
         },
+	{ .class = "Resource limit options",
+	  .arguments = {
+		{ .name = "--cpu-limit", .separator = ' ', .value = "N" },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_cpu_limit,
+	  .description = "Restrict the proot process to the first *N* CPUs (host-side).",
+	  .detail = "\tCalls sched_setaffinity() on the proot process itself, so the\n\
+\twhole sandbox only runs on the first N CPUs.  Tracees inherit the\n\
+\taffinity through fork/exec.  The guest also perceives exactly N\n\
+\tCPUs from boot: the resource_limit extension intercepts\n\
+\tsched_getaffinity(), so nproc and similar tools report the\n\
+\tlimited core count instead of the host's.",
+	},
+	{ .class = "Resource limit options",
+	  .arguments = {
+		{ .name = "--single-core", .separator = '\0', .value = NULL },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_single_core,
+	  .description = "Alias for --cpu-limit 1: restrict proot to a single CPU.",
+	  .detail = "",
+	},
+	{ .class = "Resource limit options",
+	  .arguments = {
+		{ .name = "--mem-limit", .separator = ' ', .value = "N[KMG]" },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_mem_limit,
+	  .description = "Cap each tracee's address space with RLIMIT_AS after execve (tracee-side).",
+	  .detail = "\t*N* is a size in bytes, optionally suffixed by K, M or G\n\
+\t(powers of 1024, e.g. --mem-limit 512M).  Unlike the other\n\
+\tresource limits, this one is NOT applied to the proot process\n\
+\titself: proot's virtual address space is huge on Android\n\
+\t(~10 GiB) and an RLIMIT_AS cap would crash it.  Instead it is\n\
+\tapplied to each tracee right after its execve, when the guest\n\
+\texecutable is loaded and the tracee's VSZ is small.  The guest\n\
+\tis the one that hits ENOMEM if it tries to grow past the limit.\n\
+\tValues below 16 MiB are rejected (a guest needs a floor of\n\
+\tvirtual address space to load its executable, libraries and\n\
+\tstack).",
+	},
+	{ .class = "Resource limit options",
+	  .arguments = {
+		{ .name = "--nice", .separator = ' ', .value = "N" },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_nice,
+	  .description = "Lower proot's scheduling priority with setpriority() (host-side).",
+	  .detail = "\t*N* must be in [0..19] (0 = normal priority).  Only positive\n\
+\tnice values are allowed because raising priority requires root.\n\
+\tTracees inherit the priority through fork/exec.",
+	},
+	{ .class = "Resource limit options",
+	  .arguments = {
+		{ .name = "--fd-limit", .separator = ' ', .value = "N" },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_fd_limit,
+	  .description = "Cap open file descriptors with RLIMIT_NOFILE (host-side).",
+	  .detail = "\tTracees inherit the limit through fork/exec.",
+	},
+	{ .class = "Resource limit options",
+	  .arguments = {
+		{ .name = "--proc-limit", .separator = ' ', .value = "N" },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_proc_limit,
+	  .description = "Cap the number of processes with RLIMIT_NPROC (host-side).",
+	  .detail = "\tWARNING: RLIMIT_NPROC applies to the whole UID, not just\n\
+\tproot: a low value can break the rest of Termux.  Use with care.\n\
+\tTracees inherit the limit through fork/exec.",
+	},
+	{ .class = "Resource limit options",
+	  .arguments = {
+		{ .name = "--resource-isolated", .separator = '\0', .value = NULL },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_resource_isolated,
+	  .description = "Combo: single core + nice 10 (no memory/process limits).",
+	  .detail = "\tEquivalent to --cpu-limit 1 --nice 10.  It deliberately does\n\
+\tnot set any memory, fd or process limit.  If combined with an\n\
+\texplicit --cpu-limit/--nice, the last option wins.",
+	},
 	{ .class = "Extension options",
 	  .arguments = {
 		{ .name = "--supervise", .separator = '\0', .value = NULL },

@@ -109,6 +109,7 @@ OBJECTS += \
 	extension/virtual_net/virtual_net.o \
 	extension/virtual_net/virtual_net_helper.o \
 	extension/proc_isolation/proc_isolation.o \
+	extension/resource_limit/resource_limit.o \
 	extension/sysvipc/sysvipc.o \
 	extension/sysvipc/sysvipc_msg.o \
 	extension/sysvipc/sysvipc_sem.o \

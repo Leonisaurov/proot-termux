@@ -22,9 +22,15 @@
 
 #include <string.h>    /* str*(3), */
 #include <assert.h>    /* assert(3), */
+#include <dirent.h>    /* opendir(3), readdir(3), closedir(3), */
 #include <errno.h>     /* errno, */
-#include <stdio.h>     /* printf(3), fflush(3), */
-#include <unistd.h>    /* write(2), */
+#include <stdio.h>     /* printf(3), fflush(3), fopen(3), */
+#include <stdlib.h>    /* strtoull(3), */
+#include <unistd.h>    /* write(2), sysconf(3), */
+#include <limits.h>    /* ULLONG_MAX, PATH_MAX, */
+#include <sched.h>     /* sched_setaffinity(2), CPU_*, */
+#include <sys/resource.h> /* setpriority(2), prlimit64(2), RLIMIT_*, */
+#include <sys/types.h> /* uid_t, */
 
 #include "cli/cli.h"
 #include "cli/note.h"
@@ -33,6 +39,7 @@
 #include "extension/virtual_net/virtual_net.h"
 #include "extension/virtual_net/virtual_net_internal.h"
 #include "extension/proc_isolation/proc_isolation.h"
+#include "extension/resource_limit/resource_limit.h"
 #include "supervise/supervise.h"
 #include "path/binding.h"
 #include "attribute.h"
@@ -567,6 +574,411 @@ static int handle_option_perf_isolated(Tracee *tracee, const Cli *cli UNUSED, co
 static int handle_option_handle_isolated(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
 {
 	return handle_proc_isolation_flag(tracee, ISOLATE_HANDLE);
+}
+
+/**
+ * Resource limits (Fase 1): host-side + tracee-side --mem-limit.
+ *
+ * The --*-limit options below only store the parsed values into
+ * @resource_config.  The host-side limits (--cpu-limit/--single-core,
+ * --nice, --fd-limit, --proc-limit, --resource-isolated) are applied by
+ * resource_config_apply(), called from main() after parse_config() and
+ * before launch_process(); tracees inherit them through fork/exec.
+ *
+ * --mem-limit is handled differently and is the ONLY tracee-side limit:
+ * RLIMIT_AS must NOT be applied to the host, because proot's virtual
+ * address space is huge on bionic (~10 GiB) and an RLIMIT_AS cap would
+ * crash proot with SIGSEGV/SIGABRT on the next allocation.  The value is
+ * stored here and applied to each tracee after its execve (post-exec, in
+ * execve/exit.c), when the guest executable is loaded and the tracee's
+ * VSZ is small.  See resource_config_mem_limit_bytes().
+ */
+
+/* Minimum accepted --mem-limit: a guest needs a floor of virtual address
+ * space to load its executable, libraries and stack.  Values below this
+ * are rejected at parse time with a clear error.  */
+#define RESOURCE_MEM_LIMIT_MIN (16 * 1024 * 1024)
+
+struct ResourceConfig {
+	/* --cpu-limit N / --single-core: restrict to the first N CPUs.  */
+	int cpu_limit;		/* 0 = not set, else >= 1.  */
+
+	/* --mem-limit N[KMG]: RLIMIT_AS cap, in bytes.  */
+	unsigned long long mem_limit_bytes;	/* 0 = not set.  */
+
+	/* --nice N: setpriority(PRIO_PROCESS, 0, N).  */
+	int nice_value;		/* -1 = not set, else [0..19].  */
+
+	/* --fd-limit N: RLIMIT_NOFILE.  */
+	unsigned int fd_limit;	/* 0 = not set.  */
+
+	/* --proc-limit N: RLIMIT_NPROC (applies to the whole UID!).  */
+	unsigned int proc_limit;	/* 0 = not set.  */
+};
+
+static struct ResourceConfig resource_config = {
+	.nice_value = -1,
+};
+
+/**
+ * Initialize the guest-side resource_limit extension (Phase 2: the guest
+ * perceives only the limited CPU count via sched_getaffinity).
+ *
+ * The host-side limits were already applied by resource_config_apply() and
+ * tracees inherit them through fork/exec, so a failure here is NOT fatal: it
+ * only means the guest keeps seeing all host CPUs.  It must not be silent
+ * either, hence the warning.
+ */
+static void init_guest_resource_limit(Tracee *tracee)
+{
+	int status;
+
+	status = rlimit_configure(tracee);
+	if (status < 0)
+		note(tracee, WARNING, SYSTEM,
+			"failed to initialize the resource_limit extension "
+			"(the guest will see all host CPUs)");
+}
+
+static int handle_option_cpu_limit(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	int n;
+	long nb_cpus;
+
+	if (parse_integer_option(tracee, &n, value, "--cpu-limit") < 0)
+		return -1;
+
+	if (n < 1) {
+		note(tracee, ERROR, USER, "--cpu-limit: invalid value %d (expected at least 1 CPU)", n);
+		return -1;
+	}
+	if (n > CPU_SETSIZE) {
+		note(tracee, ERROR, USER, "--cpu-limit: %d exceeds the maximum supported CPU count (%d)", n, CPU_SETSIZE);
+		return -1;
+	}
+
+	/* Reject more CPUs than the kernel actually exposes.  */
+	nb_cpus = sysconf(_SC_NPROCESSORS_CONF);
+	if (nb_cpus > 0 && n > nb_cpus) {
+		note(tracee, ERROR, USER, "--cpu-limit: %d exceeds the number of available CPUs (%ld)", n, nb_cpus);
+		return -1;
+	}
+
+	resource_config.cpu_limit = n;
+	VERBOSE(tracee, 1, "--cpu-limit: will restrict proot to the first %d CPU(s)", n);
+
+	/* Fase 2 (guest-side): make the guest perceive only these N CPUs
+	 * (intercepts sched_getaffinity).  No-op when no limit is set.  */
+	init_guest_resource_limit(tracee);
+	return 0;
+}
+
+static int handle_option_single_core(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	resource_config.cpu_limit = 1;
+	VERBOSE(tracee, 1, "--single-core: will restrict proot to a single CPU");
+
+	/* Fase 2 (guest-side): the guest perceives a single CPU.  */
+	init_guest_resource_limit(tracee);
+	return 0;
+}
+
+/**
+ * Parse a "--mem-limit N[KMG]" value into *@bytes.  The optional suffix
+ * K/M/G (case-insensitive) stands for powers of 1024; a plain number is
+ * interpreted as bytes.  Returns 0 on success, -1 on parse error.
+ */
+static int parse_mem_limit_value(const Tracee *tracee, const char *value, unsigned long long *bytes)
+{
+	char *end = NULL;
+	unsigned long long amount;
+	unsigned long long multiplier = 1;
+
+	/* Reject negative values: strtoull("-1") returns ULLONG_MAX without
+	 * setting errno, so a negative value would otherwise be silently
+	 * accepted as RLIMIT_AS = RLIM_INFINITY.  */
+	if (value[0] == '-') {
+		note(tracee, ERROR, USER, "--mem-limit: invalid value '%s' (negative values are not allowed)", value);
+		return -1;
+	}
+
+	errno = 0;
+	amount = strtoull(value, &end, 10);
+	if (errno != 0 || end == value || amount == 0) {
+		note(tracee, ERROR, USER, "--mem-limit: invalid value '%s' (expected N[KMG], N > 0)", value);
+		return -1;
+	}
+
+	if (*end != '\0') {
+		if (end[1] != '\0') {
+			note(tracee, ERROR, USER, "--mem-limit: invalid suffix in '%s' (expected K, M or G)", value);
+			return -1;
+		}
+		switch (*end) {
+		case 'K': case 'k': multiplier = 1024; break;
+		case 'M': case 'm': multiplier = 1024 * 1024; break;
+		case 'G': case 'g': multiplier = 1024 * 1024 * 1024; break;
+		default:
+			note(tracee, ERROR, USER, "--mem-limit: invalid suffix '%c' in '%s' (expected K, M or G)", *end, value);
+			return -1;
+		}
+	}
+
+	if (amount > ULLONG_MAX / multiplier) {
+		note(tracee, ERROR, USER, "--mem-limit: value '%s' is too large", value);
+		return -1;
+	}
+
+	*bytes = amount * multiplier;
+	return 0;
+}
+
+static int handle_option_mem_limit(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	unsigned long long bytes;
+
+	if (parse_mem_limit_value(tracee, value, &bytes) < 0)
+		return -1;
+
+	if (bytes < RESOURCE_MEM_LIMIT_MIN) {
+		note(tracee, ERROR, USER,
+			"--mem-limit %s is too low (minimum is %d MiB: a guest needs a floor "
+			"of virtual address space to load its executable, libraries and stack)",
+			value, RESOURCE_MEM_LIMIT_MIN / (1024 * 1024));
+		return -1;
+	}
+
+	resource_config.mem_limit_bytes = bytes;
+	VERBOSE(tracee, 1, "--mem-limit: will cap each tracee's address space at %llu bytes (applied post-exec, tracee-side)", bytes);
+	return 0;
+}
+
+static int handle_option_nice(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	int n;
+
+	if (parse_integer_option(tracee, &n, value, "--nice") < 0)
+		return -1;
+
+	if (n < 0 || n > 19) {
+		note(tracee, ERROR, USER, "--nice: invalid value %d (expected 0..19; raising priority needs root)", n);
+		return -1;
+	}
+
+	resource_config.nice_value = n;
+	VERBOSE(tracee, 1, "--nice: will lower proot priority to %d", n);
+	return 0;
+}
+
+static int handle_option_fd_limit(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	int n;
+
+	if (parse_integer_option(tracee, &n, value, "--fd-limit") < 0)
+		return -1;
+
+	if (n < 32) {
+		note(tracee, ERROR, USER, "--fd-limit: invalid value %d (expected at least 32, proot needs a fair number of file descriptors)", n);
+		return -1;
+	}
+
+	resource_config.fd_limit = (unsigned int)n;
+	VERBOSE(tracee, 1, "--fd-limit: will cap open file descriptors at %d", n);
+	return 0;
+}
+
+/**
+ * Count the processes currently running with @uid as their real UID,
+ * by scanning /proc/<pid>/status.  Returns the count, or -1 if /proc
+ * cannot be scanned (callers must then fall back to a minimal check).
+ */
+static int count_processes_for_uid(uid_t uid)
+{
+	DIR *proc_dir;
+	struct dirent *entry;
+	int count = 0;
+
+	proc_dir = opendir("/proc");
+	if (proc_dir == NULL)
+		return -1;
+
+	while ((entry = readdir(proc_dir)) != NULL) {
+		char path[PATH_MAX];
+		FILE *status;
+		char line[256];
+		uid_t real_uid = (uid_t)-1;
+
+		/* Only numeric directory entries are PIDs.  */
+		if (entry->d_name[0] < '0' || entry->d_name[0] > '9')
+			continue;
+
+		snprintf(path, sizeof(path), "/proc/%s/status", entry->d_name);
+		status = fopen(path, "r");
+		if (status == NULL)
+			continue;
+
+		while (fgets(line, sizeof(line), status) != NULL) {
+			if (strncmp(line, "Uid:", 4) == 0) {
+				/* Format: "Uid:\treal\teffective\tsaved\tfs".  */
+				real_uid = (uid_t)strtoul(&line[4], NULL, 10);
+				break;
+			}
+		}
+		fclose(status);
+
+		if (real_uid == uid)
+			count++;
+	}
+
+	closedir(proc_dir);
+	return count;
+}
+
+static int handle_option_proc_limit(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	int n;
+	int actual;
+
+	if (parse_integer_option(tracee, &n, value, "--proc-limit") < 0)
+		return -1;
+
+	if (n < 1) {
+		note(tracee, ERROR, USER, "--proc-limit: invalid value %d (expected at least 1)", n);
+		return -1;
+	}
+
+	/* RLIMIT_NPROC applies to the whole real UID: accepting a value
+	 * below the number of processes already running under our UID (plus
+	 * a headroom of 16) would make the very first fork() of proot fail
+	 * with EAGAIN and would block forks for the whole Termux UID.  If
+	 * /proc cannot be scanned, keep the minimal check above and accept
+	 * the value (don't block the option on a counting error).  */
+	actual = count_processes_for_uid(getuid());
+	if (actual >= 0 && n < actual + 16) {
+		note(tracee, ERROR, USER,
+			"--proc-limit %s too low: %d processes currently running for uid %d",
+			value, actual, getuid());
+		return -1;
+	}
+
+	resource_config.proc_limit = (unsigned int)n;
+	VERBOSE(tracee, 1, "--proc-limit: will cap processes at %d (WARNING: applies to the whole UID)", n);
+	return 0;
+}
+
+static int handle_option_resource_isolated(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	/* Combo (Fase 1): single core + nice 10, no memory/fd/proc limits.  */
+	resource_config.cpu_limit = 1;
+	resource_config.nice_value = 10;
+	VERBOSE(tracee, 1, "--resource-isolated: single core + nice 10");
+
+	/* Fase 2 (guest-side): the guest perceives a single CPU.  */
+	init_guest_resource_limit(tracee);
+	return 0;
+}
+
+static int apply_fd_limit(const Tracee *tracee)
+{
+	struct rlimit64 new_limit;
+
+	new_limit.rlim_cur = (rlim_t)resource_config.fd_limit;
+	new_limit.rlim_max = (rlim_t)resource_config.fd_limit;
+	if (prlimit64(0, RLIMIT_NOFILE, &new_limit, NULL) < 0) {
+		note(tracee, ERROR, SYSTEM, "--fd-limit: prlimit64(RLIMIT_NOFILE)");
+		return -1;
+	}
+
+	VERBOSE(tracee, 1, "applied RLIMIT_NOFILE = %u", resource_config.fd_limit);
+	return 0;
+}
+
+static int apply_proc_limit(const Tracee *tracee)
+{
+	struct rlimit64 new_limit;
+
+	new_limit.rlim_cur = (rlim_t)resource_config.proc_limit;
+	new_limit.rlim_max = (rlim_t)resource_config.proc_limit;
+	if (prlimit64(0, RLIMIT_NPROC, &new_limit, NULL) < 0) {
+		note(tracee, ERROR, SYSTEM, "--proc-limit: prlimit64(RLIMIT_NPROC)");
+		return -1;
+	}
+
+	VERBOSE(tracee, 1, "applied RLIMIT_NPROC = %u (applies to the whole UID)", resource_config.proc_limit);
+	return 0;
+}
+
+/**
+ * Apply the parsed HOST-side resource limits to the current (host) process.
+ * Called from main() after parse_config() and before launch_process().
+ * Order: affinity -> nice -> prlimits.  Tracees inherit the resulting
+ * limits through fork/exec, so no propagation is needed.
+ *
+ * --mem-limit is deliberately NOT applied here: RLIMIT_AS on proot would
+ * crash it (its VSZ is ~10 GiB on bionic).  It is applied per-tracee
+ * after execve by the post-exec hook in execve/exit.c.
+ * Returns 0 on success, -1 on fatal error.
+ */
+int resource_config_apply(const Tracee *tracee)
+{
+	/* 1. CPU affinity: restrict to the first N CPUs.  */
+	if (resource_config.cpu_limit > 0) {
+		cpu_set_t set;
+		int i;
+
+		CPU_ZERO(&set);
+		for (i = 0; i < resource_config.cpu_limit; i++)
+			CPU_SET(i, &set);
+
+		if (sched_setaffinity(0, sizeof(set), &set) < 0) {
+			note(tracee, ERROR, SYSTEM, "sched_setaffinity(%d CPUs)",
+				resource_config.cpu_limit);
+			return -1;
+		}
+		VERBOSE(tracee, 1, "applied CPU affinity: first %d CPU(s)", resource_config.cpu_limit);
+	}
+
+	/* 2. Priority (nice >= 0, no root needed).  */
+	if (resource_config.nice_value >= 0) {
+		if (setpriority(PRIO_PROCESS, 0, resource_config.nice_value) < 0) {
+			note(tracee, ERROR, SYSTEM, "setpriority(nice %d)",
+				resource_config.nice_value);
+			return -1;
+		}
+		VERBOSE(tracee, 1, "applied nice value %d", resource_config.nice_value);
+	}
+
+	/* 3. prlimits: fds and processes stay host-side.  --mem-limit is
+	 * NOT applied here (see the comment above); it is tracee-side.  */
+	if (resource_config.fd_limit > 0
+	    && apply_fd_limit(tracee) < 0)
+		return -1;
+
+	if (resource_config.proc_limit > 0
+	    && apply_proc_limit(tracee) < 0)
+		return -1;
+
+	return 0;
+}
+
+/**
+ * Return the --mem-limit value in bytes (0 when not set).  Used by the
+ * post-exec hook in execve/exit.c to apply RLIMIT_AS to each tracee once
+ * its executable has been loaded, so that proot itself is never limited.
+ */
+unsigned long long resource_config_mem_limit_bytes(void)
+{
+	return resource_config.mem_limit_bytes;
+}
+
+/**
+ * Return the --cpu-limit value (0 when not set, else >= 1).  Used by the
+ * guest-side resource_limit extension (rlimit_callback) to know how many
+ * CPUs sched_getaffinity() must report to the guest.
+ */
+int resource_config_cpu_limit(void)
+{
+	return resource_config.cpu_limit;
 }
 
 /**

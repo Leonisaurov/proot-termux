@@ -23,12 +23,14 @@
 #include <linux/auxvec.h>  /* AT_*,  */
 #include <talloc.h>     /* talloc*, */
 #include <sys/mman.h>   /* MAP_*, */
+#include <sys/resource.h> /* prlimit64(2), RLIMIT_AS, struct rlimit64, */
 #include <assert.h>     /* assert(3), */
 #include <string.h>     /* strlen(3), strerror(3), */
 #include <strings.h>    /* bzero(3), */
 #include <signal.h>     /* kill(2), SIG*, */
-#include <unistd.h>     /* write(2), */
+#include <unistd.h>     /* write(2), sysconf(3), */
 #include <errno.h>      /* E*, */
+#include <stdio.h>      /* FILE, fopen(3), fscanf(3), snprintf(3), */
 
 #include "execve/execve.h"
 #include "execve/elf.h"
@@ -402,6 +404,84 @@ static int transfer_load_script(Tracee *tracee)
 	return 0;
 }
 
+/* Tracee-side --mem-limit value (bytes, 0 when not set), stored by the
+ * --mem-limit handler in cli/proot.c.  Declared here (extern) following
+ * the same pattern as cli.c for resource_config_apply().  */
+extern unsigned long long resource_config_mem_limit_bytes(void);
+
+/* Margin kept above the tracee's current VSZ when enforcing --mem-limit
+ * post-exec, used only to decide whether to warn (the limit is always
+ * applied).  */
+#define TRACEE_MEM_LIMIT_MARGIN (64 * 1024 * 1024)
+
+/**
+ * Apply --mem-limit (RLIMIT_AS) to @tracee now that its executable has
+ * been loaded (post-exec).  proot itself is never limited: the rlimit is
+ * set on the tracee process, whose VSZ at this point is just the loader
+ * plus the mappings created so far, so a small limit does not crash the
+ * host.  The limit is applied unconditionally (the guest is the one that
+ * will hit ENOMEM if it tries to grow past the limit); a warning is
+ * emitted when the limit is below the tracee's current VSZ plus a margin,
+ * as that usually means the guest cannot even finish loading.
+ */
+static void apply_mem_limit_to_tracee(const Tracee *tracee)
+{
+	unsigned long long mem_limit_bytes;
+	struct rlimit64 limit;
+	unsigned long long vmsize_bytes;
+	unsigned long long threshold;
+	long page_size;
+	FILE *statm;
+	unsigned long pages;
+	char statm_path[64];
+	bool vsz_known;
+
+	mem_limit_bytes = resource_config_mem_limit_bytes();
+	if (mem_limit_bytes == 0)
+		return;
+
+	/* Read the tracee's current VSZ (/proc/<pid>/statm field 1, in
+	 * pages).  Failure to read it is not fatal: apply anyway, and
+	 * treat the VSZ as unknown (vsz_known = false) so that no
+	 * spurious warning is emitted for an unreadable statm.  */
+	vmsize_bytes = 0;
+	vsz_known = false;
+	snprintf(statm_path, sizeof(statm_path), "/proc/%d/statm", tracee->pid);
+	statm = fopen(statm_path, "r");
+	if (statm != NULL) {
+		if (fscanf(statm, "%lu", &pages) == 1) {
+			page_size = sysconf(_SC_PAGESIZE);
+			if (page_size > 0) {
+				vmsize_bytes = (unsigned long long)pages * (unsigned long long)page_size;
+				vsz_known = true;
+			}
+		}
+		fclose(statm);
+	}
+
+	threshold = vmsize_bytes + TRACEE_MEM_LIMIT_MARGIN;
+	if (vsz_known && mem_limit_bytes < threshold) {
+		note(tracee, WARNING, USER,
+			"--mem-limit %llu bytes is below tracee %d's current virtual size "
+			"(%llu bytes) plus %d MiB margin: the guest may fail with ENOMEM; "
+			"applying anyway",
+			mem_limit_bytes, tracee->pid, vmsize_bytes,
+			TRACEE_MEM_LIMIT_MARGIN / (1024 * 1024));
+	}
+
+	limit.rlim_cur = (rlim_t)mem_limit_bytes;
+	limit.rlim_max = (rlim_t)mem_limit_bytes;
+	if (prlimit64(tracee->pid, RLIMIT_AS, &limit, NULL) < 0) {
+		note(tracee, WARNING, SYSTEM,
+			"--mem-limit: prlimit64(%d, RLIMIT_AS, %llu) failed",
+			tracee->pid, mem_limit_bytes);
+		return;
+	}
+
+	VERBOSE(tracee, 1, "applied RLIMIT_AS = %llu bytes to tracee %d (VSZ %llu bytes)",
+		mem_limit_bytes, tracee->pid, vmsize_bytes);
+}
+
 /**
  * Start the loading of @tracee.  This function returns no error since
  * it's either too late to do anything useful (the calling process is
@@ -472,6 +552,10 @@ void translate_execve_exit(Tracee *tracee)
 		if ((tracee->as_ptracee.options & PTRACE_O_TRACEEXEC) == 0)
 			kill(tracee->pid, SIGTRAP);
 
+		/* Post-exec: the guest program is loaded, cap its address
+		 * space now (--mem-limit, tracee-side).  */
+		apply_mem_limit_to_tracee(tracee);
+
 		return;
 	}
 
@@ -486,6 +570,12 @@ void translate_execve_exit(Tracee *tracee)
 	/* The guest program is now running; PR_SET_NO_NEW_PRIVS calls from
 	 * here on belong to the guest, not to PRoot's own pre-execve setup. */
 	tracee->seen_execve = true;
+
+	/* Post-exec: the guest executable is loaded, cap this tracee's
+	 * address space now (--mem-limit, tracee-side).  Runs for every
+	 * tracee on every successful execve, so --supervise/--exec children
+	 * get the limit too.  */
+	apply_mem_limit_to_tracee(tracee);
 
 	/* Execve happened; commit the new "/proc/self/exe".  */
 	if (tracee->new_exe != NULL) {

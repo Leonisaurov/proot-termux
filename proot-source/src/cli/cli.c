@@ -50,6 +50,11 @@
 
 #include "build.h"
 
+/* Host-side resource limit hook (--cpu-limit, --mem-limit, --nice,
+ * --fd-limit, --proc-limit, --resource-isolated).  Implemented in
+ * cli/proot.c; applied after parse_config() and before launch_process().  */
+extern int resource_config_apply(const Tracee *tracee);
+
 /**
  * Print a (@detailed) usage of PRoot.
  */
@@ -503,6 +508,26 @@ int main(int argc, char *const argv[])
 	if (status < 0)
 		goto error;
 
+	/* Apply host-side resource limits (--cpu-limit, --single-core,
+	 * --mem-limit, --nice, --fd-limit, --proc-limit,
+	 * --resource-isolated) now that every flag has been parsed, and
+	 * before any tracee is launched.  Order inside the hook:
+	 * affinity -> nice -> prlimits.  Tracees inherit the resulting
+	 * limits through fork/exec.
+	 *
+	 * Note: the result is stored in a dedicated variable and NOT in
+	 * @status: @status still holds the value returned by
+	 * parse_config() (the index of the tracee command in @argv), which
+	 * is used below by --exec (argv[status]) and launch_process
+	 * (&argv[status]).  Overwriting @status here made the tracee
+	 * receive the whole proot command line as its own argv (argv[0]
+	 * was "proot") instead of the requested command.  */
+	{
+		int config_status = resource_config_apply(tracee);
+		if (config_status < 0)
+			goto error;
+	}
+
 	/* --exec mode: connect to a running supervisor instead of launching
 	 * a local tracee. The command is the first non-option argument,
 	 * determined by parse_config's return value (argc_offset). */
@@ -564,6 +589,15 @@ int parse_integer_option(const Tracee *tracee, int *variable, const char *value,
 	long val = strtol(value, &end_ptr, 10);
 	if (errno != 0 || end_ptr == value || val < INT_MIN || val > INT_MAX) {
 		note(tracee, ERROR, USER, "option '%s' expects an integer value.", option);
+		return -1;
+	}
+
+	/* Reject trailing garbage ("4x", "5abc"): only surrounding
+	 * whitespace is tolerated after the number.  */
+	while (*end_ptr == ' ' || *end_ptr == '\t')
+		end_ptr++;
+	if (*end_ptr != '\0') {
+		note(tracee, ERROR, USER, "option '%s' expects an integer value, got '%s'.", option, value);
 		return -1;
 	}
 

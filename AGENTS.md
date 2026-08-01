@@ -174,6 +174,13 @@ struct VnpRegistryEntry {
 - `proot-source/src/cli/cli.c` — `--vnp-helper` dispatch, `print_usage()` null-safety fix
 - `proot-source/src/extension/extension.h` — `vnp_callback` declaration
 - `proot-source/src/GNUmakefile` — `virtual_net.o` and `virtual_net_helper.o`
+- `proot-source/src/extension/resource_limit/` — Resource limits extension, guest-side (3 files: resource_limit.c/h/internal.h)
+- `proot-source/src/cli/proot.h` — `--cpu-limit`/`--single-core`/`--mem-limit`/`--nice`/`--fd-limit`/`--proc-limit`/`--resource-isolated` options, `resource_config_apply()` declaration
+- `proot-source/src/cli/proot.c` — `resource_config`, handlers, `resource_config_apply()`, `resource_config_mem_limit_bytes()`, `resource_config_cpu_limit()`
+- `proot-source/src/cli/cli.c` — `resource_config_apply()` hook in main (config_status, no pisa argc_offset)
+- `proot-source/src/execve/exit.c` — `apply_mem_limit_to_tracee()` (post-exec, tracee-side)
+- `proot-source/src/extension/extension.h` — `rlimit_callback` declaration
+- `proot-source/src/GNUmakefile` — `resource_limit.o`
 
 ### Supervise Mode (`--supervise`) & Exec (`--exec <PID> <command>`)
 
@@ -267,6 +274,66 @@ File: `/data/data/com.termux/files/usr/tmp/proot-exit-<PID>.log`
 process 'server' exited with status 1 (started 45s)
 process 'server' killed by signal 9 (started 120s)
 ```
+
+## Resource Limits (`--cpu-limit` y familia)
+
+Added in revision 9. Implementa límites de recursos con diseño **híbrido**: algunos límites se aplican host-side (a proot mismo; el guest los hereda vía fork/exec) y otros tracee-side (a cada proceso del guest tras su execve).
+
+### Flags
+
+| Flag | Efecto | Lado |
+|------|--------|------|
+| `--cpu-limit N` | `sched_setaffinity()` a los N primeros cores (host) + el guest percibe N cores (intercepción de `sched_getaffinity`) | host + guest |
+| `--single-core` | Alias de `--cpu-limit 1` | host + guest |
+| `--mem-limit N[KMG]` | RLIMIT_AS aplicado AL GUEST (tracee-side, post-exec) — el host NO se limita | guest |
+| `--nice N` | `setpriority(PRIO_PROCESS, 0, N)` (0..19, host) | host |
+| `--fd-limit N` | `prlimit64(RLIMIT_NOFILE)` (mínimo 32, host) | host |
+| `--proc-limit N` | `prlimit64(RLIMIT_NPROC)` con validación contra procesos actuales del uid + 16 (host) | host |
+| `--resource-isolated` | Combo: 1 core + nice 10 (sin mem/proc) | host + guest |
+
+### Diseño híbrido (host-side vs tracee-side)
+
+Los handlers de los flags (`handle_option_*` en `cli/proot.c`) solo guardan valores en `resource_config`. Después de `parse_config()`, `resource_config_apply()` (llamado desde `main()` en `cli/cli.c`) aplica los límites host-side en orden **affinity → nice → prlimits**:
+
+1. **`--cpu-limit`/`--single-core`**: `sched_setaffinity(0, ...)` a los primeros N cores.
+2. **`--nice`**: `setpriority(PRIO_PROCESS, 0, N)`.
+3. **`--fd-limit`**: `prlimit64(RLIMIT_NOFILE)`.
+4. **`--proc-limit`**: `prlimit64(RLIMIT_NPROC)`.
+
+Los tracees heredan estos límites automáticamente vía fork/exec — no hace falta propagarlos.
+
+**`--mem-limit` es el ÚNICO límite tracee-side**: `RLIMIT_AS` NO se aplica a proot porque su espacio de direcciones virtuales en bionic es enorme (~10 GiB) y un cap de `RLIMIT_AS` lo haría crashear (SIGSEGV/SIGABRT). En su lugar `apply_mem_limit_to_tracee()` (`execve/exit.c`) aplica `prlimit64(pid, RLIMIT_AS)` a CADA tracee justo después de su execve, cuando su VSZ es pequeño. El guest es el que recibe ENOMEM si intenta crecer más allá del límite.
+
+### Guest-side: intercepción de `sched_getaffinity`
+
+La extensión `extension/resource_limit/` (callback `rlimit_callback`) hace que el guest perciba solo N cores:
+
+1. Se filtra `sched_getaffinity` vía `extension->filtered_sysnums` (`FILTER_SYSEXIT`) — solo cuando `cpu_limit > 0`, **cero overhead** sin `--cpu-limit`.
+2. El syscall real corre igual ("emulate, never deny"): el kernel resuelve pid 0 y devuelve el byte count.
+3. En `SYSCALL_EXIT_END` se reescribe la máscara: solo bits 0..N-1. El valor de retorno se deja intacto.
+4. El guest ve N cores: `nproc`, `taskset` y similares reportan el número limitado.
+
+### Decisiones clave
+
+- **`--mem-limit` mínimo 16 MiB** (`RESOURCE_MEM_LIMIT_MIN`): valores menores se rechazan al parsear — el guest necesita un suelo de espacio virtual para cargar ejecutable, librerías y stack.
+- **Validaciones al parsear** (rechazo con error claro, nunca EPERM espurio):
+  - `--cpu-limit N` con N > cores reales (`sysconf(_SC_NPROCESSORS_CONF)`) → error.
+  - `--nice` solo 0..19 (subir prioridad requiere root).
+  - `--fd-limit` mínimo 32 (proot necesita un número justo de fds).
+  - `--proc-limit` debe ser ≥ procesos actuales del uid + 16 (headroom), si no el primer `fork()` fallaría con EAGAIN.
+- **`--mem-limit` se aplica a CADA tracee post-exec**: cubre también los tracees nuevos de `--supervise`/`--exec`.
+- **`--resource-isolated`** deliberadamente NO fija mem/fd/proc.
+- **"Last option wins"**: si se combina `--resource-isolated` con un `--cpu-limit`/`--nice` explícito, gana el último; la extensión refresca su config en vez de crear una segunda (`rlimit_configure()` hace double-init guard).
+- **Fallo no fatal**: si la extensión guest-side no se inicializa, solo se avisa — el guest vería todos los cores del host, pero los límites host-side siguen aplicados.
+
+### Interacción con `--supervise`/`--exec`
+
+- Los tracees nuevos que el supervisor `fork()`ea reciben `--mem-limit` (el hook post-exec está en `translate_execve_exit()`).
+- Los flags de resource limits del cliente `--exec` **NO se propagan**: el cliente solo conecta al supervisor y le envía el comando; **gana la configuración del supervisor**.
+
+### ARM64 note
+
+- `--reboot-isolated` (y combinaciones con resource limits que dependan de `reboot()`) **no es testeable en ARM64 Android**: el seccomp del kernel bloquea `reboot()` antes de que proot pueda interceptarlo. Funciona en Linux estándar.
 
 ## How the Build Works
 
@@ -441,6 +508,8 @@ The orchestrator agent lives at `~/.config/opencode/agent/orquestador.md`.
 | `--handle-isolated` | open_by_handle_at | EOPNOTSUPP |
 | `--proc-isolation` | (legacy) Combines --proc-isolated + --ptrace-isolated |
 
+> **Nota**: los flags de *resource limits* (`--cpu-limit`, `--mem-limit`, `--nice`, `--fd-limit`, `--proc-limit`, `--resource-isolated`) NO son flags de isolation: no bloquean syscalls, solo limitan recursos. Viven en su propia sección: [Resource Limits](#resource-limits---cpu-limit-y-familia).
+
 ### Philosophy: Emulate, Never Deny
 
 NUNCA responder "Operation not permitted" (EPERM) o "Function not implemented" (ENOSYS)
@@ -477,5 +546,7 @@ existe") o éxito emulado (0) sin efecto real.
 - **process_vm_writev** to other proot processes is currently allowed (not a host escape, but intra-sandbox).
 
 ### Commit History (recent)
+
+- **Revision 9**: Resource Limits (`--cpu-limit`, `--single-core`, `--mem-limit`, `--nice`, `--fd-limit`, `--proc-limit`, `--resource-isolated`) — diseño híbrido host/guest
 
 For full commit history: `git log --oneline`
