@@ -56,28 +56,77 @@ extern int resource_config_cpu_limit(void);
 /* proc_limit value stored by the --proc-limit handler in cli/proot.c.  */
 extern int resource_config_proc_limit(void);
 
-/* Syscalls filtered by this extension.  FILTER_SYSEXIT: the real
- * sched_getaffinity() must run first so the kernel resolves the pid
- * and returns the byte count; the mask is rewritten at
- * SYSCALL_EXIT_END.  flags == 0 (ENTER-only): fork/clone/vfork are
- * intercepted before they execute, so the process-count check can
- * answer -EAGAIN without the child ever being created.  Registered
- * via extension->filtered_sysnums, i.e. only when the extension is
- * initialized (cpu_limit or proc_limit > 0).
+/* Syscalls filtered by this extension.  The array is built dynamically
+ * (see rlimit_build_sysnums) so that only the dimensions actually
+ * requested add seccomp entries: with cpu_limit == 0 nothing about
+ * sched_getaffinity is filtered and with proc_limit == 0 nothing about
+ * fork/clone/vfork is, keeping the seccomp filter minimal per
+ * dimension (zero overhead for an unused one).
+ *
+ * FILTER_SYSEXIT (sched_getaffinity): the real syscall must run first
+ * so the kernel resolves the pid and returns the byte count; the mask
+ * is rewritten at SYSCALL_EXIT_END.  flags == 0 (ENTER-only) for
+ * fork/clone/vfork: they are intercepted before they execute, so the
+ * process-count check can answer -EAGAIN without the child ever being
+ * created.
  *
  * PR_fork/PR_vfork only exist on some ABIs (x86_64, i386, ...); on
  * arm64 they are discarded by detranslate_sysnum() (SYSCALL_AVOIDER)
  * and every thread/process creation goes through PR_clone, which is
  * already traced by proot_sysnums anyway.  PR_clone3 is included for
- * the same reason (clone3(2) uses it on newer libcs).  */
-static FilteredSysnum syss[] = {
-	{ PR_sched_getaffinity, FILTER_SYSEXIT },
-	{ PR_clone, 0 },
-	{ PR_clone3, 0 },
-	{ PR_fork, 0 },
-	{ PR_vfork, 0 },
-	FILTERED_SYSNUM_END,
-};
+ * the same reason (clone3(2) uses it on newer libcs).  Registered via
+ * extension->filtered_sysnums, i.e. only when the extension is
+ * initialized (cpu_limit or proc_limit > 0).
+ *
+ * @return a talloc array (child of @extension, last entry the
+ *         FILTERED_SYSNUM_END terminator), or NULL on allocation
+ *         failure.
+ */
+static FilteredSysnum *rlimit_build_sysnums(Extension *extension,
+					    const RlimitConfig *config)
+{
+	FilteredSysnum *sysnums;
+	int count = 0;
+	int idx = 0;
+
+	/* Count the entries: one per active dimension.  */
+	if (config->cpu_limit > 0)
+		count++;
+	if (config->proc_limit > 0)
+		count += 4;
+
+	/* count + 1 for the terminator.  */
+	sysnums = talloc_array(extension, FilteredSysnum, count + 1);
+	if (sysnums == NULL)
+		return NULL;
+
+	if (config->cpu_limit > 0) {
+		sysnums[idx].value = PR_sched_getaffinity;
+		sysnums[idx].flags = FILTER_SYSEXIT;
+		idx++;
+	}
+
+	if (config->proc_limit > 0) {
+		sysnums[idx].value = PR_clone;
+		sysnums[idx].flags = 0;
+		idx++;
+		sysnums[idx].value = PR_clone3;
+		sysnums[idx].flags = 0;
+		idx++;
+		sysnums[idx].value = PR_fork;
+		sysnums[idx].flags = 0;
+		idx++;
+		sysnums[idx].value = PR_vfork;
+		sysnums[idx].flags = 0;
+		idx++;
+	}
+
+	/* Terminator (FILTERED_SYSNUM_END).  */
+	sysnums[idx].value = PR_void;
+	sysnums[idx].flags = 0;
+
+	return sysnums;
+}
 
 /**
  * Rewrite the mask returned by sched_getaffinity() so that only the
@@ -152,7 +201,8 @@ static int rlimit_handle_sched_getaffinity(Tracee *tracee, const RlimitConfig *c
 }
 
 /**
- * Count the live tracees of this proot instance.
+ * Count the live tracees of this proot instance, stopping as soon as
+ * @limit live tracees are found (early exit).
  *
  * Proot tracks every guest process AND thread as a Tracee (it sets
  * PTRACE_O_TRACEFORK|TRACEVFORK|TRACECLONE), so counting the entries
@@ -166,20 +216,33 @@ static int rlimit_handle_sched_getaffinity(Tracee *tracee, const RlimitConfig *c
  * natural RLIMIT_NPROC semantics where the current task already
  * counts towards the limit.
  *
- * @return the number of live tracees, or 0 if the list is empty.
+ * The early-exit (break once count >= limit) turns the walk into
+ * O(limit) instead of O(N): the caller only needs to know whether the
+ * limit was reached, not the exact total, so a low limit never pays
+ * for walking a long tracees list.
+ *
+ * @param limit the process limit; counting stops as soon as this many
+ *        live tracees are found (<= 0 returns 0 immediately).
+ * @return the number of live tracees found (possibly capped at
+ *         @limit), or 0 if the list is empty.
  */
-static int rlimit_count_live_tracees(void)
+static int rlimit_count_live_tracees(int limit)
 {
 	Tracees *list = get_tracees_list_head();
 	Tracee *tracee;
 	int count = 0;
 
-	if (list == NULL)
+	if (list == NULL || limit <= 0)
 		return 0;
 
 	LIST_FOREACH(tracee, list, link) {
 		if (!tracee->terminated)
 			count++;
+
+		/* Early exit: no point walking the rest of the list once
+		 * the limit is reached — count is guaranteed >= limit.  */
+		if (count >= limit)
+			break;
 	}
 
 	return count;
@@ -208,7 +271,7 @@ static int rlimit_handle_fork_clone_enter(Tracee *tracee, const RlimitConfig *co
 	if (config == NULL || config->proc_limit <= 0)
 		return 0;
 
-	count = rlimit_count_live_tracees();
+	count = rlimit_count_live_tracees(config->proc_limit);
 	if (count < config->proc_limit)
 		return 0;
 
@@ -217,7 +280,7 @@ static int rlimit_handle_fork_clone_enter(Tracee *tracee, const RlimitConfig *co
 	set_sysnum(tracee, PR_void);
 	poke_reg(tracee, SYSARG_RESULT, -EAGAIN);
 	VERBOSE(tracee, 1,
-		"resource_limit: fork/clone refused (EAGAIN): %d live tracees, "
+		"resource_limit: fork/clone refused (EAGAIN): %d live tracees seen, "
 		"proc-limit %d", count, config->proc_limit);
 	return 1;
 }
@@ -228,6 +291,7 @@ int rlimit_callback(Extension *extension, ExtensionEvent event,
 	switch (event) {
 	case INITIALIZATION: {
 		RlimitConfig *config;
+		FilteredSysnum *sysnums;
 
 		/* Allocate config as child of extension (like virtual_net).  */
 		config = talloc_zero(extension, RlimitConfig);
@@ -240,8 +304,15 @@ int rlimit_callback(Extension *extension, ExtensionEvent event,
 		config->cpu_limit = resource_config_cpu_limit();
 		config->proc_limit = resource_config_proc_limit();
 
+		/* Build the filtered syscall set dynamically: only the
+		 * syscalls of the active dimensions add seccomp entries
+		 * (see rlimit_build_sysnums).  */
+		sysnums = rlimit_build_sysnums(extension, config);
+		if (sysnums == NULL)
+			return -ENOMEM;
+
 		extension->config = config;
-		extension->filtered_sysnums = syss;
+		extension->filtered_sysnums = sysnums;
 
 		VERBOSE(TRACEE(extension), 1,
 			"resource_limit: guest perceives %d CPU(s), %d process(es)",
@@ -308,9 +379,33 @@ int rlimit_configure(Tracee *tracee)
 	 * handle_proc_isolation_flag).  */
 	extension = get_extension(tracee, rlimit_callback);
 	if (extension != NULL) {
+		FilteredSysnum *sysnums;
+
 		config = talloc_get_type_abort(extension->config, RlimitConfig);
 		config->cpu_limit = resource_config_cpu_limit();
 		config->proc_limit = resource_config_proc_limit();
+
+		/* Rebuild the filtered syscall set: "last option wins" may
+		 * have just activated a dimension (e.g. --cpu-limit 2
+		 * --proc-limit 4), and the set must reflect the current
+		 * config before the seccomp filter is installed
+		 * (launch_process() runs after parse_config(), so the
+		 * refresh always lands before enable_syscall_filtering()).
+		 * Without this, a cpu-only first option would leave
+		 * PR_clone/PR_clone3/PR_fork/PR_vfork unfiltered and, on
+		 * ABIs where fork/vfork are not in proot_sysnums, the
+		 * proc-limit would be bypassed.  The old array is a talloc
+		 * child of the extension, so freeing it and replacing it
+		 * keeps the memory tied to the extension's lifetime.  */
+		sysnums = rlimit_build_sysnums(extension, config);
+		if (sysnums == NULL) {
+			VERBOSE(tracee, 1,
+				"resource_limit: failed to rebuild the filtered syscall set");
+			return -ENOMEM;
+		}
+		talloc_free((void *) extension->filtered_sysnums);
+		extension->filtered_sysnums = sysnums;
+
 		VERBOSE(tracee, 2,
 			"resource_limit: updated guest perception to %d CPU(s), "
 			"%d process(es)", config->cpu_limit, config->proc_limit);
@@ -318,4 +413,41 @@ int rlimit_configure(Tracee *tracee)
 	}
 
 	return initialize_extension(tracee, rlimit_callback, NULL);
+}
+
+/**
+ * Host-side --proc-limit gate: tell a host-side tracee creator (the
+ * supervisor's --exec handler) whether a new process would be refused
+ * right now.
+ *
+ * Tracees spawned via --supervise/--exec are forked by the proot
+ * process itself and therefore never pass through the guest-side
+ * fork/clone/vfork interception (R3 gap in the original --proc-limit
+ * design).  This helper lets the supervisor apply the SAME cap at
+ * creation time: when a proc-limit is active (> 0) and the number of
+ * live tracees of this proot instance already reaches it, the caller
+ * must refuse to spawn (EAGAIN) instead of forking.
+ *
+ * Reads resource_config_proc_limit() directly (not the extension's
+ * config): the config in cli/proot.c is the single source of truth and
+ * is always populated when --proc-limit was parsed, even if the
+ * extension failed to initialize.  When no limit was set it returns
+ * false immediately, so the normal unlimited --exec flow is preserved
+ * with zero overhead.
+ *
+ * @return true when a new process would be refused (limit active and
+ * reached), false otherwise.
+ */
+bool rlimit_proc_limit_reached(void)
+{
+	int limit = resource_config_proc_limit();
+
+	/* No --proc-limit requested: the gate never applies.  */
+	if (limit <= 0)
+		return false;
+
+	/* The count helper takes the limit for its early exit: it stops
+	 * walking the tracees list as soon as @limit live tracees are
+	 * found, so this is O(limit), not O(N).  */
+	return rlimit_count_live_tracees(limit) >= limit;
 }

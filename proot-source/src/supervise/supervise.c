@@ -45,6 +45,7 @@
 #include "tracee/mem.h"
 #include "path/binding.h"
 #include "extension/extension.h"
+#include "extension/resource_limit/resource_limit.h"
 
 /* ===========================================================================
  * Internal state
@@ -279,6 +280,44 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	}
 
 	VERBOSE(root_tracee, 2, "supervise: exec request: %s", argv_ptrs[0]);
+
+	/* --proc-limit gate (R3): tracees spawned via --exec are forked
+	 * here by the proot process itself, so they never pass through
+	 * the guest-side fork/clone/vfork interception that enforces
+	 * --proc-limit.  Apply the same cap host-side at creation time:
+	 * when the sandbox already has proc_limit live tracees, refuse
+	 * to spawn and answer the client with a clear rejection
+	 * (EAGAIN, "Resource temporarily unavailable") instead of
+	 * creating a runaway tracee.  Zero overhead when no --proc-limit
+	 * is active: rlimit_proc_limit_reached() returns false.  */
+	if (rlimit_proc_limit_reached()) {
+		ExecResponse resp;
+		ssize_t w;
+		int j;
+
+		VERBOSE(root_tracee, 1,
+			"supervise: exec refused (EAGAIN): --proc-limit reached, "
+			"not spawning a new tracee");
+
+		/* Answer the client with the rejection before closing.  */
+		memset(&resp, 0, sizeof(resp));
+		resp.rejected = true;
+		resp.reject_errno = EAGAIN;
+		w = write(client_fd, &resp, sizeof(resp));
+		if (w != (ssize_t)sizeof(resp))
+			VERBOSE(root_tracee, 1,
+				"supervise: failed to send rejection to client on fd=%d: %s",
+				client_fd, strerror(errno));
+		close(client_fd);
+
+		/* Release the SCM_RIGHTS fds received from the client (the
+		 * child would have dup2'd and closed them).  */
+		for (j = 0; j < EXEC_FD_MAX; j++) {
+			if (client_fds[j] >= 0)
+				close(client_fds[j]);
+		}
+		return;
+	}
 
 	/* Fork a new tracee */
 	pid = fork();
@@ -603,6 +642,16 @@ int exec_connect(pid_t target_pid, int argc, char *const argv[])
 
 	if (n != sizeof(resp)) {
 		errno = EIO;
+		return -1;
+	}
+
+	/* The supervisor refused to spawn the tracee (--proc-limit
+	 * reached): report the natural error to the caller.  */
+	if (resp.rejected) {
+		int rerrno = (resp.reject_errno != 0) ? resp.reject_errno : EAGAIN;
+		fprintf(stderr, "supervise: exec rejected by supervisor: %s\n",
+			strerror(rerrno));
+		errno = rerrno;
 		return -1;
 	}
 

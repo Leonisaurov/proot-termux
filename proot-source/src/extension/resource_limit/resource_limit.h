@@ -44,4 +44,25 @@ extern int rlimit_callback(Extension *extension, ExtensionEvent event,
  */
 extern int rlimit_configure(Tracee *tracee);
 
+/**
+ * Return true when the sandbox's process cap (--proc-limit N) would
+ * refuse a new process right now, i.e. when a proc-limit is active
+ * (> 0) and the number of live tracees of this proot instance already
+ * reaches the limit.
+ *
+ * This is the host-side counterpart of the guest-side fork(2)/clone(2)/
+ * vfork(2) interception: tracees created by the supervisor
+ * (--supervise/--exec) are forked by the proot process itself and
+ * never go through the guest-side gate, so host-side tracee creators
+ * (supervise_accept_client()) use this to enforce the same cap.
+ * Returns false when no --proc-limit was set (or the extension was
+ * never configured), so the normal unlimited behavior is preserved
+ * with zero overhead.
+ *
+ * NOTE: reads resource_config_proc_limit() directly, so the gate works
+ * even if the extension failed to initialize — the config is the
+ * single source of truth for the requested limit.
+ */
+extern bool rlimit_proc_limit_reached(void);
+
 #endif /* RESOURCE_LIMIT_H */

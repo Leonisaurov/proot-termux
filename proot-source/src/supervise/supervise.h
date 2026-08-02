@@ -47,6 +47,15 @@ typedef struct {
 	int    exit_status;  /* WEXITSTATUS or 128+signal */
 	bool   signaled;     /* true if killed by signal */
 	int    termsig;      /* signal number if signaled */
+
+	/* Rejection (--proc-limit gate): set when the supervisor refused
+	 * to spawn the tracee at all, without executing the command.
+	 * When true, exit_status/signaled/termsig are meaningless and
+	 * reject_errno holds the errno-style reason (EAGAIN when the
+	 * sandbox's process cap was reached).  Both sides are always the
+	 * same proot binary, so the wire protocol stays in sync.  */
+	bool   rejected;
+	int    reject_errno; /* errno-style code, e.g. EAGAIN */
 } ExecResponse;
 
 /* ===========================================================================
