@@ -1,0 +1,348 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# termux-isolated — Termux REAL dentro de proot con aislamiento (sandbox).
+# Patrón de alpine_rootfs: args en variable, un flag por línea, binds estáticos.
+
+# Paths del host (definidos ANTES de exportar PREFIX=/usr dentro del sandbox)
+TERMUX_PREFIX=/data/data/com.termux/files/usr
+TERMUX_ROOT=/data/data/com.termux/files
+
+# Ayuda
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    cat >&2 <<'EOF'
+uso: termux-isolated [opciones] [comando...]
+
+  sin argumentos   shell interactivo (bash -l) aislado
+  --with-sys       bind /sys:/sys (opcional)
+  --with-storage   bind /storage:/storage (opcional; sin él, ~/storage queda oculto)
+  --as-root        --change-id=0:0 (simula root)
+  --rw-dir <path>  Solo <path> es escribible; el resto del sandbox es de solo lectura (apt/pkg no funcionan en este modo)
+  --termux-paths  Usa los paths reales de Termux (/data/data/com.termux/files/...) en vez de la jerarquía Linux (/usr, /home); misma seguridad extra
+  --as <nombre>    Muestra <nombre> en whoami/id (estético; el uid real no cambia). Excluyente con --as-root.
+
+Ejemplos:
+  termux-isolated
+  termux-isolated curl -s https://example.com
+  termux-isolated --as-root apt update
+EOF
+    exit 0
+fi
+
+# Separa las opciones del wrapper del comando a ejecutar
+cmd=""
+extra=""
+RW_DIR=""
+TERMUX_PATHS=0
+AS_USER=""
+AS_ROOT=0
+WITH_STORAGE=0
+arg_count=0
+while [ "$#" -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+        --with-sys)     extra="$extra --bind=/sys:/sys"; shift ;;
+        --with-storage) WITH_STORAGE=1; extra="$extra --bind=/storage:/storage"; shift ;;
+        --as-root)      AS_ROOT=1; extra="$extra --change-id=0:0"; shift ;;
+        --termux-paths) TERMUX_PATHS=1; shift ;;
+        --as=*)
+            AS_USER="${arg#--as=}"
+            shift ;;
+        --as)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "error: --as requiere un nombre (ej. --as pepe)" >&2
+                exit 1
+            fi
+            AS_USER="$1"
+            shift
+            ;;
+        --rw-dir)
+            # Consume UN argumento extra: el path GUEST del dir escribible
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "error: --rw-dir requiere un path (ej. --rw-dir /tmp)" >&2
+                exit 1
+            fi
+            RW_DIR="$1"
+            shift
+            ;;
+        *)
+            # 1 argumento no-opción: el usuario ya citó el script completo (literal).
+            # 2+ argumentos: cita cada token con %q para preservar el quoting.
+            if [ "$arg_count" -eq 0 ]; then
+                cmd="$arg"
+            else
+                cmd+=" $(printf '%q' "$arg")"
+            fi
+            arg_count=$((arg_count + 1))
+            shift
+            ;;
+    esac
+done
+cmd="${cmd# }"
+
+# --as <nombre>: estético (whoami/id muestran <nombre>). Bind de un
+# /etc/passwd personalizado (reemplaza la línea del uid real del usuario) +
+# env USER/LOGNAME. OJO: en Android/bionic getpwuid() NO lee /etc/passwd
+# (genera u0_aXXX programáticamente) — el bind se aplica igual (visible en
+# cat /etc/passwd) pero whoami/id reales pueden seguir mostrando el nombre
+# del sistema; USER/LOGNAME sí funcionan.
+if [ -n "$AS_USER" ]; then
+    case "$AS_USER" in
+        *[!a-zA-Z0-9_-]*)
+            echo "error: --as solo admite caracteres alfanuméricos, _ y -" >&2
+            exit 1 ;;
+    esac
+    if [ "$AS_ROOT" = "1" ]; then
+        echo "error: --as y --as-root son mutuamente excluyentes" >&2
+        exit 1
+    fi
+    AS_UID=$(id -u)
+    AS_GID=$(id -g)
+    AS_PASSWD="$TMPDIR/ti-passwd-$AS_USER"
+    AS_ENTRY="$AS_USER:x:$AS_UID:$AS_GID:Termux User:/data/data/com.termux/files/home:/data/data/com.termux/files/usr/bin/bash"
+    if [ -f "$PREFIX/etc/passwd" ] && cp "$PREFIX/etc/passwd" "$AS_PASSWD" 2>/dev/null; then
+        if grep -q "^[^:]*:[^:]*:$AS_UID:" "$AS_PASSWD"; then
+            # Reemplaza la línea con el uid real (no rompe otras entradas)
+            sed -i "s|^[^:]*:[^:]*:$AS_UID:.*|$AS_ENTRY|" "$AS_PASSWD"
+        else
+            echo "$AS_ENTRY" >> "$AS_PASSWD"
+        fi
+    else
+        echo "$AS_ENTRY" > "$AS_PASSWD"
+    fi
+    passwd_bind="--bind=$AS_PASSWD:/etc/passwd"
+    as_env="USER=$AS_USER LOGNAME=$AS_USER"
+
+    # Shims whoami/id: bionic genera u0_aXXX sin consultar /etc/passwd, así
+    # que para que whoami/id muestren <AS_USER> se antepone un dir de shims
+    # al PATH del sandbox. El id real se invoca por ruta absoluta GUEST y su
+    # salida se reescribe (el nombre real del uid -> <AS_USER>). El dir se
+    # crea bajo $PREFIX/tmp: en jerárquico es el guest /tmp (bind /tmp:/tmp),
+    # en termux-paths el guest $PREFIX/tmp (bind directo usr).
+    AS_UID_NAME=$(id -un)
+    if [ "$TERMUX_PATHS" = "1" ]; then
+        shim_bash="$TERMUX_PREFIX/bin/bash"
+        real_id="$TERMUX_PREFIX/bin/id"
+        shim_path="$TERMUX_PREFIX/tmp/ti-bin-$AS_USER"
+    else
+        shim_bash="/usr/bin/bash"
+        real_id="/usr/bin/id"
+        shim_path="/tmp/ti-bin-$AS_USER"
+    fi
+    mkdir -p "$PREFIX/tmp/ti-bin-$AS_USER"
+    cat > "$PREFIX/tmp/ti-bin-$AS_USER/whoami" <<EOF
+#$shim_bash
+echo $AS_USER
+EOF
+    cat > "$PREFIX/tmp/ti-bin-$AS_USER/id" <<EOF
+#$shim_bash
+exec $real_id "\$@" | sed 's/$AS_UID_NAME/$AS_USER/g'
+EOF
+    chmod +x "$PREFIX/tmp/ti-bin-$AS_USER/whoami" "$PREFIX/tmp/ti-bin-$AS_USER/id"
+else
+    passwd_bind=""
+    as_env=""
+fi
+
+# Oculta ~/storage si NO se pidió --with-storage: el host $HOME contiene el
+# dir ~/storage (creado por termux-setup-storage) con symlinks internos a
+# /storage/emulated/0 (shared, downloads, dcim, ...). Como $HOME queda
+# bindeado/visible en el sandbox, esos symlinks se filtran al guest y
+# exponen el storage real del host. Se tapa el path guest con un bind de un
+# dir vacío (los binds de proot tienen prioridad sobre el host).
+storage_hide_bind=""
+if [ "$WITH_STORAGE" = "0" ] && { [ -L "$TERMUX_ROOT/home/storage" ] || [ -d "$TERMUX_ROOT/home/storage" ]; }; then
+    mkdir -p "$TERMUX_PREFIX/tmp/ti-empty-storage"
+    if [ "$TERMUX_PATHS" = "1" ]; then
+        storage_hide_bind="--bind=$TERMUX_PREFIX/tmp/ti-empty-storage:$TERMUX_ROOT/home/storage"
+    else
+        storage_hide_bind="--bind=$TERMUX_PREFIX/tmp/ti-empty-storage:/home/storage"
+    fi
+fi
+
+# Sin comando -> shell interactivo de login; con comando -> --cwd= traducido
+# host->guest (proot interpreta el cwd como path GUEST: un cwd absoluto del
+# host genera el warning "can't chdir(...) in the guest rootfs" y cae a "/").
+if [ -z "$cmd" ]; then
+    if [ "$TERMUX_PATHS" = "1" ]; then
+        # En termux-paths el cwd host real ya es un path guest válido
+        cwd_arg="--cwd=$TERMUX_ROOT/home"
+        cmd="exec $TERMUX_PREFIX/bin/bash -l"
+    else
+        cwd_arg="--cwd=/home"
+        cmd="exec bash -l"
+    fi
+    echo "[sandbox] Termux aislado — shell interactivo (--help para opciones)" >&2
+else
+    if [ "$TERMUX_PATHS" = "1" ]; then
+        # termux-paths: el cwd del host es un path guest válido (binds
+        # directos host==guest) -> --cwd=. sin traducción jerárquica.
+        cwd_arg="--cwd=."
+    elif [ "$PWD" = "$TERMUX_ROOT" ]; then
+        cwd_arg="--cwd=/"
+    elif [ "${PWD#$TERMUX_ROOT/}" != "$PWD" ]; then
+        cwd_arg="--cwd=/${PWD#$TERMUX_ROOT/}"
+    else
+        cwd_arg="--cwd=/home"
+    fi
+    echo "[sandbox] Termux aislado — /data y /storage ocultos, procesos host invisibles" >&2
+fi
+
+# Modo estricto (--rw-dir): traduce el path del dir RW a su par host/guest.
+# Acepta dos formas: un path HOST (empieza con $TERMUX_ROOT, ej. $(pwd)) o
+# un path GUEST absoluto (empieza con /, ej. /tmp, /home/x). Para un path
+# host, el guest path se deriva eliminando el prefijo $TERMUX_ROOT/ (el guest
+# ve /home/... no /data/data/com.termux/files/home/...). El check de abajo
+# rechaza RW_DIR = "/" o = $TERMUX_ROOT exacto, así que el case host nunca
+# produce un guest path vacío.
+if [ -n "$RW_DIR" ]; then
+    if [ "$RW_DIR" = "/" ] || [ "$RW_DIR" = "$TERMUX_ROOT" ]; then
+        echo "error: --rw-dir no puede ser / (el sandbox completo no puede ser RW)" >&2
+        exit 1
+    fi
+    if [ "$TERMUX_PATHS" = "1" ]; then
+        # En termux-paths host==guest: el path real ya ES el guest path
+        # (binds directos), no hay jerarquía que traducir.
+        HOST_RW_DIR="$RW_DIR"
+        GUEST_RW_DIR="$RW_DIR"
+    else
+        case "$RW_DIR" in
+            "$TERMUX_ROOT"|"$TERMUX_ROOT"/*)
+                # Path HOST: usar tal cual, traducido a guest para el bind
+                HOST_RW_DIR="$RW_DIR"
+                GUEST_RW_DIR="/${RW_DIR#$TERMUX_ROOT/}" ;;
+            /*)
+                # Path GUEST absoluto: mapea a su host bajo el rootfs
+                HOST_RW_DIR="$TERMUX_ROOT$RW_DIR"
+                GUEST_RW_DIR="$RW_DIR" ;;
+            *)
+                echo "error: --rw-dir requiere un path absoluto guest, ej. /tmp" >&2
+                exit 1 ;;
+        esac
+    fi
+    if [ ! -d "$HOST_RW_DIR" ]; then
+        echo "[sandbox] creando dir RW: $HOST_RW_DIR" >&2
+        mkdir -p "$HOST_RW_DIR" 2>/dev/null || {
+            echo "error: no se pudo crear $HOST_RW_DIR" >&2
+            exit 1
+        }
+    fi
+fi
+
+# Binds del runtime de Termux: RW en modo normal; :ro en modo estricto.
+# El rootfs host ($TERMUX_ROOT) NO tiene /bin /etc /lib /tmp /var /share a
+# nivel raíz (solo apps/ data/ home/ usr/): esos dirs vienen ÚNICAMENTE de
+# estos binds, por eso NO se omiten en modo estricto (se congelan con :ro).
+if [ "$TERMUX_PATHS" = "1" ]; then
+    # Modo termux-paths: binds DIRECTOS host==guest (los paths se ven como en
+    # Termux real). Sin rootfs: el resto del host Android queda inaccesible
+    # por permisos (u0_a379 no puede enumerar / del host). En modo estricto
+    # usr y home se congelan :ro y no hay bind "/" ro (sin rootfs).
+    if [ -n "$RW_DIR" ]; then
+        runtime_binds="\
+  --bind=$TERMUX_PREFIX:$TERMUX_PREFIX:ro \
+  --bind=$TERMUX_ROOT/home:$TERMUX_ROOT/home:ro"
+        strict_binds="\
+  --bind=$HOST_RW_DIR:$GUEST_RW_DIR:rw"
+    else
+        runtime_binds="\
+  --bind=$TERMUX_PREFIX:$TERMUX_PREFIX \
+  --bind=$TERMUX_ROOT/home:$TERMUX_ROOT/home"
+        strict_binds=""
+    fi
+elif [ -n "$RW_DIR" ]; then
+    runtime_binds="\
+  --bind=$TERMUX_PREFIX:/usr:ro \
+  --bind=$TERMUX_PREFIX/bin:/bin:ro \
+  --bind=$TERMUX_PREFIX/etc:/etc:ro \
+  --bind=$TERMUX_PREFIX/lib:/lib:ro \
+  --bind=$TERMUX_PREFIX/share:/share:ro \
+  --bind=$TERMUX_PREFIX/tmp:/tmp:ro \
+  --bind=$TERMUX_PREFIX/var:/var:ro"
+    # RO global del rootfs (congela home, apps, data...) + único dir RW.
+    # El bind RW va DESPUÉS del runtime :ro: para un guest path idéntico
+    # proot mantiene el ÚLTIMO bind ("only the last binding is active").
+    strict_binds="\
+  --bind=$TERMUX_ROOT:/:ro \
+  --bind=$HOST_RW_DIR:$GUEST_RW_DIR:rw"
+else
+    runtime_binds="\
+  --bind=$TERMUX_PREFIX:/usr \
+  --bind=$TERMUX_PREFIX/bin:/bin \
+  --bind=$TERMUX_PREFIX/etc:/etc \
+  --bind=$TERMUX_PREFIX/lib:/lib \
+  --bind=$TERMUX_PREFIX/share:/share \
+  --bind=$TERMUX_PREFIX/tmp:/tmp \
+  --bind=$TERMUX_PREFIX/var:/var"
+    strict_binds=""
+fi
+
+# Variables según el modo: env del sandbox, rootfs y bash inicial
+if [ "$TERMUX_PATHS" = "1" ]; then
+    sandbox_home="$TERMUX_ROOT/home"
+    sandbox_prefix="$TERMUX_PREFIX"
+    sandbox_path="$TERMUX_PREFIX/bin"
+    sandbox_tmpdir="$TERMUX_PREFIX/tmp"
+    sandbox_ld="$TERMUX_PREFIX/lib"
+    sandbox_ssl="$TERMUX_PREFIX/etc/tls/cert.pem"
+    sandbox_git_exec="$TERMUX_PREFIX/libexec/git-core"
+    rootfs_arg=""
+    guest_bash="$TERMUX_PREFIX/bin/bash"
+else
+    sandbox_home="/home"
+    sandbox_prefix="/usr"
+    sandbox_path="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"
+    sandbox_tmpdir="/tmp"
+    sandbox_ld="/usr/lib"
+    sandbox_ssl="/etc/tls/cert.pem"
+    sandbox_git_exec="/usr/libexec/git-core"
+    rootfs_arg="--rootfs=$TERMUX_ROOT"
+    guest_bash="/bin/bash"
+fi
+
+# Antepone los shims --as al PATH del sandbox (bionic no lee /etc/passwd)
+if [ -n "$AS_USER" ]; then
+    sandbox_path="$shim_path:$sandbox_path"
+fi
+
+# Ejecuta proot con aislamiento (9 flags) y binds del runtime de Termux
+exec env \
+  -i \
+  HOME=$sandbox_home \
+  PREFIX=$sandbox_prefix \
+  PATH=$sandbox_path \
+  TERM=${TERM:-xterm-256color} \
+  LANG=${LANG:-en_US.UTF-8} \
+  COLORTERM=${COLORTERM:-truecolor} \
+  TMPDIR=$sandbox_tmpdir \
+  LD_LIBRARY_PATH=$sandbox_ld \
+  SSL_CERT_FILE=$sandbox_ssl \
+  GIT_SSL_CAINFO=$sandbox_ssl \
+  GIT_EXEC_PATH=$sandbox_git_exec \
+  $as_env \
+  "$TERMUX_PREFIX/bin/proot" \
+  --kill-on-exit \
+  -L \
+  --proc-isolated \
+  --ptrace-isolated \
+  --bpf-isolated \
+  --perf-isolated \
+  --handle-isolated \
+  --reboot-isolated \
+  --swap-isolated \
+  --kexec-isolated \
+  --ioport-isolated \
+  $rootfs_arg \
+  $cwd_arg \
+  --bind=/system:/system:ro \
+  --bind=/vendor:/vendor:ro \
+  --bind=/apex:/apex:ro \
+  --bind=/linkerconfig/ld.config.txt:/linkerconfig/ld.config.txt:ro \
+  $runtime_binds \
+  $strict_binds \
+  $passwd_bind \
+  $storage_hide_bind \
+  --bind=/dev:/dev \
+  --bind=/proc:/proc \
+  $extra \
+  $guest_bash -c "$cmd"

@@ -1,0 +1,462 @@
+#!/usr/bin/env bash
+# appimage-run — Ejecutar AppImages en Termux sin FUSE (fork de proot, Modo C).
+#
+# Detecta las dependencias de sistema que la AppImage NO bundlea (GTK, Qt, X11...),
+# pide/provisiona un rootfs que las provea (proot-distro) y ejecuta el payload
+# con proot + env -i + binds (sin --rootfs). Sin FUSE: extracción 100% userspace
+# con squashfs-tools-ng (tail -c +offset + sqfs2tar + tar).
+#
+# Uso: appimage-run [OPCIONES] <app.AppImage> [-- args...]
+#   --extract-only           extrae e informa (deps) sin ejecutar
+#   --list-deps              lista dependencias clasificadas y sale
+#   --libs-rootfs DIR        usar DIR como fuente de librerías (rootfs glibc)
+#   --rootfs DIR             Modo A: proot --rootfs=DIR (rootfs completo)
+#   --yes                    provisionar automáticamente (proot-distro install + pkg)
+#   --provision-distro NAME  distro a instalar si falta (default: archlinux)
+#   --display :N             display X (default: :0 si hay socket termux-x11)
+#   --no-softgl              no exportar LIBGL_ALWAYS_SOFTWARE=1
+#   --gpu                    usar GPU real: GALLIUM_DRIVER=virpipe (virgl→ANGLE→Vulkan)
+#                            requiere server virgl corriendo + guest con virgl en mesa
+#   --gl-version N.N         forzar MESA_GL_VERSION_OVERRIDE (p.ej. --gl-version 4.3)
+#   --entry PATH             entrypoint dentro del AppDir (default: AppRun)
+#   -h | --help              ayuda
+#
+# Dependencias Termux: proot (fork), squashfs-tools-ng, binutils (readelf), python3.
+
+set -euo pipefail
+trap 'rm -f "$CACHE_DIR/payload-$$.sqfs" 2>/dev/null; rm -rf "$CACHE_DIR/rt-$$" 2>/dev/null' EXIT
+
+TERMUX_PREFIX=/data/data/com.termux/files/usr
+PD_CONTAINERS="$TERMUX_PREFIX/var/lib/proot-distro/containers"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/appimage-run"
+PROOT="$TERMUX_PREFIX/bin/proot"
+PROOT_DISTRO="$TERMUX_PREFIX/bin/proot-distro"
+
+# ---------------------------------------------------------------- helpers
+log()  { echo "[appimage-run] $*" >&2; }
+warn() { echo "[appimage-run] AVISO: $*" >&2; }
+die()  { echo "[appimage-run] ERROR: $*" >&2; exit 1; }
+
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+# ---------------------------------------------------------------- args
+EXTRACT_ONLY=0; LIST_DEPS=0; YES=0; SOFTGL=1; DISPLAY_N=""; GL_VER=""; GL_GPU=0
+LIBS_ROOTFS=""; ROOTFS_MODE=""; PROV_DISTRO="archlinux"; ENTRY=""
+APPIMAGE_FILE=""; APP_ARGS=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --extract-only)   EXTRACT_ONLY=1; shift ;;
+        --list-deps)      LIST_DEPS=1; shift ;;
+        --libs-rootfs)    LIBS_ROOTFS="${2:?--libs-rootfs DIR}"; shift 2 ;;
+        --rootfs)         ROOTFS_MODE="${2:?--rootfs DIR}"; shift 2 ;;
+        --yes)            YES=1; shift ;;
+        --provision-distro) PROV_DISTRO="${2:?--provision-distro NAME}"; shift 2 ;;
+        --display)        DISPLAY_N="${2:?--display :N}"; shift 2 ;;
+        --no-softgl)      SOFTGL=0; shift ;;
+        --gpu)            GL_GPU=1; shift ;;
+        --gl-version)     GL_VER="${2:?--gl-version N.N}"; shift 2 ;;
+        --entry)          ENTRY="${2:?--entry PATH}"; shift 2 ;;
+        -h|--help)        usage 0 ;;
+        --)               shift; APP_ARGS=("$@"); break ;;
+        -*)               if [ -n "$APPIMAGE_FILE" ]; then APP_ARGS+=("$1"); shift; else die "opción desconocida: $1 (usa -h)"; fi ;;
+        *)                [ -z "$APPIMAGE_FILE" ] && APPIMAGE_FILE="$1" || APP_ARGS+=("$1"); shift ;;
+    esac
+done
+
+[ -n "$APPIMAGE_FILE" ] || die "falta el archivo AppImage (usa -h)"
+[ -f "$APPIMAGE_FILE" ] || die "no existe: $APPIMAGE_FILE"
+APPIMAGE_FILE="$(readlink -f "$APPIMAGE_FILE")"
+
+for cmd in "$PROOT" sqfs2tar readelf python3; do
+    command -v "$cmd" >/dev/null 2>&1 || die "falta '$cmd' (instala: pkg install proot squashfs-tools-ng binutils python)"
+done
+
+mkdir -p "$CACHE_DIR/shm"
+
+# ---------------------------------------------------------------- 1. offset (parseo ELF, sin ejecutar)
+OFFSET=$(python3 - "$APPIMAGE_FILE" <<'EOF'
+import struct, sys
+h = open(sys.argv[1], 'rb').read(0x40)
+if h[:4] != b'\x7fELF':
+    sys.exit('no es un ELF (AppImage inválida)')
+e_shoff  = struct.unpack('<Q', h[0x28:0x30])[0]
+e_shents = struct.unpack('<H', h[0x3a:0x3c])[0]
+e_shnum  = struct.unpack('<H', h[0x3c:0x3e])[0]
+print(e_shoff + e_shents * e_shnum)
+EOF
+) || die "$OFFSET"
+
+# sanity: magic del payload en el offset (squashfs 'hsqs' o DwarFS 'DWARFS')
+MAGIC=$(tail -c +$((OFFSET+1)) "$APPIMAGE_FILE" 2>/dev/null | head -c 8 || true)
+case "$MAGIC" in
+    hsqs*|DWARFS*) ;;
+    *) warn "formato de payload inusual (magic ${MAGIC:-?}) en offset $OFFSET — sigo igual" ;;
+esac
+
+# ---------------------------------------------------------------- 2. extraer a cache (content-addressed, reutilizable)
+MD5=$(md5sum "$APPIMAGE_FILE" | cut -d' ' -f1)
+EXTRACT="$CACHE_DIR/extracted-$MD5"
+if [ ! -x "$EXTRACT/AppRun" ]; then
+    log "extrayendo payload ($(du -h "$APPIMAGE_FILE" | cut -f1))…"
+    rm -rf "$EXTRACT"; mkdir -p "$EXTRACT"
+    # magic del payload en el offset (squashfs 'hsqs' vs DwarFS 'DWARFS' vs otro)
+    MAGIC=$(tail -c +$((OFFSET+1)) "$APPIMAGE_FILE" 2>/dev/null | head -c 8 || true)
+    case "$MAGIC" in
+        hsqs*)
+            tail -c +$((OFFSET+1)) "$APPIMAGE_FILE" > "$CACHE_DIR/payload-$$.sqfs"
+            sqfs2tar "$CACHE_DIR/payload-$$.sqfs" | tar -xf - -C "$EXTRACT" \
+                || die "falló la extracción squashfs (¿payload corrupto?)"
+            rm -f "$CACHE_DIR/payload-$$.sqfs"
+            ;;
+        *)
+            # DwarFS u otro formato: el runtime embebido lleva su propio extractor.
+            # aarch64 → nativo; x86_64 → qemu-x86_64 (runtime estático, sin sysroot).
+            log "payload no-SquashFS (magic ${MAGIC:-?}) → extracción vía runtime"
+            TMPD="$CACHE_DIR/rt-$$"; mkdir -p "$TMPD"
+            # el runtime se re-ejecuta (execveat/memfd) y Android lo mata con SIGSYS
+            # desnudo → correrlo bajo el fork de proot (intercepta el execveat)
+            ( cd "$TMPD" && if file -b "$APPIMAGE_FILE" | grep -q aarch64; then
+                    env -i HOME=/root PATH=/usr/bin:/bin \
+                        "$PROOT" --bind=/proc --bind=/dev \
+                        "$APPIMAGE_FILE" --appimage-extract
+                elif command -v qemu-x86_64 >/dev/null 2>&1; then
+                    qemu-x86_64 "$APPIMAGE_FILE" --appimage-extract
+                else
+                    echo "runtime de otra arquitectura y sin qemu disponible" >&2; exit 1
+                fi ) || true   # el extractor puede abortar en un archivo (p.ej. sharun)
+            if [ -x "$TMPD/squashfs-root/AppRun" ]; then
+                warn "extracción vía runtime incompleta pero usable (AppRun presente)"
+                cp -a "$TMPD"/squashfs-root/. "$EXTRACT/"
+            else
+                rm -rf "$TMPD"
+                die "falló la extracción vía runtime (formato no soportado)"
+            fi
+            rm -rf "$TMPD"
+            ;;
+    esac
+fi
+log "payload extraído en: $EXTRACT"
+
+# ---------------------------------------------------------------- 3. entrypoint real (ELF)
+MAIN=""
+if [ -n "$ENTRY" ]; then
+    MAIN="$EXTRACT/$ENTRY"
+else
+    # AppRun: si es ELF, es el main; si es script, resolvemos el binario que exec
+    if [ -f "$EXTRACT/AppRun" ]; then
+        if file "$EXTRACT/AppRun" | grep -q ELF; then
+            MAIN="$EXTRACT/AppRun"
+        else
+            # estilo anylinux/pkgforge: MAIN_BIN=nombre
+            BIN=$(grep -oE '^MAIN_BIN=[A-Za-z0-9_.-]+' "$EXTRACT/AppRun" | head -1 | cut -d= -f2 || true)
+            # estilos clásicos: exec "${CURRENTDIR}/zen" o exec dir/nombre
+            [ -z "$BIN" ] && BIN=$(grep -oE 'exec[[:space:]]+"?\$\{[A-Za-z_]+}/[^"[:space:]]+' "$EXTRACT/AppRun" | head -1 | sed -E 's/.*\/([^\/]+)("|$)/\1/' || true)
+            [ -z "$BIN" ] && BIN=$(grep -oE 'exec[[:space:]]+[^"[:space:]]+/[^"[:space:]]+' "$EXTRACT/AppRun" | head -1 | sed -E 's/.*\/([^\/]+)$/\1/' || true)
+            for cand in "$EXTRACT/$BIN" "$EXTRACT/bin/$BIN" "$EXTRACT/usr/bin/$BIN"; do
+                [ -n "$BIN" ] && [ -f "$cand" ] && file "$cand" | grep -q ELF && { MAIN="$cand"; break; }
+            done
+        fi
+    fi
+    # fallback: el ELF ejecutable MÁS GRANDE (el binario real de la app suele ser el mayor)
+    if [ -z "$MAIN" ]; then
+        MAIN=$(find "$EXTRACT" -maxdepth 2 -type f -executable -size +1M -exec sh -c 'file "$1" | grep -q ELF' _ {} \; -print 2>/dev/null | head -1 || true)
+        [ -z "$MAIN" ] && MAIN=$(find "$EXTRACT" -maxdepth 2 -type f -executable -exec sh -c 'file "$1" | grep -q ELF' _ {} \; -print 2>/dev/null | head -1 || true)
+    fi
+fi
+[ -n "$MAIN" ] && [ -f "$MAIN" ] || die "no encuentro el binario principal en el AppDir (usa --entry)"
+MAIN_REL="${MAIN#$EXTRACT/}"
+log "entrypoint: $MAIN_REL"
+
+# ¿binario estático? (sin NEEDED ni intérprete) → puede correr sin rootfs glibc
+IS_STATIC=0
+if ! readelf -l "$MAIN" 2>/dev/null | grep -q INTERP; then IS_STATIC=1; fi
+IS_SCRIPT=0
+[ "$(head -c 2 "$EXTRACT/${ENTRY:-AppRun}" 2>/dev/null)" = "#!" ] && IS_SCRIPT=1
+
+# ---------------------------------------------------------------- 4. dependencias (main + libs del AppDir)
+# libs glibc-core que SIEMPRE provienen del rootfs (las AppImages nunca las bundlean)
+GLIBC_CORE="libc.so.6 ld-linux-aarch64.so.1 libm.so.6 libpthread.so.0 libdl.so.2 librt.so.1 libstdc++.so.6 libgcc_s.so.1 libresolv.so.2 libutil.so.1 libcrypt.so.1"
+
+# índice de libs bundleadas en el AppDir (basename → 1) — rápido, sin find por lib
+declare -A BUNDLED_SET
+while IFS= read -r f; do BUNDLED_SET["$(basename "$f")"]=1; done \
+  < <(find "$EXTRACT" -maxdepth 2 -type f \( -name '*.so' -o -name '*.so.*' \) 2>/dev/null | head -300 || true)
+is_bundled() { [ -n "${BUNDLED_SET[$1]:-}" ]; }
+
+sys_add() { # añade a SYSTEM sin duplicados
+    local x
+    for x in "${SYSTEM[@]:-}"; do [ "$x" = "$1" ] && return; done
+    SYSTEM+=("$1")
+}
+
+# binarios a escanear: el main + las libs bundleadas (detecta GTK/Qt/X11 que se
+# cargan por dlopen, p.ej. libmozgtk.so → libgtk-3.so.0 en Firefox/Zen)
+SCAN_FILES=("$MAIN")
+while IFS= read -r f; do SCAN_FILES+=("$f"); done \
+  < <(find "$EXTRACT" -maxdepth 2 -type f \( -name '*.so' -o -name '*.so.*' \) 2>/dev/null | head -300 || true)
+
+BUNDLED=(); SYSTEM=()
+for f in "${SCAN_FILES[@]}"; do
+    for l in $(readelf -d "$f" 2>/dev/null | awk -F'[][]' '/NEEDED/{print $2}'); do
+        case " $GLIBC_CORE " in *" $l "*) continue ;; esac   # glibc: la provee el rootfs
+        # libs GL: las provee el mesa del rootfs (si el AppDir bundlea una
+        # inferior, p.ej. pkgforge 3.3, se oculta en runtime → mesa del sistema 4.6)
+        case "$l" in
+            libGL.so*|libEGL.so*|libGLX.so*|libGLdispatch.so*|libGLESv1_CM.so*|libGLESv2.so*|libGLESv3.so*) continue ;;
+        esac
+        if is_bundled "$l"; then
+            case " ${BUNDLED[*]:-} " in *" $l "*) ;; *) BUNDLED+=("$l") ;; esac
+        else
+            sys_add "$l"
+        fi
+    done
+done
+
+if [ "$LIST_DEPS" = 1 ]; then
+    echo "== dependencias de $MAIN_REL =="
+    echo "-- bundleadas en el AppDir: ${BUNDLED[*]:-(ninguna)}"
+    echo "-- glibc-core (siempre las provee el rootfs): implícitas"
+    echo "-- SISTEMA (faltan en el AppDir, requiere rootfs): ${SYSTEM[*]:-(ninguna)}"
+    exit 0
+fi
+
+# ---------------------------------------------------------------- 5. rootfs fuente de librerías
+pkg_for() { # $1 = libname → pkg (arch / deb)
+    case "$1" in
+        libgtk-3.so.0)        echo "gtk3 / libgtk-3-0" ;;
+        libgtk-4.so.1)        echo "gtk4 / libgtk-4-1" ;;
+        libQt5Core.so.*|libQt5Widgets.so.*|libQt5Gui.so.*) echo "qt5-base / qtbase5-dev" ;;
+        libQt6Core.so.*|libQt6Widgets.so.*|libQt6Gui.so.*) echo "qt6-base / qt6-base-dev" ;;
+        libX11.so.*)          echo "libx11 / libx11-6" ;;
+        libxcb.so.*)          echo "libxcb / libxcb1" ;;
+        libpango-1.0.so.*)    echo "pango / libpango-1.0-0" ;;
+        libcairo.so.*)        echo "cairo / libcairo2" ;;
+        libfontconfig.so.*)   echo "fontconfig / libfontconfig1" ;;
+        libfreetype.so.*)     echo "freetype2 / libfreetype6" ;;
+        libdbus-1.so.*)       echo "dbus / libdbus-1-3" ;;
+        libasound.so.*)       echo "alsa-lib / libasound2" ;;
+        libnss3.so)           echo "nss / libnss3" ;;
+        libnspr4.so)          echo "nspr / libnspr4" ;;
+        libGL.so.*)           echo "mesa / libgl1 libglx-mesa0" ;;
+        libEGL.so.*)          echo "mesa / libegl1" ;;
+        libpulse.so.*)        echo "libpulse / libpulse0" ;;
+        libwayland-client.so.*) echo "wayland / libwayland-client0" ;;
+        libsecret-1.so.*)     echo "libsecret / libsecret-1-0" ;;
+        *) echo "${1%%.so*}" ;;
+    esac
+}
+
+rootfs_has_lib() { # $1=rootfs $2=lib
+    local r="$1" l="$2"
+    for d in "$r/usr/lib/$l" "$r/lib/$l" "$r/lib64/$l" "$r/usr/lib/aarch64-linux-gnu/$l" "$r/lib/aarch64-linux-gnu/$l"; do
+        [ -f "$d" ] && return 0
+    done
+    return 1
+}
+
+LIBROOT=""
+NO_GLIBC=0
+if [ "$IS_STATIC" = 1 ] && [ "$IS_SCRIPT" = 0 ] && [ "${#SYSTEM[@]}" -eq 0 ]; then
+    NO_GLIBC=1
+    log "binario estático + entry directo → sin rootfs (solo proot + binds)"
+elif [ -n "$ROOTFS_MODE" ]; then
+    LIBROOT="$ROOTFS_MODE"   # Modo A: rootfs completo
+elif [ -n "$LIBS_ROOTFS" ]; then
+    LIBROOT="$LIBS_ROOTFS"
+else
+    # buscar entre los contenedores proot-distro existentes (exigiendo glibc)
+    for r in "$PD_CONTAINERS"/*/rootfs; do
+        [ -d "$r" ] || continue
+        rootfs_has_lib "$r" "ld-linux-aarch64.so.1" || continue   # debe ser glibc
+        ok=1
+        for l in "${SYSTEM[@]}"; do rootfs_has_lib "$r" "$l" || { ok=0; break; }; done
+        [ "$ok" = 1 ] && { LIBROOT="$r"; break; }
+    done
+fi
+
+if [ -n "$LIBROOT" ]; then
+    [ -d "$LIBROOT" ] || die "--libs-rootfs no es un directorio: $LIBROOT"
+    missing_in_rootfs=()
+    for l in "${SYSTEM[@]}"; do rootfs_has_lib "$LIBROOT" "$l" || missing_in_rootfs+=("$l"); done
+    rootfs_has_lib "$LIBROOT" "ld-linux-aarch64.so.1" || missing_in_rootfs+=("(falta glibc: ld-linux)")
+    if [ "${#missing_in_rootfs[@]}" -gt 0 ]; then
+        log "el rootfs $LIBROOT NO cubre: ${missing_in_rootfs[*]}"
+        LIBROOT=""
+    fi
+fi
+
+if [ -z "$LIBROOT" ] && [ "${#SYSTEM[@]}" -gt 0 ]; then
+    log "La app necesita librerías de sistema que no están en el AppImage:"
+    for l in "${SYSTEM[@]}"; do log "  • $l   (paquete: $(pkg_for "$l"))"; done
+    log ""
+    log "Provee un rootfs que las contenga. Ejemplos:"
+    log "  # 1) crear el rootfs (si no tienes uno):"
+    log "  proot-distro install $PROV_DISTRO"
+    log "  # 2) instalar las librerías detectadas dentro:"
+    log "  proot-distro login $PROV_DISTRO -- pacman -S --noconfirm --needed $(for l in "${SYSTEM[@]}"; do pkg_for "$l" | sed -E 's# */.*##'; done | tr '\n' ' ')"
+    log "     (Debian/Ubuntu: proot-distro login $PROV_DISTRO -- apt-get install -y $(for l in "${SYSTEM[@]}"; do pkg_for "$l" | sed -E 's#.*/ ##'; done | tr '\n' ' '))"
+    log "  # 3) reintentar, o indicar el rootfs explícitamente:"
+    log "  appimage-run --libs-rootfs /ruta/al/rootfs $APPIMAGE_FILE"
+    log ""
+    if [ "$YES" = 1 ]; then
+        log "--yes: provisionando con proot-distro ($PROV_DISTRO)…"
+        "$PROOT_DISTRO" install "$PROV_DISTRO" || die "falló: proot-distro install $PROV_DISTRO"
+        if echo "$PROV_DISTRO" | grep -qiE 'arch'; then
+            "$PROOT_DISTRO" login "$PROV_DISTRO" -- pacman -S --noconfirm --needed $(for l in "${SYSTEM[@]}"; do pkg_for "$l" | cut -d'/' -f1; done) || die "falló la instalación de paquetes"
+        else
+            "$PROOT_DISTRO" login "$PROV_DISTRO" -- apt-get update && \
+            "$PROOT_DISTRO" login "$PROV_DISTRO" -- apt-get install -y $(for l in "${SYSTEM[@]}"; do pkg_for "$l" | cut -d'/' -f2; done) || die "falló la instalación de paquetes"
+        fi
+        LIBROOT="$PD_CONTAINERS/$PROV_DISTRO/rootfs"
+        log "rootfs provisionado: $LIBROOT"
+    else
+        die "sin rootfs con las librerías (usa --yes para provisionar, o --libs-rootfs)"
+    fi
+fi
+
+[ -n "$LIBROOT" ] || [ "$NO_GLIBC" = 1 ] || die "no hay rootfs con glibc para ejecutar (usa --libs-rootfs o --yes)"
+
+if [ "$EXTRACT_ONLY" = 1 ]; then
+    log "solo extracción (--extract-only): $EXTRACT"
+    log "entrypoint: /opt/app/${ENTRY:-AppRun} | deps sistema: ${SYSTEM[*]:-(ninguna)}"
+    exit 0
+fi
+
+# ---------------------------------------------------------------- 6. ejecutar (Modo C: env -i + binds, sin --rootfs)
+LIBDIR=""
+if [ "$NO_GLIBC" != 1 ]; then
+    LIBDIR="$LIBROOT/usr/lib/aarch64-linux-gnu"; [ -d "$LIBDIR" ] || LIBDIR="$LIBROOT/usr/lib"
+    [ -d "$LIBDIR" ] || die "no encuentro el dir de librerías en $LIBROOT"
+    # El uid del host suele existir en el passwd del guest PERO con shell nologin
+    # (Termux lo inyecta así) → apps que resuelven el shell (Ghostty, util-linux
+    # script) caen a nologin y su shell muere al instante. Fijar un shell válido.
+    HOST_UID=$(id -u); HOST_GID=$(id -g)
+    PASSWD_FILE="$LIBROOT/etc/passwd"
+    if [ -w "$PASSWD_FILE" ]; then
+        if awk -F: -v u="$HOST_UID" '$3==u' "$PASSWD_FILE" | grep -q .; then
+            # ⚠️ en awk, `exit` ejecuta el END (que sobreescribiría el rc) →
+            # usar bandera explícita, nunca exit+END{exit}
+            if awk -F: -v u="$HOST_UID" 'BEGIN{bad=0} $3==u && ($7=="" || $7=="/sbin/nologin" || $7=="/bin/false" || $7=="false"){bad=1} END{exit bad?0:1}' "$PASSWD_FILE"; then
+                awk -F: -v u="$HOST_UID" -v OFS=: \
+                    '$3==u && ($7=="" || $7=="/sbin/nologin" || $7=="/bin/false" || $7=="false"){$7="/bin/bash"} {print}' \
+                    "$PASSWD_FILE" > "$PASSWD_FILE.tmp" && mv "$PASSWD_FILE.tmp" "$PASSWD_FILE"
+                log "passwd: shell del uid $HOST_UID → /bin/bash"
+            fi
+        else
+            echo "appuser:x:$HOST_UID:$HOST_GID::/root:/bin/bash" >> "$PASSWD_FILE"
+            log "passwd: entrada añadida para uid $HOST_UID (shell /bin/bash)"
+        fi
+    fi
+    # Si el rootfs provee mesa (libGL) y el AppDir bundlea uno (pkgforge lo hace
+    # con GL 3.3), ocultar el bundled → la app usa el mesa del rootfs (GL 4.6
+    # llvmpipe sobre termux-x11) — requisito para Ghostty (GL 4.3).
+    if [ -f "$LIBDIR/libGL.so.1" ] && [ -d "$EXTRACT/shared/lib" ] && \
+       { [ -e "$EXTRACT/shared/lib/libGL.so.1" ] || [ -e "$EXTRACT/shared/lib/libGL.so" ]; }; then
+        mkdir -p "$EXTRACT/.gl-disabled"
+        for f in "$EXTRACT"/shared/lib/libGL.so* "$EXTRACT"/shared/lib/libEGL.so* \
+                 "$EXTRACT"/shared/lib/libGLX.so* "$EXTRACT"/shared/lib/libGLdispatch.so* \
+                 "$EXTRACT"/shared/lib/libGLESv1_CM.so* "$EXTRACT"/shared/lib/libGLESv2.so* \
+                 "$EXTRACT"/shared/lib/libGLESv3.so* "$EXTRACT"/shared/lib/dri; do
+            [ -e "$f" ] && mv "$f" "$EXTRACT/.gl-disabled/"
+        done
+        log "mesa bundled ocultado → se usará el mesa del rootfs ($(basename "$(ls "$LIBDIR"/libGL.so.1* 2>/dev/null | head -1)") )"
+    fi
+fi
+
+# detección de toolkit para env vars
+HAS_GTK=0; HAS_QT=0; HAS_GECKO=0; HAS_PULSE=0
+for l in "${SYSTEM[@]}" "${BUNDLED[@]}"; do
+    case "$l" in
+        libgtk-3.so.*|libgtk-4.so.*) HAS_GTK=1 ;;
+        libQt[56]*.so.*)             HAS_QT=1 ;;
+    esac
+done
+for f in libxul.so libmozgtk.so; do [ -f "$EXTRACT/$f" ] && HAS_GECKO=1; done
+
+# display X11: socket termux-x11
+X11_SOCKET="$TERMUX_PREFIX/tmp/.X11-unix"
+if [ -z "$DISPLAY_N" ]; then
+    if [ -S "$X11_SOCKET/X0" ]; then DISPLAY_N=:0
+    else for s in "$X11_SOCKET"/X*; do [ -S "$s" ] && { DISPLAY_N=":${s##*X}"; break; }; done; fi
+fi
+[ -n "$DISPLAY_N" ] && log "display: $DISPLAY_N"
+
+# ¿entrypoint script? (#!/bin/sh) — el /bin/sh bionic de Termux no puede vivir
+# con /lib=glibc → auto Modo A (rootfs completo) para mundos glibc coherentes.
+BINDS=()
+if [ "$NO_GLIBC" = 1 ]; then
+    # binario estático + entry directo: solo proot + binds (sin libs, sin rootfs)
+    BINDS+=(--bind="$EXTRACT:/opt/app")
+    BINDS+=(--bind="$TERMUX_PREFIX/tmp:/tmp")
+    BINDS+=(--bind="$CACHE_DIR/shm:/dev/shm")
+    BINDS+=(--bind=/proc --bind=/dev)
+elif [ -n "$ROOTFS_MODE" ] || [ "$IS_SCRIPT" = 1 ]; then
+    # Modo A: rootfs completo (glibc coherente: sh, readlink, env...)
+    [ -z "$ROOTFS_MODE" ] && log "entrypoint script → auto Modo A (rootfs $LIBROOT)"
+    BINDS+=(--rootfs="$LIBROOT")
+    BINDS+=(--bind="$EXTRACT:/opt/app")
+    BINDS+=(--bind="$TERMUX_PREFIX/tmp:/tmp")
+    BINDS+=(--bind="$CACHE_DIR/shm:/dev/shm")
+    BINDS+=(--bind=/proc --bind=/dev)
+else
+    # Modo C: guest = Termux + libs glibc (sin --rootfs) — para ELF directos
+    BINDS+=(--bind="$LIBDIR:/lib")
+    BINDS+=(--bind="$LIBDIR:/lib64")
+    BINDS+=(--bind="$LIBDIR:/opt/syslibs")
+    BINDS+=(--bind="$EXTRACT:/opt/app")
+    BINDS+=(--bind="$TERMUX_PREFIX/tmp:/tmp")
+    BINDS+=(--bind="$CACHE_DIR/shm:/dev/shm")
+    [ -d "$LIBROOT/etc/fonts" ] && BINDS+=(--bind="$LIBROOT/etc/fonts:/etc/fonts")
+    [ -d "$LIBROOT/usr/share/fonts" ] && BINDS+=(--bind="$LIBROOT/usr/share/fonts:/usr/share/fonts")
+    BINDS+=(--bind=/proc --bind=/dev)
+fi
+
+ENVS=(-i
+  HOME=/root
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  TERM="${TERM:-xterm-256color}"
+  # OJO: el dir del SISTEMA (mesa del rootfs → GL 4.6 llvmpipe) ANTES de las
+  # libs bundleadas del AppDir (el mesa bundled de pkgforge da solo GL 3.3).
+  # Solo así Ghostty (requiere GL 4.3) carga el mesa del rootfs.
+  LD_LIBRARY_PATH=/opt/app:/opt/app/usr/lib:/usr/lib:/opt/syslibs:/opt/app/lib
+  APPIMAGE="$APPIMAGE_FILE"
+  APPDIR=/opt/app
+  ARGV0=/opt/app/AppRun
+)
+[ -n "$DISPLAY_N" ] && ENVS+=(DISPLAY="$DISPLAY_N")
+[ "$HAS_GECKO" = 1 ] && ENVS+=(MOZ_FAKE_NO_SANDBOX=1)
+[ "$HAS_GECKO" = 1 ] && ENVS+=(MOZ_DISABLE_CONTENT_SANDBOX=1)   # sin namespaces bajo proot
+[ "$HAS_GTK" = 1 ] && [ -n "$DISPLAY_N" ] && ENVS+=(GDK_BACKEND=x11)
+[ "$HAS_QT" = 1 ] && [ -n "$DISPLAY_N" ] && ENVS+=(QT_QPA_PLATFORM=xcb)
+[ "$GL_GPU" = 1 ] && ENVS+=(GALLIUM_DRIVER=virpipe MESA_NO_ERROR=1 MESA_BACK_BUFFER=pixmap \
+  MESA_DISK_CACHE_SINGLE_FILE=1 MESA_DISK_CACHE_DIR=/root/.cache/mesa_shader_cache \
+  MESA_DISK_CACHE_MAX_SIZE=67108864) && log "GPU: GALLIUM_DRIVER=virpipe (virgl→ANGLE→Vulkan) + shader cache"
+# LIBGL_ALWAYS_SOFTWARE solo en modo software (--gpu lo desactiva)
+[ "$SOFTGL" = 1 ] && [ "$GL_GPU" != 1 ] && [ -n "$DISPLAY_N" ] && ENVS+=(LIBGL_ALWAYS_SOFTWARE=1)
+[ "$HAS_PULSE" = 1 ] && ENVS+=(PULSE_SERVER=127.0.0.1)
+
+# Reenviar envs GL del invocador (p.ej. `gpu <wrapper>`): MESA_*, LIBGL_* (perfiles
+# de versión) y GALLIUM_DRIVER (virpipe — el guest arch SÍ tiene virgl en
+# libgallium) + VIRGL_*/VTEST_*. Sin esto, `gpu ./appimage-run ...` corría en
+# llvmpipe (env -i borraba virpipe).
+[ -n "$GL_VER" ] && ENVS+=(MESA_GL_VERSION_OVERRIDE="$GL_VER" MESA_GLSL_VERSION_OVERRIDE="${GL_VER/.}0")
+for p in MESA_ LIBGL_ GALLIUM_DRIVER VIRGL_ VTEST_; do
+    while IFS= read -r kv; do ENVS+=("$kv"); done \
+        < <(env | grep -E "^${p}" || true)
+done
+[ -n "$GL_VER" ] && log "GL override: MESA_GL_VERSION_OVERRIDE=$GL_VER (reporta la versión)"
+
+ENTRYPOINT="/opt/app/${ENTRY:-AppRun}"
+[ -x "$EXTRACT/${ENTRY:-AppRun}" ] || ENTRYPOINT="/opt/app/${MAIN_REL}"
+
+# Sesión DBus: si el rootfs la trae, arrancar bus privado (elimina los warnings
+# "Failed to create DBus proxy" de glib/Gecko y da services a la app)
+CMD=("$ENTRYPOINT" "${APP_ARGS[@]}")
+if { [ -n "$ROOTFS_MODE" ] || [ "$IS_SCRIPT" = 1 ]; } && [ -x "$LIBROOT/usr/bin/dbus-run-session" ]; then
+    CMD=(dbus-run-session -- "$ENTRYPOINT" "${APP_ARGS[@]}")
+    log "sesión DBus: dbus-run-session (bus privado)"
+fi
+
+log "ejecutando: ${CMD[*]}"
+exec env "${ENVS[@]}" "$PROOT" --kill-on-exit "${BINDS[@]}" --cwd=/opt/app "${CMD[@]}"
