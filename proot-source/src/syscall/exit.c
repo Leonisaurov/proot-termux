@@ -137,6 +137,13 @@ void translate_syscall_exit(Tracee *tracee)
 	}
 
 	case PR_accept:
+		/* El kernel Android/ARM64 no implementa accept(202) (deprecada);
+		   reintentar como accept4(242) con flags=0 (misma semántica). */
+		if ((int) syscall_result == -ENOSYS) {
+			fix_and_restart_enosys_syscall(tracee);
+			goto end;
+		}
+		/* fall through */
 	case PR_accept4:
 		/* Nothing special to do if no sockaddr was specified.  */
 		if (peek_reg(tracee, ORIGINAL, SYSARG_2) == 0)

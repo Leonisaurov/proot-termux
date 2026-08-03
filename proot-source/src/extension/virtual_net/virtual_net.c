@@ -1030,6 +1030,19 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 		}
 		case PR_accept:
 		case PR_accept4: {
+			/* Skip the EXIT of the FIRST attempt of an accept→accept4
+			 * seccomp restart (syscall/exit.c:139-146 +
+			 * tracee/seccomp.c:120-131).  fix_and_restart_enosys_syscall()
+			 * restores the ORIGINAL regs into CURRENT, so on ARM64
+			 * SYSARG_RESULT (shared with SYSARG_1, x0) holds the listen_fd
+			 * again instead of -ENOSYS: processing it here would fake a
+			 * sockaddr for a call that has not succeeded yet and use
+			 * listen_fd as the "new" fd.  The second EXIT (the restarted
+			 * accept4) still runs normally: its ORIGINAL sysnum is
+			 * PR_accept4, so this condition is false there.  */
+			if (get_sysnum(tracee, ORIGINAL) == PR_accept
+					&& tracee->restore_original_regs_after_seccomp_event)
+				return 0;
 			word_t listen_fd = peek_reg(tracee, ORIGINAL, SYSARG_1);
 			word_t addr_ptr = peek_reg(tracee, ORIGINAL, SYSARG_2);
 			word_t addrlen_ptr = peek_reg(tracee, ORIGINAL, SYSARG_3);

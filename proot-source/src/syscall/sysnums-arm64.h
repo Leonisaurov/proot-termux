@@ -203,6 +203,7 @@ static const Sysnum sysnums_arm64[] = {
 	[ 199 ] = PR_socketpair,
 	[ 200 ] = PR_bind,
 	[ 201 ] = PR_listen,
+	[ 202 ] = PR_accept,
 	[ 203 ] = PR_connect,
 	[ 204 ] = PR_getsockname,
 	[ 205 ] = PR_getpeername,
