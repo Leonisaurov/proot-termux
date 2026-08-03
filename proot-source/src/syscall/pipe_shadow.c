@@ -42,6 +42,7 @@
 #include <fcntl.h>    /* open, O_RDONLY, O_CLOEXEC */
 #include <unistd.h>   /* readlink, close */
 #include <poll.h>     /* poll, POLLHUP */
+#include <stdbool.h>  /* bool */
 #include <sys/types.h>
 
 #include "syscall/pipe_shadow.h"
@@ -50,6 +51,7 @@
 
 static int shadow_fds[MAX_SHADOW_PIPES];
 static int shadow_fds_initialised;
+static bool shadow_active; /* latched once the first real shadow exists */
 
 static void ensure_init(void)
 {
@@ -74,6 +76,12 @@ void shadow_pipe_read_end(pid_t tracee_pid, int tracee_fd)
 	int i;
 
 	ensure_init();
+
+	/* No shadow pipe has ever been created: skip the /proc work
+	 * entirely.  Latched — once the guest actually uses a pipe, the
+	 * checks below keep running (it may open more).  */
+	if (!shadow_active)
+		return;
 
 	/* Check the fd is an anonymous pipe. */
 	snprintf(path, sizeof(path), "/proc/%d/fd/%d", tracee_pid, tracee_fd);
@@ -100,6 +108,18 @@ void shadow_pipe_read_end(pid_t tracee_pid, int tracee_fd)
 	if ((flags & O_ACCMODE) != O_RDONLY)
 		return;
 
+	/* Latch at DETECTION, not at shadow creation: this fd is a genuine
+	 * anonymous pipe read-end (readlink shows pipe:[...] and fdinfo
+	 * confirms O_RDONLY).  If we latched only inside the open() success
+	 * block below, the very first read-end close of the process would
+	 * have been skipped by the !shadow_active early-return above —
+	 * leaving the guest's first pipe unprotected (EPIPE regression).
+	 * Setting it here covers the first pipe even if the shadow open
+	 * fails (e.g. /proc race) or the slot table is full.  The latch is
+	 * permanent: once the guest uses a pipe, the /proc checks keep
+	 * running for later fds.  */
+	shadow_active = true;
+
 	/* Find a free slot. */
 	for (i = 0; i < MAX_SHADOW_PIPES; i++) {
 		if (shadow_fds[i] == -1)
@@ -121,6 +141,10 @@ void shadow_pipes_close_eof(void)
 {
 	struct pollfd pfd;
 	int i;
+
+	/* No shadow has ever been created: nothing to poll.  */
+	if (!shadow_active)
+		return;
 
 	if (!shadow_fds_initialised)
 		return;

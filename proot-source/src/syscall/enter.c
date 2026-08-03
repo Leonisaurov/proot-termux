@@ -1231,13 +1231,30 @@ static void build_fake_netlink_reply(Tracee *tracee, word_t buf_addr,
 	uint8_t req[256] __attribute__((aligned(8)));
 	size_t  req_len;
 	struct nlmsghdr hdr;
-	uint8_t *out = tracee->fake_netlink_reply;
-	size_t   max = sizeof(tracee->fake_netlink_reply);
+	uint8_t *out;
+	size_t   max = MAX_FAKE_NETLINK_REPLY;
 	uint32_t pid = (uint32_t) tracee->pid;
 	uint32_t seq;
 	uint16_t type, flags;
 	bool dump;
 	size_t off = 0;
+
+	/* Allocate the reply buffer lazily: the 8 KiB costs nothing until a
+	 * fake netlink socket is actually used.  The buffer is a talloc
+	 * child of the tracee, so it is reclaimed with the tracee itself
+	 * (TALLOC_FREE(tracee) in tracee.c / cli.c — no manual destructor
+	 * needed), and talloc_array provides the alignment required to lay
+	 * out struct nlmsghdr / rtnetlink payloads directly into it.  */
+	if (tracee->fake_netlink_reply == NULL) {
+		tracee->fake_netlink_reply = talloc_zero_array(tracee, uint8_t, MAX_FAKE_NETLINK_REPLY);
+		if (tracee->fake_netlink_reply == NULL) {
+			/* OOM: leave nothing pending, recvmsg reports empty.  */
+			tracee->fake_netlink_reply_len = 0;
+			tracee->fake_netlink_reply_off = 0;
+			return;
+		}
+	}
+	out = tracee->fake_netlink_reply;
 
 	tracee->fake_netlink_reply_len = 0;
 	tracee->fake_netlink_reply_off = 0;

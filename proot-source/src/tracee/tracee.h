@@ -121,12 +121,15 @@ typedef struct tracee {
 	bool pending_fake_netlink_socket;
 	/* Reply synthesised at send time for the most recent request on a
 	 * fake netlink fd, awaiting the matching recvmsg / recvfrom.  The
-	 * buffer is word-aligned because we lay out struct nlmsghdr and the
-	 * rtnetlink payloads directly into it.  Handed back to the tracee
-	 * one datagram at a time ("reply_off" tracks how far the tracee has
-	 * read), since that is how the kernel delivers a dump.  */
+	 * buffer is a pointer allocated lazily (talloc child of the tracee)
+	 * the first time a fake netlink reply is built, so the 8 KiB costs
+	 * nothing unless AF_NETLINK is actually used; talloc_array
+	 * guarantees the alignment needed to lay out struct nlmsghdr and
+	 * the rtnetlink payloads directly into it.  Handed back to the
+	 * tracee one datagram at a time ("reply_off" tracks how far the
+	 * tracee has read), since that is how the kernel delivers a dump.  */
 #define MAX_FAKE_NETLINK_REPLY 8192
-	uint8_t fake_netlink_reply[MAX_FAKE_NETLINK_REPLY] __attribute__((aligned(8)));
+	uint8_t *fake_netlink_reply;
 	size_t fake_netlink_reply_len;
 	size_t fake_netlink_reply_off;
 

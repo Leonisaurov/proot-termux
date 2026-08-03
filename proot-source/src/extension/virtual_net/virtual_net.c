@@ -30,6 +30,7 @@
 #include <sys/wait.h>   /* waitpid(2) */
 #include <sys/file.h>   /* flock(2) */
 #include <time.h>       /* clock_gettime(3) */
+#include <stddef.h>     /* offsetof(3) */
 
 #include "extension/extension.h"
 #include "extension/virtual_net/virtual_net.h"
@@ -207,9 +208,22 @@ static uint32_t vnp_generate_token(void)
 
 /**
  * Ensure the base tmp dir and per-proxy subdirectory exist.
+ *
+ * The result is cached in a static flag: after the first successful run for
+ * a given proxy, subsequent calls (every bind/connect registry open) return
+ * immediately without issuing the 2x mkdir() syscalls. The proxy name is
+ * cached alongside so that a second --proxy (last-wins) still creates its own
+ * subdirectory.
  */
+static bool vnp_dirs_ready = false;
+static char vnp_dirs_proxy[VNP_MAX_NAME] = "";
+
 static int vnp_ensure_directories(const char *proxy_name)
 {
+	/* Fast path: directories already created for this proxy */
+	if (vnp_dirs_ready && strcmp(vnp_dirs_proxy, proxy_name) == 0)
+		return 0;
+
 	/* Create base directory */
 	if (mkdir(VNP_TMP_DIR, 0755) < 0 && errno != EEXIST)
 		return -1;
@@ -220,7 +234,42 @@ static int vnp_ensure_directories(const char *proxy_name)
 	if (mkdir(proxy_dir, 0755) < 0 && errno != EEXIST)
 		return -1;
 
+	/* Cache the success so subsequent registry opens skip the mkdir() calls */
+	vnp_dirs_ready = true;
+	strncpy(vnp_dirs_proxy, proxy_name, sizeof(vnp_dirs_proxy) - 1);
+	vnp_dirs_proxy[sizeof(vnp_dirs_proxy) - 1] = '\0';
+
 	return 0;
+}
+
+/* ===========================================================================
+ * Registry lookup cache (per-instance)
+ *
+ * vnp_lookup_virtual_port() used to read the full ~59 KB registry on every
+ * connect to a non-locally-resolved port. The header carries a `generation`
+ * counter that every writer bumps (see vnp_registry_add), so a lookup can
+ * first read just the 12-byte header (magic/count/generation) and, if it
+ * matches the cache, search the in-memory entries instead. Reads happen while
+ * holding LOCK_SH, so no other instance can write concurrently — a matching
+ * generation guarantees the cached entries are byte-identical to the file.
+ * =========================================================================== */
+
+/* Sentinel: forces a full read on the very first lookup */
+#define VNP_CACHE_GENERATION_INVALID UINT32_MAX
+
+static uint32_t vnp_cache_generation = VNP_CACHE_GENERATION_INVALID;
+static uint32_t vnp_cache_count = 0;
+static struct VnpRegistryEntry vnp_cache_entries[VNP_REG_MAX];
+
+/**
+ * Refresh the per-instance cache from a fully-read registry header.
+ */
+static void vnp_cache_update(const struct VnpRegistryHeader *hdr)
+{
+	vnp_cache_generation = hdr->generation;
+	vnp_cache_count = hdr->count;
+	memcpy(vnp_cache_entries, hdr->entries,
+	       hdr->count * sizeof(struct VnpRegistryEntry));
 }
 
 /**
@@ -247,6 +296,16 @@ static int vnp_registry_open(const char *proxy_name, int lock_type)
 	if (fd < 0) {
 		note(NULL, WARNING, INTERNAL,
 			"virtual_net: failed to open registry %s", path);
+		/* If the tmp dirs were deleted at runtime (tmp cleanup), the
+		 * cached vnp_dirs_ready is stale: the fast path would return 0
+		 * without re-creating them and bind/connect would silently stop
+		 * being virtual (the mkdirs in vnp_ensure_directories used to
+		 * self-heal).  Reset the cache on ENOENT so the next operation
+		 * re-runs the mkdir()s.  */
+		if (errno == ENOENT) {
+			vnp_dirs_ready = false;
+			vnp_dirs_proxy[0] = '\0';
+		}
 		return -1;
 	}
 	if (flock(fd, lock_type) < 0) {
@@ -275,7 +334,15 @@ static int vnp_registry_read(int fd, struct VnpRegistryHeader *hdr)
 		hdr->magic = VNP_REG_MAGIC;
 		hdr->count = 0;
 		hdr->generation = 0;
+		return 0;
 	}
+	/* Defensive clamp: a corrupt/oversized registry header could carry
+	 * count > VNP_REG_MAX, which would make vnp_cache_update() memcpy()
+	 * past vnp_cache_entries (OOB-write) and
+	 * vnp_registry_find_in_entries() walk past the entries array
+	 * (OOB-read).  Bound count to what the header actually holds.  */
+	if (hdr->count > VNP_REG_MAX)
+		hdr->count = VNP_REG_MAX;
 	return 0;
 }
 
@@ -296,15 +363,47 @@ static int vnp_registry_write(int fd, const struct VnpRegistryHeader *hdr)
 	return 0;
 }
 
+/**
+ * Read only the header fields (magic/count/generation, ~12 bytes) of the
+ * registry, skipping the large entries array. Used by the lookup cache to
+ * detect whether the on-disk registry changed without reading all ~59 KB.
+ */
+static void vnp_registry_read_meta(int fd, struct VnpRegistryHeader *hdr)
+{
+	const size_t meta_size = offsetof(struct VnpRegistryHeader, entries);
+
+	if (lseek(fd, 0, SEEK_SET) < 0
+	    || read(fd, hdr, meta_size) != (ssize_t)meta_size
+	    || hdr->magic != VNP_REG_MAGIC) {
+		memset(hdr, 0, sizeof(*hdr));
+		hdr->magic = VNP_REG_MAGIC;
+		hdr->count = 0;
+		hdr->generation = 0;
+		return;
+	}
+	/* Defensive clamp: same reasoning as vnp_registry_read() — the
+	 * fast path compares count against the cache and then searches
+	 * vnp_cache_entries, so a bogus count must never exceed the
+	 * arrays.  */
+	if (hdr->count > VNP_REG_MAX)
+		hdr->count = VNP_REG_MAX;
+}
+
+static struct VnpRegistryEntry *vnp_registry_find_in_entries(
+	const struct VnpRegistryEntry *entries, uint32_t count, uint16_t virtual_port)
+{
+	uint32_t i;
+	for (i = 0; i < count; i++) {
+		if (entries[i].virtual_port == virtual_port)
+			return (struct VnpRegistryEntry *)&entries[i];
+	}
+	return NULL;
+}
+
 static struct VnpRegistryEntry *vnp_registry_find(
 	const struct VnpRegistryHeader *hdr, uint16_t virtual_port)
 {
-	unsigned int i;
-	for (i = 0; i < hdr->count; i++) {
-		if (hdr->entries[i].virtual_port == virtual_port)
-			return (struct VnpRegistryEntry *)&hdr->entries[i];
-	}
-	return NULL;
+	return vnp_registry_find_in_entries(hdr->entries, hdr->count, virtual_port);
 }
 
 static struct VnpRegistryEntry *vnp_registry_add(
@@ -315,6 +414,10 @@ static struct VnpRegistryEntry *vnp_registry_add(
 	if (entry != NULL) {
 		entry->instance_token = token;
 		memcpy(entry->abstract_name, abstract_name, sizeof(entry->abstract_name));
+		/* Bump generation on updates too: the abstract_name (and thus the
+		 * cached lookup result) may have changed, so other instances must
+		 * invalidate their cache. */
+		hdr->generation++;
 		return entry;
 	}
 	if (hdr->count >= VNP_REG_MAX)
@@ -339,9 +442,13 @@ static struct VnpRegistryEntry *vnp_registry_add(
  * Extract port and address family from a sockaddr_in/sockaddr_in6
  * in tracee memory.  Returns 0 on success, -1 if not AF_INET/AF_INET6
  * or on error.
+ *
+ * If 'sockaddr_out' is non-NULL, the sockaddr already read from the tracee
+ * (sockaddr_in for AF_INET, sockaddr_in6 for AF_INET6) is copied into it.
+ * Callers can then inspect the address without issuing a second read_data().
  */
 static inline int extract_port_from_tracee(Tracee *tracee, word_t addr_ptr,
-	word_t addrlen, sa_family_t *family, uint16_t *port)
+	word_t addrlen, sa_family_t *family, uint16_t *port, void *sockaddr_out)
 {
 	struct sockaddr_in sa_in;
 
@@ -354,6 +461,8 @@ static inline int extract_port_from_tracee(Tracee *tracee, word_t addr_ptr,
 	if (sa_in.sin_family == AF_INET) {
 		*family = sa_in.sin_family;
 		*port = ntohs(sa_in.sin_port);
+		if (sockaddr_out != NULL)
+			memcpy(sockaddr_out, &sa_in, sizeof(sa_in));
 		return 0;
 	}
 
@@ -365,6 +474,8 @@ static inline int extract_port_from_tracee(Tracee *tracee, word_t addr_ptr,
 			return -1;
 		*family = sa_in6.sin6_family;
 		*port = ntohs(sa_in6.sin6_port);
+		if (sockaddr_out != NULL)
+			memcpy(sockaddr_out, &sa_in6, sizeof(sa_in6));
 		return 0;
 	}
 
@@ -436,7 +547,7 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 	sa_family_t family;
 	uint16_t port;
 
-	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
+	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port, NULL) < 0)
 		return 0;
 
 	/* Port 0 means "assign automatically" — generate a unique virtual port */
@@ -481,6 +592,9 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 			/* abstract_name in registry includes the leading \0 */
 			vnp_registry_add(&hdr, port, config->instance_token, sa_unix.sun_path);
 			vnp_registry_write(reg_fd, &hdr);
+			/* Refresh the local cache: generation just changed, so the
+			 * next connect() in this instance skips the full read. */
+			vnp_cache_update(&hdr);
 			vnp_registry_close(reg_fd);
 		}
 	}
@@ -541,8 +655,26 @@ static bool vnp_lookup_virtual_port(VnpConfig *config, uint16_t port, char *abst
 		int reg_fd = vnp_registry_open(config->proxy_name, LOCK_SH);
 		if (reg_fd >= 0) {
 			struct VnpRegistryHeader hdr;
-			vnp_registry_read(reg_fd, &hdr);
-			struct VnpRegistryEntry *reg_entry = vnp_registry_find(&hdr, port);
+			struct VnpRegistryEntry *reg_entry;
+
+			/* Fast path: read only the 12-byte header. If generation and
+			 * count match the cache, search the in-memory entries instead
+			 * of reading the full ~59 KB registry. We hold LOCK_SH, so no
+			 * other instance can be mid-write — a matching generation
+			 * guarantees the cache mirrors the file exactly. */
+			vnp_registry_read_meta(reg_fd, &hdr);
+			if (hdr.generation == vnp_cache_generation
+			    && hdr.count == vnp_cache_count) {
+				reg_entry = vnp_registry_find_in_entries(
+					vnp_cache_entries, hdr.count, port);
+			} else {
+				/* Registry changed (this instance or another one):
+				 * read it fully and refresh the cache. */
+				vnp_registry_read(reg_fd, &hdr);
+				vnp_cache_update(&hdr);
+				reg_entry = vnp_registry_find(&hdr, port);
+			}
+
 			if (reg_entry != NULL) {
 				memcpy(abstract_name, reg_entry->abstract_name, sizeof(reg_entry->abstract_name));
 				vnp_registry_close(reg_fd);
@@ -567,27 +699,25 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 	sa_family_t family;
 	uint16_t port;
 	char abstract_name[108];
+	/* Sockaddr already read by extract_port_from_tracee() — avoids a second
+	 * read_data() for the loopback check below. */
+	union {
+		struct sockaddr_in  sa_in;
+		struct sockaddr_in6 sa_in6;
+	} sa;
 
-	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port) < 0)
+	if (extract_port_from_tracee(tracee, addr_ptr, addrlen, &family, &port, &sa) < 0)
 		return 0;
 
 	VERBOSE(tracee, 1, "vnet: connect port %u on fd %lu", port, (unsigned long)sockfd);
 
 	if (family == AF_INET) {
-		struct sockaddr_in sa_in;
-		if (read_data(tracee, &sa_in, addr_ptr, sizeof(sa_in)) < 0)
-			return 0;
 		/* Non-loopback goes to kernel in all cases */
-		if ((ntohl(sa_in.sin_addr.s_addr) & 0xFF000000) != 0x7F000000)
+		if ((ntohl(sa.sa_in.sin_addr.s_addr) & 0xFF000000) != 0x7F000000)
 			return 0;
 	}
 	else if (family == AF_INET6) {
-		struct sockaddr_in6 sa_in6;
-		if (addrlen < sizeof(struct sockaddr_in6))
-			return 0;
-		if (read_data(tracee, &sa_in6, addr_ptr, sizeof(sa_in6)) < 0)
-			return 0;
-		if (!is_ipv6_loopback_or_unspecified(&sa_in6.sin6_addr))
+		if (!is_ipv6_loopback_or_unspecified(&sa.sa_in6.sin6_addr))
 			return 0;
 	}
 	else {
