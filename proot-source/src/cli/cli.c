@@ -453,9 +453,26 @@ static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
 	/* Bindings are now installed and the current working
 	 * directory is canonicalized: resolve path to @tracee->exe
 	 * and configure @tracee->cmdline.  */
-	status = initialize_exe(tracee, argv[argc_offset]);
-	if (status < 0)
-		return -1;
+	if (tracee->exec_target > 0) {
+		/* --exec mode: the command is NOT resolved against the
+		 * client's filesystem (rootfs "/" == host).  The command
+		 * may only exist inside the supervisor's rootfs (e.g.
+		 * /usr/bin/true), so it must be forwarded verbatim to the
+		 * supervisor, whose child tracee resolves it against its
+		 * own rootfs.  Keep a verbatim copy of the command for
+		 * informational purposes only ($exe is not used to launch
+		 * anything in --exec mode; exec_connect() forwards the
+		 * raw argv).  */
+		tracee->exe = talloc_strdup(tracee, argv[argc_offset] ?: "/bin/sh");
+		if (tracee->exe == NULL)
+			return -1;
+		talloc_set_name_const(tracee->exe, "$exe");
+	}
+	else {
+		status = initialize_exe(tracee, argv[argc_offset]);
+		if (status < 0)
+			return -1;
+	}
 
 	i = run_config_hook(tracee, cli, cli->post_initialize_exe, argc, argv, i);
 	if (i < 0)
