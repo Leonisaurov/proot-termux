@@ -480,6 +480,13 @@ int event_loop(Tracee *root_tracee)
 					/* If no more exec clients, we can shut down */
 					if (remaining == 0 && ctl_fd < 0) {
 						supervise_fini();
+						/* Free the root tracee (and any other terminated
+						 * tracees) here: the top-of-loop call to
+						 * free_terminated_tracees() already ran before
+						 * the root tracee exited, so skipping it would
+						 * leak the Tracee (talloc report on null_context).
+						 * This mirrors the normal mode semantics. */
+						free_terminated_tracees();
 						goto done;
 					}
 				}
