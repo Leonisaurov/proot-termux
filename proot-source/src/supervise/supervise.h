@@ -84,6 +84,13 @@ extern int supervise_init(int *ctl_fd, int *sig_fd, int verbose_level);
 extern void supervise_fini(void);
 
 /**
+ * Invalidate the global ctl_fd copy (FU-3): the event loop closes the
+ * listen socket itself when the root tracee exits; this tells
+ * supervise_fini() not to close it again.
+ */
+extern void supervise_set_ctl_fd_closed(void);
+
+/**
  * Accept a new exec client connection and spawn its tracee.
  * Called when ctl_fd has POLLIN.
  */
@@ -94,8 +101,11 @@ extern void supervise_accept_client(int ctl_fd, Tracee *root_tracee);
  * Checks if the tracee was spawned by an exec client.
  * If so, sends the exit status back to the client.
  * Returns the number of clients still pending, or 0 if none.
+ *
+ * Never dereferences the root tracee (FU-1): it may already have been
+ * freed by the event loop when the root exits before the last client.
  */
-extern int supervise_tracee_exited(Tracee *root_tracee, pid_t pid, int status);
+extern int supervise_tracee_exited(pid_t pid, int status);
 
 /**
  * Log the exit reason of the root tracee.

@@ -65,6 +65,13 @@ static int      ctl_fd_global = -1;  /* Listen socket for incoming --exec */
 static pid_t    own_pid = 0;         /* Our PID (for socket name) */
 static time_t   start_time = 0;      /* When supervise started */
 
+/* Root tracee's verbose level, captured once in supervise_init().  The
+ * root tracee can exit before the last --exec client and is freed by
+ * free_terminated_tracees() at the top of the next event-loop
+ * iteration, so supervise_tracee_exited() must NEVER dereference it:
+ * the log gating uses this copy instead (FU-1, UAF fix). */
+static int      g_verbose_level = 0;
+
 /* ---------------------------------------------------------------------------
  * Helpers
  * --------------------------------------------------------------------------- */
@@ -138,6 +145,7 @@ int supervise_init(int *ctl_fd, int *sig_fd, int verbose_level)
 
 	own_pid = getpid();
 	start_time = time(NULL);
+	g_verbose_level = verbose_level;
 
 	/* --- Create signalfd for SIGCHLD --- */
 	sigemptyset(&mask);
@@ -220,6 +228,15 @@ void supervise_fini(void)
 		close(ctl_fd_global);
 		ctl_fd_global = -1;
 	}
+}
+
+/* FU-3: called by the event loop right after it closes its local
+ * ctl_fd (root tracee exited).  Keeps supervise_fini() from
+ * double-closing the same fd number, which could otherwise hit a
+ * fd that was reused in between. */
+void supervise_set_ctl_fd_closed(void)
+{
+	ctl_fd_global = -1;
 }
 
 /* ===========================================================================
@@ -526,7 +543,7 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
  * supervise_tracee_exited: called when a tracee exits
  * =========================================================================== */
 
-int supervise_tracee_exited(Tracee *root_tracee, pid_t pid, int status)
+int supervise_tracee_exited(pid_t pid, int status)
 {
 	ExecResponse resp;
 	int i;
@@ -549,14 +566,22 @@ int supervise_tracee_exited(Tracee *root_tracee, pid_t pid, int status)
 			/* Send response to client */
 			ssize_t w = write(exec_clients[i].fd, &resp, sizeof(resp));
 			if (w != (ssize_t)sizeof(resp)) {
-				VERBOSE(root_tracee, 1, "supervise: failed to send response to client on fd=%d: %s",
-					exec_clients[i].fd, strerror(errno));
+				/* FU-1: never dereference the root tracee here: it may
+				 * already be freed (root exited before this client and
+				 * free_terminated_tracees() released it at the top of
+				 * the next event-loop iteration).  g_verbose_level was
+				 * captured at supervise_init(), preserving the exact
+				 * log gating. */
+				if (g_verbose_level >= 1)
+					note(NULL, INFO, INTERNAL, "supervise: failed to send response to client on fd=%d: %s",
+						exec_clients[i].fd, strerror(errno));
 			}
 			close(exec_clients[i].fd);
 			remove_client(i);
 
-			VERBOSE(root_tracee, 2, "supervise: tracee pid=%d exited: status=%d",
-				pid, resp.exit_status);
+			if (g_verbose_level >= 2)
+				note(NULL, INFO, INTERNAL, "supervise: tracee pid=%d exited: status=%d",
+					pid, resp.exit_status);
 
 			break;
 		}

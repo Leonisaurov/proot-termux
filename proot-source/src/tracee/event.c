@@ -238,6 +238,65 @@ static void print_talloc_hierarchy(int signum, siginfo_t *siginfo UNUSED, void *
 static int last_exit_status = -1;
 
 /**
+ * Supervise-mode handling for a tracee that just exited.  Shared by the
+ * pre-loop drain (which can reap a root tracee that exits before the
+ * main loop starts, e.g. `--supervise ... /bin/true`) and the main
+ * supervise loop, so the root-exit path is identical in both: answer
+ * pending --exec clients, log the root exit, close the listen socket
+ * and terminate the supervisor once no exec client and no live tracee
+ * remains.
+ *
+ * @tracee must still be allocated (marked terminated but not yet freed)
+ * and @ctl_fd is the event-loop local listen socket (closed here and
+ * set to -1 through the pointer).  Returns true when the event loop
+ * must terminate (goto done), false to keep looping.
+ */
+static bool supervise_handle_exited_tracee(Tracee *tracee, int wait_status, int *ctl_fd)
+{
+	int remaining = supervise_tracee_exited(tracee->pid, wait_status);
+
+	if (tracee->supervise) {
+		/* Root tracee exited: log it and stop accepting new
+		 * --exec connections.  Stay alive only if exec clients
+		 * are pending.  tracee->supervise is true only for the
+		 * root tracee (new_tracee() sets it false and neither
+		 * new_child() nor supervise_accept_client() copy it), so
+		 * this avoids a pid comparison that could be fooled by
+		 * pid recycling (MINOR 2). */
+		supervise_log_exit(tracee->exe, wait_status);
+		if (*ctl_fd >= 0) {
+			close(*ctl_fd);
+			*ctl_fd = -1;
+			/* FU-3: keep supervise_fini() from double-closing
+			 * the same fd. */
+			supervise_set_ctl_fd_closed();
+		}
+	}
+
+	/* If no more exec clients, we can shut down */
+	if (remaining == 0 && *ctl_fd < 0) {
+		supervise_fini();
+		/* Free terminated tracees here: the top-of-loop call to
+		 * free_terminated_tracees() already ran before this
+		 * tracee exited, so skipping it would leak the Tracee
+		 * (talloc report on null_context).  This mirrors the
+		 * normal mode semantics. */
+		free_terminated_tracees();
+		/* FU-2: only leave the loop once every tracee has been
+		 * reaped.  A guest child that the root daemonized (fork/
+		 * exec inside the guest, not an --exec client) keeps its
+		 * Tracee alive, and killing it via atexit(kill_all_tracees)
+		 * would leak it.  When tracees remain, keep looping: the
+		 * WNOHANG drain reaps them (or the next poll() blocks, so
+		 * there is no busy loop) until the last one exits,
+		 * mirroring the normal mode ECHILD exit semantics. */
+		if (get_tracees_list_head()->lh_first == NULL)
+			return true;
+	}
+	return false;
+}
+
+/**
  * Check if this instance of PRoot can *technically* handle @tracee.
  */
 static void check_architecture(Tracee *tracee)
@@ -375,8 +434,19 @@ int event_loop(Tracee *root_tracee)
 				continue;
 			tracee->running = false;
 			(void) handle_tracee_event(tracee, _ws);
-			if (tracee->terminated)
+			/* MAJOR: if the root tracee exits here (it can, e.g.
+			 * `--supervise ... /bin/true`), handle it now.  The
+			 * free_terminated_tracees() at the top of the main
+			 * loop would otherwise free root_tracee while ctl_fd
+			 * stays open, leaving a dangling root_tracee for
+			 * supervise_accept_client() and an immortal poll().
+			 * The shared helper closes ctl_fd and shuts the
+			 * supervisor down when no client is pending. */
+			if (tracee->terminated) {
+				if (supervise && supervise_handle_exited_tracee(tracee, _ws, &ctl_fd))
+					goto done;
 				continue;
+			}
 			(void) restart_tracee(tracee, 0);
 		}
 	}
@@ -404,7 +474,6 @@ int event_loop(Tracee *root_tracee)
 			struct pollfd fds[2];
 			int nfds = 0;
 			int poll_ret;
-			Tracee *ptracee;
 
 			/* fds[0]: signalfd for SIGCHLD */
 			fds[0].fd     = sig_fd;
@@ -422,6 +491,23 @@ int event_loop(Tracee *root_tracee)
 			if (poll_ret < 0) {
 				if (errno == EINTR)
 					continue;
+				/* FU-4: poll() failed for a real reason (EBADF, ENOMEM,
+				 * ...): the supervisor cannot recover, so leave nothing
+				 * on the talloc null_context.  The tracees may not all
+				 * be terminated yet, so kill them, mark them terminated
+				 * and free them before exiting (supervise_fini() below
+				 * closes the remaining fds). */
+				kill_all_tracees();
+				{
+					Tracee *ptracee;
+					Tracee *ptracee_next;
+					for (ptracee = get_tracees_list_head()->lh_first;
+					     ptracee != NULL; ptracee = ptracee_next) {
+						ptracee_next = ptracee->link.le_next;
+						ptracee->terminated = true;
+						TALLOC_FREE(ptracee);
+					}
+				}
 				break;
 			}
 
@@ -461,40 +547,18 @@ int event_loop(Tracee *root_tracee)
 					(void) restart_tracee(tracee, signal);
 
 				/* If a tracee exited, notify the supervisor.
-				 * This is supervise-specific: check if this tracee
-				 * was spawned by an --exec client. */
+				 * Shared exit handling with the pre-loop drain:
+				 * answer --exec clients, log the root exit, close
+				 * ctl_fd and shut down when appropriate. */
 				if (WIFEXITED(wait_status) || WIFSIGNALED(wait_status)) {
-					int remaining = supervise_tracee_exited(root_tracee, pid, wait_status);
-
-					if (pid == root_tracee->pid) {
-						/* Root tracee exited: log it and stop
-						 * accepting new --exec connections.
-						 * Stay alive only if exec clients are pending. */
-						supervise_log_exit(tracee->exe, wait_status);
-						if (ctl_fd >= 0) {
-							close(ctl_fd);
-							ctl_fd = -1;
-						}
-					}
-
-					/* If no more exec clients, we can shut down */
-					if (remaining == 0 && ctl_fd < 0) {
-						supervise_fini();
-						/* Free the root tracee (and any other terminated
-						 * tracees) here: the top-of-loop call to
-						 * free_terminated_tracees() already ran before
-						 * the root tracee exited, so skipping it would
-						 * leak the Tracee (talloc report on null_context).
-						 * This mirrors the normal mode semantics. */
-						free_terminated_tracees();
+					if (supervise_handle_exited_tracee(tracee, wait_status, &ctl_fd))
 						goto done;
-					}
 				}
 				}
 			}
 
 			/* --- Handle new --exec connection --- */
-			if (nfds > 1 && (fds[1].revents & POLLIN)) {
+			if (ctl_fd >= 0 && nfds > 1 && (fds[1].revents & POLLIN)) {
 				supervise_accept_client(ctl_fd, root_tracee);
 			}
 		} else {
