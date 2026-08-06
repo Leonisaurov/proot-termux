@@ -376,6 +376,24 @@ typedef struct tracee {
 	 * instead of launching a local tracee. Set by handle_option_exec(). */
 	pid_t exec_target;
 
+	/* Set when the user explicitly passed -w/--cwd/--pwd on the
+	 * command line.  The default "." (applied by
+	 * pre_initialize_bindings()) leaves this false.  exec_connect()
+	 * uses it to decide whether to propagate the client's working
+	 * directory to the supervisor's child tracee. */
+	bool cwd_explicit;
+
+	/* Raw, uncanonicalized value of -w/--cwd/--pwd, saved by
+	 * handle_option_w() when the user passed it explicitly (NULL
+	 * otherwise).  --exec propagates this to the supervisor instead
+	 * of tracee->fs->cwd: fs->cwd is canonicalized by
+	 * initialize_cwd() against the CLIENT's rootfs (the host), so a
+	 * path that only exists in the supervisor's guest rootfs (e.g.
+	 * -w /root with no /root on the host) would silently become "/".
+	 * The supervisor knows its own rootfs and interprets the raw
+	 * value as a guest path. */
+	char *cwd_raw;
+
 } Tracee;
 
 #define HOST_ROOTFS "/host-rootfs"

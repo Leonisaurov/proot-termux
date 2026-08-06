@@ -552,7 +552,7 @@ int main(int argc, char *const argv[])
 		VERBOSE(tracee, 2, "--exec: connecting to PID %d, command: %s",
 			tracee->exec_target, argv[status]);
 
-		int ret = exec_connect(tracee->exec_target, argc - status, &argv[status]);
+		int ret = exec_connect(tracee, argc - status, &argv[status]);
 		if (ret < 0) {
 			note(tracee, ERROR, INTERNAL, "proot --exec: %s", strerror(errno));
 			goto error;

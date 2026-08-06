@@ -198,6 +198,8 @@ Tracee *new_dummy_tracee(TALLOC_CTX *context)
 	tracee->maps_fd = -1;
 	tracee->supervise = false;
 	tracee->exec_target = 0;
+	tracee->cwd_explicit = false;
+	tracee->cwd_raw = NULL;
 	if (tracee->fs == NULL || tracee->heap == NULL)
 		goto no_mem;
 

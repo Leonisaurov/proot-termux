@@ -203,6 +203,19 @@ static int handle_option_w(Tracee *tracee, const Cli *cli UNUSED, const char *va
 	if (tracee->fs->cwd == NULL)
 		return -1;
 	talloc_set_name_const(tracee->fs->cwd, "$cwd");
+	/* Remember that -w/--cwd/--pwd was explicitly requested so
+	 * --exec can propagate the client's cwd to the supervisor's
+	 * child tracee (the default "." below never reaches this
+	 * handler).  Keep the RAW value too: fs->cwd gets canonicalized
+	 * against the client's rootfs later, which is wrong for paths
+	 * that only exist in the supervisor's guest rootfs.  "Last
+	 * option wins", like handle_option_r's reconfig. */
+	TALLOC_FREE(tracee->cwd_raw);
+	tracee->cwd_raw = talloc_strdup(tracee, value);
+	if (tracee->cwd_raw == NULL)
+		return -1;
+	talloc_set_name_const(tracee->cwd_raw, "$cwd_raw");
+	tracee->cwd_explicit = true;
 	return 0;
 }
 
@@ -980,11 +993,15 @@ static int pre_initialize_bindings(Tracee *tracee, const Cli *cli,
 {
 	int status;
 
-	/* Default to "." if no CWD were specified.  */
+	/* Default to "." if no CWD were specified.  Applied directly
+	 * (bypassing handle_option_w) so cwd_explicit stays false: this
+	 * tells --exec that the client did NOT request a directory and
+	 * the child must inherit the supervisor's cwd. */
 	if (tracee->fs->cwd == NULL) {
-		status = handle_option_w(tracee, cli, ".");
-		if (status < 0)
+		tracee->fs->cwd = talloc_strdup(tracee->fs, ".");
+		if (tracee->fs->cwd == NULL)
 			return -1;
+		talloc_set_name_const(tracee->fs->cwd, "$cwd");
 	}
 
 	 /* The default guest rootfs is "/" if none was specified.  */

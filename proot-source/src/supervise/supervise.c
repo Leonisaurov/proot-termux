@@ -349,7 +349,20 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 		/* Change to requested cwd if provided */
 		if (req.cwd[0] != '\0') {
 			if (chdir(req.cwd) < 0) {
-				VERBOSE(root_tracee, 1, "supervise: chdir(%s): %s", req.cwd, strerror(errno));
+				/* Fatal, not silent: the parent already set
+				 * child_tracee->fs->cwd = req.cwd, so pushing
+				 * on with a failed chdir would leave the real
+				 * process cwd (the supervisor's) diverging from
+				 * fs->cwd, silently breaking relative paths.
+				 * Exit 126 (command found but cannot run), the
+				 * same spirit as proot's own "can't chdir"
+				 * handling but made visible to the client. */
+				note(NULL, ERROR, USER,
+				     "can't chdir(\"%s\") in the guest rootfs: %s",
+				     req.cwd, strerror(errno));
+				VERBOSE(root_tracee, 1, "supervise: chdir(%s): %s",
+					req.cwd, strerror(errno));
+				_exit(126);
 			}
 		}
 
@@ -421,9 +434,12 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 						CIRCLEQ_INIT(child_tracee->fs->bindings.host);
 
 						CIRCLEQ_FOREACH(iter, root_tracee->fs->bindings.guest, link.guest) {
-							(void) insort_binding3(child_tracee, child_tracee->fs,
-										iter->host.path,
-										iter->guest.path);
+							/* Gap B fix: copy_binding() preserves
+							 * access_mode, type, must_exist and
+							 * mbind_files (insort_binding3 alone
+							 * reset them, turning ":ro" binds
+							 * read-write in the child). */
+							(void) copy_binding(child_tracee, child_tracee->fs, iter);
 						}
 					}
 				}
@@ -550,7 +566,7 @@ int supervise_pending_clients(void)
  * exec_connect: called by proot --exec mode
  * =========================================================================== */
 
-int exec_connect(pid_t target_pid, int argc, char *const argv[])
+int exec_connect(const Tracee *tracee, int argc, char *const argv[])
 {
 	struct sockaddr_un sa;
 	ExecRequest req;
@@ -559,6 +575,14 @@ int exec_connect(pid_t target_pid, int argc, char *const argv[])
 	ssize_t n;
 	int i;
 	char *p;
+	pid_t target_pid;
+
+	/* The --exec target PID comes from the caller's Tracee.  */
+	if (tracee == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	target_pid = tracee->exec_target;
 
 	signal(SIGPIPE, SIG_IGN);
 
@@ -615,6 +639,37 @@ int exec_connect(pid_t target_pid, int argc, char *const argv[])
 	/* Build the exec request */
 	memset(&req, 0, sizeof(req));
 	req.argc = argc;
+
+	/* Gap A fix: propagate the client's explicit working directory
+	 * (-w/--cwd/--pwd) so the supervisor's child chdirs into it
+	 * instead of always inheriting the supervisor's cwd.
+	 *
+	 * The RAW value (tracee->cwd_raw) is sent, NOT the canonicalized
+	 * tracee->fs->cwd: initialize_cwd() resolved fs->cwd against the
+	 * CLIENT's rootfs (the host), so a path that only exists in the
+	 * supervisor's guest rootfs (e.g. -w /root with no /root on the
+	 * host) would silently become "/".  The supervisor knows its own
+	 * rootfs and treats req.cwd as a guest path; the child's chdir
+	 * goes through proot's path translation.
+	 *
+	 * Detection: handle_option_w() sets cwd_explicit and cwd_raw
+	 * only when the CLI actually contained -w;
+	 * pre_initialize_bindings() applies the default "." directly,
+	 * leaving both untouched.  When the client did not request a
+	 * directory, req.cwd stays empty and the child inherits the
+	 * supervisor's cwd (previous behavior).  Defensive fallback: if
+	 * cwd_explicit is true but cwd_raw is NULL (cannot happen with
+	 * the current handlers), keep the inherited behavior rather
+	 * than sending a garbage path. */
+	if (tracee->cwd_explicit && tracee->cwd_raw != NULL
+	    && tracee->cwd_raw[0] != '\0') {
+		if (strlen(tracee->cwd_raw) >= sizeof(req.cwd)) {
+			close(fd);
+			errno = ENAMETOOLONG;
+			return -1;
+		}
+		strcpy(req.cwd, tracee->cwd_raw);
+	}
 
 	p = req.argv;
 	for (i = 0; i < argc; i++) {

@@ -462,6 +462,50 @@ struct mbind_entry {
 };
 
 /**
+ * Create and insert a deep copy of @source into the list of
+ * @tracee's bindings, preserving host/guest paths, access mode,
+ * binding type and must_exist.  Returns NULL on error.
+ *
+ * This is used to inherit bindings into a new file-system
+ * name-space (e.g. an --exec child tracee): plain insort_binding3()
+ * resets access_mode/type/must_exist, silently turning a read-only
+ * "host:/guest:ro" binding into read-write and dropping the
+ * merge-bind type.
+ */
+Binding *copy_binding(const Tracee *tracee, const TALLOC_CTX *context,
+		      const Binding *source)
+{
+	Binding *binding;
+
+	if (source == NULL)
+		return NULL;
+
+	binding = insort_binding3(tracee, context, source->host.path,
+				  source->guest.path);
+	if (binding == NULL)
+		return NULL;
+
+	binding->must_exist  = source->must_exist;
+	binding->access_mode = source->access_mode;
+	binding->type        = source->type;
+
+	/* need_substitution is recomputed by insort_binding2() from the
+	 * (identical) paths, so it already matches @source.  */
+
+	/* mbind_files is intentionally NOT copied: it would be dead
+	 * data here.  Unlike new_binding(), no mbind_cleanup
+	 * destructor is registered on this copy and nothing reads the
+	 * list, so carrying it over would only be a maintenance trap
+	 * (and a shallow copy would double-remove host files on
+	 * cleanup).  The supervisor's original binding keeps sole
+	 * ownership of the host files it created until it exits; the
+	 * child only needs type == BINDING_TYPE_MBIND to resolve the
+	 * merge bind. */
+
+	return binding;
+}
+
+/**
  * Track @path for cleanup if it was newly created (didn't exist before).
  * @existed should be true if the destination already existed before we
  * created/overwrote it.  Only newly created entries are tracked so that

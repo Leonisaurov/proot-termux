@@ -113,12 +113,14 @@ extern int supervise_pending_clients(void);
 
 /**
  * Connect to a running supervisor and execute a command.
- * target_pid: PID of the proot --supervise instance.
+ * tracee: the caller's Tracee (--exec target PID and, when
+ *         -w/--cwd/--pwd was explicitly requested, the working
+ *         directory to propagate to the child).
  * argc/argv: command to execute inside the supervisor context.
  *
  * Returns the exit code (0-255) on success, or -1 on error.
  * On error, errno is set appropriately.
  */
-extern int exec_connect(pid_t target_pid, int argc, char *const argv[]);
+extern int exec_connect(const Tracee *tracee, int argc, char *const argv[]);
 
 #endif /* SUPERVISE_H */
