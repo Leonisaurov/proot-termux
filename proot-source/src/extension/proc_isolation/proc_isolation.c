@@ -231,7 +231,7 @@ static bool hpc_statlike_is_host_proc_path(Tracee *tracee, Sysnum num,
 					   RegVersion version,
 					   char *out_path, size_t out_size)
 {
-    char path[64];
+    char path[PATH_MAX];
     word_t path_addr;
     Reg path_reg;
 
@@ -273,7 +273,7 @@ static bool hpc_statlike_is_host_proc_path(Tracee *tracee, Sysnum num,
 
 static int hpc_handle_statlike_enter(Tracee *tracee, Sysnum num)
 {
-    char path[64];
+    char path[PATH_MAX];
 
     if (!hpc_statlike_is_host_proc_path(tracee, num, CURRENT,
 					path, sizeof(path)))
@@ -285,9 +285,100 @@ static int hpc_handle_statlike_enter(Tracee *tracee, Sysnum num)
     return 1;
 }
 
+/* Public accessor for tracee/seccomp.c: on kernels where seccomp is
+ * evaluated BEFORE the ptrace sysenter stop (legacy 3.4.x backports,
+ * seccomp_after_ptrace_enter == false), a blocked statx is answered
+ * entirely in the SIGSYS path and the extension's SYSCALL_ENTER_START /
+ * SYSCALL_EXIT_END handlers never run for it.  The core then asks the
+ * extension whether the statx path targets a host /proc path, so it can
+ * answer ENOENT (the same emulation as the enter side) instead of
+ * running a real host stat() that would leak host data (FIXES.md A2).
+ * Uses CURRENT: at SIGSYS time save_current_regs() fills the
+ * ORIGINAL_SECCOMP_REWRITE slot, not plain ORIGINAL, so ORIGINAL may
+ * hold stale registers from an earlier syscall.  Returns false when the
+ * proc_isolation extension is absent or ISOLATE_PROC is inactive, so
+ * mode A (no isolation) is never affected. */
+bool proc_isolation_statx_is_host_proc_path(Tracee *tracee,
+					    char *out_path, size_t out_size)
+{
+    Extension *extension = get_extension(tracee, hpc_callback);
+    HpcConfig *config;
+
+    if (extension == NULL)
+        return false;
+
+    config = (HpcConfig *)extension->config;
+    if (config == NULL || !(config->flags & ISOLATE_PROC))
+        return false;
+
+    return hpc_statlike_is_host_proc_path(tracee, PR_statx, CURRENT,
+					  out_path, out_size);
+}
+
 /* ================================================================
  * SYSCALL_ENTER_END — kill interception + all other void/block handlers
  * ================================================================ */
+
+/* Deliver @sig to every live tracee of this instance matching a process
+ * group: @group_pid == -1 selects every live tracee (broadcast);
+ * otherwise only tracees whose real host pgid equals @group_pid.  When
+ * @include_self is false the sender (tracee->pid) is never targeted.
+ * Returns the number of tracees that matched.
+ *
+ * sig == 0 is the kill(2) existence oracle: kill(pid, 0) sends nothing,
+ * so the syscall doubles as a live-ness probe (which also closes the
+ * race of an exit between the list walk and the check).  sig != 0
+ * delivers the real signal.  The pgids come from getpgid(2) — a
+ * read-only query, valid even on ptrace-stopped processes — and PRoot
+ * does not trap setpgid/setsid, so a guest that changed its own group
+ * is reflected here exactly as the kernel would see it. */
+static int hpc_kill_tracees_matching(Tracee *tracee, int sig,
+				     pid_t group_pid, bool include_self)
+{
+    Tracees *list = get_tracees_list_head();
+    Tracee *t;
+    int n = 0;
+
+    if (list == NULL)
+        return 0;
+
+    LIST_FOREACH(t, list, link) {
+        if (t->terminated)
+            continue;
+        if (!include_self && t->pid == tracee->pid)
+            continue;
+        if (group_pid != -1 && getpgid(t->pid) != group_pid)
+            continue;
+        if (sig == 0) {
+            if (kill(t->pid, 0) == 0)
+                n++;
+        }
+        else {
+            kill(t->pid, sig);
+            n++;
+        }
+    }
+    return n;
+}
+
+/* POSIX: kill(2) requires @sig to be 0 or a valid signal number;
+ * anything else answers -EINVAL (emulated, syscall voided).  Shared by
+ * every PR_kill target this extension emulates (kill(-1), kill(0),
+ * kill(-pgid)); positive pids pass through and the kernel answers
+ * EINVAL by itself.  @sig is already the int the kernel would see in
+ * the 32-bit signal argument on ARM64.  Returns true when it voided
+ * the syscall with -EINVAL. */
+static bool hpc_kill_invalid_signal(Tracee *tracee, pid_t target_pid, int sig)
+{
+    if (sig != 0 && (sig < 1 || sig >= NSIG)) {
+        set_sysnum(tracee, PR_void);
+        poke_reg(tracee, SYSARG_RESULT, -EINVAL);
+        VERBOSE(tracee, 2, "proc_isolation: kill(%d,%d) -> EINVAL (invalid signal)",
+                target_pid, sig);
+        return true;
+    }
+    return false;
+}
 
 static int hpc_handle_kill_enter(Tracee *tracee, Sysnum num, int pid_reg)
 {
@@ -300,28 +391,128 @@ static int hpc_handle_kill_enter(Tracee *tracee, Sysnum num, int pid_reg)
      * On the host that is every same-uid process, so it must never
      * reach the kernel (FIXES.md C1).  sig == 0 is an existence oracle:
      * answer ESRCH ("no such process") so the sandbox looks empty; real
-     * signals get a fake success -- an emulated broadcast with no real
-     * effect, per the emulate-never-deny philosophy.  Only kill(2) can
-     * express this; tkill/tgkill pids are always positive. */
+     * signals are emulated as a broadcast confined to the sandbox --
+     * the signal is delivered to every live tracee of this proot
+     * instance except the sender, which is exactly what a guest
+     * init/shutdown (openrc/busybox "kill -TERM -1") expects of its own
+     * children (emulate-never-deny: natural success, real effect inside
+     * the sandbox, host untouched).  Only kill(2) can express this;
+     * tkill/tgkill pids are always positive. */
     if (target_pid == -1 && num == PR_kill) {
         sig = (int)peek_reg(tracee, CURRENT, SYSARG_2);
+        if (hpc_kill_invalid_signal(tracee, target_pid, sig))
+            return 0;
         if (sig == 0) {
             set_sysnum(tracee, PR_void);
             poke_reg(tracee, SYSARG_RESULT, -ESRCH);
             VERBOSE(tracee, 2, "proc_isolation: kill(-1,0) -> ESRCH (broadcast oracle voided)");
         }
         else {
+            /* Deliver @sig to every live tracee of this instance except
+             * the sender (host-side kill() over guest PIDs -- the
+             * kernel resolves them as sandbox processes, never host
+             * ones).  An empty list delivers nothing and still returns
+             * 0, the natural result of a broadcast over zero processes. */
+            int delivered = hpc_kill_tracees_matching(tracee, sig, -1, false);
+
             set_sysnum(tracee, PR_void);
             poke_reg(tracee, SYSARG_RESULT, 0);
-            VERBOSE(tracee, 2, "proc_isolation: kill(-1,%d) -> 0 emulated (broadcast voided)", sig);
+            VERBOSE(tracee, 2, "proc_isolation: kill(-1,%d) -> 0 emulated (signal delivered to %d tracee(s))",
+                    sig, delivered);
         }
         return 0;
     }
 
-    /* kill(0, ...) = own process group; kill(-pgid, ...) = a process
-     * group of the sandbox: pass both through. */
-    if (target_pid <= 0)
+    /* kill(0, ...) targets the caller's own process group and
+     * kill(-pgid, ...) a group of the sandbox.  On the host that group
+     * is PRoot's own (every tracee inherits proot's pgid), so passing
+     * them through would let a guest signal the HOST process group —
+     * proot itself and the user's shell — an automatic sandbox self-DoS
+     * (pentest proc.k-sig-kill0-0: "grupo de procesos alcanzable").
+     * Emulate them confined to the guest (emulate-never-deny): the
+     * signal is delivered only to tracees of this instance in the
+     * requested group, the kernel is never invoked.  Only kill(2) can
+     * express these targets; tkill/tgkill take positive pids only and
+     * the kernel answers EINVAL for anything else (left untouched). */
+    if (target_pid <= 0) {
+        pid_t group_pid;
+
+        if (num != PR_kill)
+            return 0;
+
+        if (target_pid == 0) {
+            /* kill(0): the caller's own group.  getpgid on our own live
+             * tracee cannot fail; the fallback keeps an error value
+             * (-1) from meaning "broadcast" in the helper. */
+            group_pid = getpgid(tracee->pid);
+            if (group_pid < 0)
+                group_pid = tracee->pid;
+        }
+        else
+            /* kill(-pgid): group id is the magnitude.  Computed in a
+             * wider type so INT32_MIN (kill(-2147483648)) stays
+             * well-defined; no tracee can match it, so the emulation
+             * answers ESRCH/0 exactly like a nonexistent group. */
+            group_pid = (pid_t)(-(int64_t)target_pid);
+
+        sig = (int)peek_reg(tracee, CURRENT, SYSARG_2);
+
+        if (hpc_kill_invalid_signal(tracee, target_pid, sig))
+            return 0;
+
+        if (sig == 0) {
+            /* Group existence oracle with natural semantics: kill(0,0)
+             * always answers 0 (the caller belongs to its own group, so
+             * the guest sees its own processes); kill(-pgid,0) answers
+             * ESRCH when no tracee is in that group. */
+            int found = hpc_kill_tracees_matching(tracee, 0, group_pid, true);
+
+            set_sysnum(tracee, PR_void);
+            poke_reg(tracee, SYSARG_RESULT, (found > 0) ? 0 : -ESRCH);
+            VERBOSE(tracee, 2, "proc_isolation: kill(%d,0) -> %s emulated (group %d, %d tracee(s))",
+                    target_pid, (found > 0) ? "0" : "ESRCH",
+                    (int)group_pid, found);
+        }
+        else {
+            /* Group membership including the sender (same semantics as
+             * the sig==0 oracle).  For a SPECIFIC pgid (target_pid < -1)
+             * Linux answers ESRCH when the group does not exist at all,
+             * so an empty requested group must not get a fake success —
+             * consistent with our own oracle, which already answers
+             * kill(-pgid, 0) with ESRCH for it.  kill(-1) and kill(0)
+             * always succeed: the sender is itself signalable / belongs
+             * to its own group, guaranteeing at least one member. */
+            int members = hpc_kill_tracees_matching(tracee, 0,
+                                                    group_pid, true);
+
+            if (target_pid < -1 && members == 0) {
+                set_sysnum(tracee, PR_void);
+                poke_reg(tracee, SYSARG_RESULT, -ESRCH);
+                VERBOSE(tracee, 2, "proc_isolation: kill(%d,%d) -> ESRCH (no tracee in group %d)",
+                        target_pid, sig, (int)group_pid);
+                return 0;
+            }
+
+            /* Deliver @sig to every live tracee in the requested group.
+             * The sender is excluded: a deliberate deviation from POSIX
+             * (real kill(0) includes the caller) that protects the
+             * tracee which is itself stopped in ptrace at this very
+             * syscall — signaling it would inject a signal mid-emulation
+             * and could kill the guest shell before it finishes its
+             * script.  It also makes a guest "kill -KILL 0" unable to
+             * destroy its own shell (kill(-1) uses the same rule).  An
+             * empty group delivers nothing and returns 0, the natural
+             * result of a broadcast over zero processes. */
+            int delivered = hpc_kill_tracees_matching(tracee, sig,
+                                                      group_pid, false);
+
+            set_sysnum(tracee, PR_void);
+            poke_reg(tracee, SYSARG_RESULT, 0);
+            VERBOSE(tracee, 2, "proc_isolation: kill(%d,%d) -> 0 emulated (group %d, %d tracee(s))",
+                    target_pid, sig, (int)group_pid, delivered);
+        }
         return 0;
+    }
 
     if (hpc_is_proot_pid(target_pid))
         return 0;

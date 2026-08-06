@@ -24,4 +24,13 @@ typedef struct {
 extern int hpc_callback(Extension *extension, ExtensionEvent event,
                          intptr_t data1, intptr_t data2);
 
+/* Public accessor used by tracee/seccomp.c (SIGSYS path for statx on
+ * legacy kernels where seccomp runs before the ptrace sysenter stop).
+ * True when the statx path argument (CURRENT regs) resolves to a host
+ * /proc path AND proc_isolation is active with ISOLATE_PROC.  Copies
+ * the path into @out_path (up to @out_size bytes) when non-NULL. */
+extern bool proc_isolation_statx_is_host_proc_path(Tracee *tracee,
+                                                    char *out_path,
+                                                    size_t out_size);
+
 #endif /* PROC_ISOLATION_H */

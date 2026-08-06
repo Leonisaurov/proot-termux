@@ -9,6 +9,7 @@
 #include <time.h>      /* time(2), */
 
 #include "extension/extension.h"
+#include "extension/proc_isolation/proc_isolation.h"
 #include "cli/note.h"
 #include "syscall/chain.h"
 #include "syscall/syscall.h"
@@ -582,6 +583,21 @@ static int handle_seccomp_event_common(Tracee *tracee)
 
 	case PR_statx:
 	{
+		/* On kernels where seccomp is evaluated before the ptrace
+		 * sysenter stop (legacy backports, seccomp_after_ptrace_enter
+		 * == false), statx is answered entirely here: the
+		 * proc_isolation extension's SYSCALL_ENTER_START /
+		 * SYSCALL_EXIT_END handlers never run for it.  Block statx of
+		 * host /proc paths with ENOENT (same emulation as the enter
+		 * side, FIXES.md A2) instead of running a real host stat()
+		 * that would leak host data.  The accessor uses CURRENT, the
+		 * register bank save_current_regs() filled into
+		 * ORIGINAL_SECCOMP_REWRITE at SIGSYS time; plain ORIGINAL may
+		 * hold stale registers from an earlier syscall. */
+		if (proc_isolation_statx_is_host_proc_path(tracee, NULL, 0)) {
+			set_result_after_seccomp(tracee, -ENOENT);
+			break;
+		}
 		set_result_after_seccomp(tracee, handle_statx_syscall(tracee, true));
 		break;
 	}
