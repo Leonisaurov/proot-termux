@@ -52,12 +52,15 @@
 
 typedef struct {
     unsigned int flag;       /* ISOLATE_* flag bit */
-    int sysnums[12];         /* Syscall numbers, -1 terminated */
+    int sysnums[32];         /* Syscall numbers, -1 terminated */
 } FlagSysnumMap;
 
 static const FlagSysnumMap flag_sysnum_map[] = {
     { ISOLATE_PROC,   { PR_getdents64, PR_getdents, PR_kill, PR_tkill, PR_tgkill,
-                        PR_open, PR_openat, PR_openat2, PR_read, -1 } },
+                        PR_open, PR_openat, PR_openat2, PR_read,
+                        PR_stat, PR_lstat, PR_stat64, PR_lstat64,
+                        PR_fstatat64, PR_newfstatat, PR_statx,
+                        PR_readlink, PR_readlinkat, -1 } },
     { ISOLATE_PTRACE, { PR_ptrace, PR_process_vm_readv, PR_process_vm_writev,
                          PR_pidfd_open, -1 } },
     { ISOLATE_REBOOT, { PR_reboot, -1 } },
@@ -211,16 +214,112 @@ static int hpc_handle_ptrace_enter(Tracee *tracee)
 }
 
 /* ================================================================
+ * SYSCALL_ENTER_START — stat/readlink family: close the pid-existence
+ * oracle and host-path leak via stat/fstatat/statx/readlink on
+ * /proc/<host-pid>/... (FIXES.md A2).  The path is read from the raw
+ * argument, before PRoot translates it, exactly like the open family
+ * above.  Host pids answer ENOENT (emulate-never-deny); tracee pids
+ * and /proc/self pass through untouched.
+ * ================================================================ */
+
+/* True when @num's path argument resolves to a /proc path of a host
+ * process (the stat/readlink A2 oracle).  @version selects the register
+ * set: CURRENT in SYSCALL_ENTER_START (raw guest path), ORIGINAL in
+ * SYSCALL_EXIT_END.  When @out_path is non-NULL the path string is
+ * copied there (up to @out_size bytes) for logging. */
+static bool hpc_statlike_is_host_proc_path(Tracee *tracee, Sysnum num,
+					   RegVersion version,
+					   char *out_path, size_t out_size)
+{
+    char path[64];
+    word_t path_addr;
+    Reg path_reg;
+
+    switch (num) {
+    case PR_stat:
+    case PR_stat64:
+    case PR_lstat:
+    case PR_lstat64:
+    case PR_readlink:
+        path_reg = SYSARG_1;
+        break;
+    case PR_newfstatat:
+    case PR_fstatat64:
+    case PR_statx:
+    case PR_readlinkat:
+        path_reg = SYSARG_2;
+        break;
+    default:
+        return false;
+    }
+
+    path_addr = peek_reg(tracee, version, path_reg);
+    if (path_addr == 0)
+        return false;
+
+    if (read_string(tracee, path, path_addr, sizeof(path) - 1) < 0)
+        return false;
+    path[sizeof(path) - 1] = '\0';
+
+    if (!hpc_is_host_proc_path(path))
+        return false;
+
+    if (out_path != NULL && out_size > 0) {
+        strncpy(out_path, path, out_size - 1);
+        out_path[out_size - 1] = '\0';
+    }
+    return true;
+}
+
+static int hpc_handle_statlike_enter(Tracee *tracee, Sysnum num)
+{
+    char path[64];
+
+    if (!hpc_statlike_is_host_proc_path(tracee, num, CURRENT,
+					path, sizeof(path)))
+        return 0;
+
+    VERBOSE(tracee, 2, "proc_isolation: blocked stat/readlink %s (ENOENT)", path);
+    set_sysnum(tracee, PR_void);
+    poke_reg(tracee, SYSARG_RESULT, -ENOENT);
+    return 1;
+}
+
+/* ================================================================
  * SYSCALL_ENTER_END — kill interception + all other void/block handlers
  * ================================================================ */
 
-static int hpc_handle_kill_enter(Tracee *tracee, int pid_reg)
+static int hpc_handle_kill_enter(Tracee *tracee, Sysnum num, int pid_reg)
 {
     pid_t target_pid;
+    int sig;
 
     target_pid = (pid_t)peek_reg(tracee, CURRENT, pid_reg);
 
-    /* kill(0, ...) means self process group — allow */
+    /* kill(-1, sig): broadcast to every process the caller may signal.
+     * On the host that is every same-uid process, so it must never
+     * reach the kernel (FIXES.md C1).  sig == 0 is an existence oracle:
+     * answer ESRCH ("no such process") so the sandbox looks empty; real
+     * signals get a fake success -- an emulated broadcast with no real
+     * effect, per the emulate-never-deny philosophy.  Only kill(2) can
+     * express this; tkill/tgkill pids are always positive. */
+    if (target_pid == -1 && num == PR_kill) {
+        sig = (int)peek_reg(tracee, CURRENT, SYSARG_2);
+        if (sig == 0) {
+            set_sysnum(tracee, PR_void);
+            poke_reg(tracee, SYSARG_RESULT, -ESRCH);
+            VERBOSE(tracee, 2, "proc_isolation: kill(-1,0) -> ESRCH (broadcast oracle voided)");
+        }
+        else {
+            set_sysnum(tracee, PR_void);
+            poke_reg(tracee, SYSARG_RESULT, 0);
+            VERBOSE(tracee, 2, "proc_isolation: kill(-1,%d) -> 0 emulated (broadcast voided)", sig);
+        }
+        return 0;
+    }
+
+    /* kill(0, ...) = own process group; kill(-pgid, ...) = a process
+     * group of the sandbox: pass both through. */
     if (target_pid <= 0)
         return 0;
 
@@ -609,6 +708,17 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
             }
         }
 
+        /* stat/fstatat/statx/readlink of /proc/<pid>/... must not reach
+         * the kernel: they would reveal host process existence (oracle)
+         * or leak host paths (FIXES.md A2).  Only enforced when
+         * ISOLATE_PROC is active, so mode A keeps its behaviour. */
+        if ((config->flags & ISOLATE_PROC)
+            && (num == PR_stat || num == PR_lstat || num == PR_stat64
+                || num == PR_lstat64 || num == PR_fstatat64
+                || num == PR_newfstatat || num == PR_statx
+                || num == PR_readlink || num == PR_readlinkat))
+            return hpc_handle_statlike_enter(tracee, num);
+
         if (config->flags & ISOLATE_PROC) {
             if (num == PR_socket) {
                 int domain = (int) peek_reg(tracee, CURRENT, SYSARG_1);
@@ -652,15 +762,15 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
         switch (num) {
         case PR_kill:
             if (config->flags & ISOLATE_PROC)
-                return hpc_handle_kill_enter(tracee, SYSARG_1);
+                return hpc_handle_kill_enter(tracee, PR_kill, SYSARG_1);
             return 0;
         case PR_tkill:
             if (config->flags & ISOLATE_PROC)
-                return hpc_handle_kill_enter(tracee, SYSARG_1);
+                return hpc_handle_kill_enter(tracee, PR_tkill, SYSARG_1);
             return 0;
         case PR_tgkill:
             if (config->flags & ISOLATE_PROC)
-                return hpc_handle_kill_enter(tracee, SYSARG_2);
+                return hpc_handle_kill_enter(tracee, PR_tgkill, SYSARG_2);
             return 0;
         case PR_reboot:
             if (config->flags & ISOLATE_REBOOT) {
@@ -784,6 +894,16 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
             return hpc_handle_getdents_exit(tracee, PR_getdents);
         case PR_read:
             return hpc_handle_maps_read_exit(tracee);
+        case PR_statx:
+            /* exit.c's handle_statx_syscall() re-runs a host stat() when
+             * the kernel result is an error, overwriting the ENOENT we
+             * emulated in SYSCALL_ENTER_START with the kernel's EACCES
+             * for host /proc paths.  Re-assert the emulated ENOENT for
+             * host-proc paths (legitimate statx of tracee pids, /proc/self
+             * and non-proc paths are untouched). */
+            if (hpc_statlike_is_host_proc_path(tracee, PR_statx, ORIGINAL, NULL, 0))
+                poke_reg(tracee, SYSARG_RESULT, -ENOENT);
+            return 0;
         default:
             return 0;
         }
