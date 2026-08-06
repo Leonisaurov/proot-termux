@@ -255,9 +255,26 @@ static int initialize_cwd(Tracee *tracee)
 
 	status = canonicalize(tracee, path2, true, path, 0);
 	if (status < 0) {
-		note(tracee, WARNING, USER, "can't chdir(\"%s\") in the guest rootfs: %s",
-			path2, strerror(-status));
-		note(tracee, INFO, USER, "default working directory is now \"/\"");
+		/* In --exec mode the client's cwd is only decorative: the
+		 * supervisor resolves the raw -w against ITS OWN rootfs,
+		 * so a guest-only path (e.g. -w /root with no /root on
+		 * the host) must not spam the client's stderr with a
+		 * warning even though the command will run fine.  Stay
+		 * silent by default (VERBOSE) and keep the "/" fallback
+		 * internally either way. */
+		if (tracee->exec_target > 0) {
+			VERBOSE(tracee, 1,
+				"client cwd unavailable (\"%s\": %s); "
+				"the child cwd comes from the supervisor",
+				path2, strerror(-status));
+		}
+		else {
+			note(tracee, WARNING, USER,
+				"can't chdir(\"%s\") in the guest rootfs: %s",
+				path2, strerror(-status));
+			note(tracee, INFO, USER,
+				"default working directory is now \"/\"");
+		}
 		strcpy(path, "/");
 	}
 	chop_finality(path);

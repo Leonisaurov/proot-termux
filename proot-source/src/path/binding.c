@@ -498,9 +498,12 @@ Binding *copy_binding(const Tracee *tracee, const TALLOC_CTX *context,
 	 * list, so carrying it over would only be a maintenance trap
 	 * (and a shallow copy would double-remove host files on
 	 * cleanup).  The supervisor's original binding keeps sole
-	 * ownership of the host files it created until it exits; the
-	 * child only needs type == BINDING_TYPE_MBIND to resolve the
-	 * merge bind. */
+	 * ownership of the host files it created until it exits.
+	 *
+	 * type is copied for completeness/future use only: it is read
+	 * solely at binding creation time (new_binding()/mbind_prepare)
+	 * and the merge-bind resolution itself works purely on the
+	 * host/guest paths, so the child does not rely on it. */
 
 	return binding;
 }

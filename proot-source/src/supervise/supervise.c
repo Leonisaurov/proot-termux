@@ -110,6 +110,19 @@ static void remove_client(int index)
 	}
 }
 
+/* Close the stdin/stdout/stderr fds received via SCM_RIGHTS.  Must be
+ * called on EVERY exit path of supervise_accept_client() after the
+ * recvmsg() succeeded: the child would otherwise never run (early
+ * returns) and the fds would leak in the long-lived supervisor. */
+static void close_client_fds(int client_fds[EXEC_FD_MAX])
+{
+	int j;
+	for (j = 0; j < EXEC_FD_MAX; j++) {
+		if (client_fds[j] >= 0)
+			close(client_fds[j]);
+	}
+}
+
 /* ===========================================================================
  * supervise_init: create signalfd + abstract listen socket
  * =========================================================================== */
@@ -258,6 +271,7 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	/* Read the exec request (now proceed normally) */
 	ssize_t n = read(client_fd, &req, sizeof(req));
 	if (n != sizeof(req) || req.argc < 1) {
+		close_client_fds(client_fds);
 		close(client_fd);
 		return;
 	}
@@ -275,6 +289,7 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	argv_ptrs[argc] = NULL;
 
 	if (argc < 1) {
+		close_client_fds(client_fds);
 		close(client_fd);
 		return;
 	}
@@ -293,7 +308,6 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	if (rlimit_proc_limit_reached()) {
 		ExecResponse resp;
 		ssize_t w;
-		int j;
 
 		VERBOSE(root_tracee, 1,
 			"supervise: exec refused (EAGAIN): --proc-limit reached, "
@@ -312,16 +326,34 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 
 		/* Release the SCM_RIGHTS fds received from the client (the
 		 * child would have dup2'd and closed them).  */
-		for (j = 0; j < EXEC_FD_MAX; j++) {
-			if (client_fds[j] >= 0)
-				close(client_fds[j]);
-		}
+		close_client_fds(client_fds);
 		return;
+	}
+
+	/* Normalize a relative -w into an absolute guest path BEFORE
+	 * forking so the child sees it: proot translates the child's
+	 * chdir() against the child's OWN fs->cwd, so a bare relative
+	 * "sub" would resolve to "sub/sub" (ENOENT) even when valid.
+	 * Resolving against the supervisor's cwd yields the absolute
+	 * guest path that the chdir translation then canonicalizes
+	 * (resolving ".." and symlinks). */
+	if (req.cwd[0] != '\0' && req.cwd[0] != '/') {
+		char abs_cwd[PATH_MAX];
+		int join_status = join_paths(2, abs_cwd,
+					     root_tracee->fs->cwd ?: "/",
+					     req.cwd);
+		if (join_status < 0 || strlen(abs_cwd) >= sizeof(req.cwd)) {
+			close_client_fds(client_fds);
+			close(client_fd);
+			return;
+		}
+		strcpy(req.cwd, abs_cwd);
 	}
 
 	/* Fork a new tracee */
 	pid = fork();
 	if (pid < 0) {
+		close_client_fds(client_fds);
 		close(client_fd);
 		return;
 	}
@@ -346,22 +378,26 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 			}
 		}
 
-		/* Change to requested cwd if provided */
+		/* Change to requested cwd if provided.  req.cwd was
+		 * normalized to an absolute guest path by the parent
+		 * before forking; proot emulates the chdir() syscall
+		 * (translate -> canonicalize -> detranslate), so ".."
+		 * and symlinks are resolved and fs->cwd is updated to
+		 * the canonical path on success. */
 		if (req.cwd[0] != '\0') {
 			if (chdir(req.cwd) < 0) {
-				/* Fatal, not silent: the parent already set
-				 * child_tracee->fs->cwd = req.cwd, so pushing
-				 * on with a failed chdir would leave the real
-				 * process cwd (the supervisor's) diverging from
-				 * fs->cwd, silently breaking relative paths.
-				 * Exit 126 (command found but cannot run), the
-				 * same spirit as proot's own "can't chdir"
-				 * handling but made visible to the client. */
+				/* Fatal, not silent: pushing on with a
+				 * failed chdir would leave the real
+				 * process cwd (the supervisor's)
+				 * diverging from fs->cwd, silently
+				 * breaking relative paths.  Exit 126
+				 * (command found but cannot run), the
+				 * same spirit as proot's own "can't
+				 * chdir" handling but made visible to
+				 * the client. */
 				note(NULL, ERROR, USER,
 				     "can't chdir(\"%s\") in the guest rootfs: %s",
 				     req.cwd, strerror(errno));
-				VERBOSE(root_tracee, 1, "supervise: chdir(%s): %s",
-					req.cwd, strerror(errno));
 				_exit(126);
 			}
 		}
@@ -415,7 +451,14 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 			child_tracee->fs->cwd = talloc_strdup(child_tracee->fs,
 				root_tracee->fs->cwd ?: ".");
 
-			/* Override cwd if the exec request specified one */
+			/* Override cwd if the exec request specified one.
+			 * req.cwd is already an absolute guest path
+			 * (relative -w was joined to the supervisor's
+			 * cwd before forking).  It may still contain
+			 * ".."/symlinks: the child's chdir() goes
+			 * through proot's translation, which
+			 * canonicalizes it and overwrites fs->cwd with
+			 * the canonical path on success. */
 			if (req.cwd[0] != '\0') {
 				TALLOC_FREE(child_tracee->fs->cwd);
 				child_tracee->fs->cwd = talloc_strdup(child_tracee->fs, req.cwd);
@@ -661,8 +704,18 @@ int exec_connect(const Tracee *tracee, int argc, char *const argv[])
 	 * cwd_explicit is true but cwd_raw is NULL (cannot happen with
 	 * the current handlers), keep the inherited behavior rather
 	 * than sending a garbage path. */
-	if (tracee->cwd_explicit && tracee->cwd_raw != NULL
-	    && tracee->cwd_raw[0] != '\0') {
+	if (tracee->cwd_explicit && tracee->cwd_raw != NULL) {
+		if (tracee->cwd_raw[0] == '\0') {
+			/* -w "" was explicitly passed: reject it loudly
+			 * instead of silently treating it as "not
+			 * specified" (which would inherit the
+			 * supervisor's cwd and mask the user's typo). */
+			note(tracee, ERROR, USER,
+			     "option -w/--cwd/--pwd requires a non-empty path");
+			close(fd);
+			errno = EINVAL;
+			return -1;
+		}
 		if (strlen(tracee->cwd_raw) >= sizeof(req.cwd)) {
 			close(fd);
 			errno = ENAMETOOLONG;

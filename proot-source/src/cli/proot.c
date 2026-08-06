@@ -199,6 +199,9 @@ static int handle_option_q(Tracee *tracee, const Cli *cli UNUSED, const char *va
 
 static int handle_option_w(Tracee *tracee, const Cli *cli UNUSED, const char *value)
 {
+	/* "Last option wins": release any previous -w before
+	 * re-assigning (symmetrical to cwd_raw below). */
+	TALLOC_FREE(tracee->fs->cwd);
 	tracee->fs->cwd = talloc_strdup(tracee->fs, value);
 	if (tracee->fs->cwd == NULL)
 		return -1;
