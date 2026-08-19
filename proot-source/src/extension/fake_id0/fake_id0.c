@@ -555,6 +555,7 @@ static int adjust_elf_auxv(Tracee *tracee, Config *config)
 
 static int handle_perm_err_exit_end(Tracee *tracee, Config *config, bool even_if_not_root) {
 	word_t result;
+	word_t sysnum;
 
 	/* Override only permission errors.  */
 	result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
@@ -571,6 +572,19 @@ static int handle_perm_err_exit_end(Tracee *tracee, Config *config, bool even_if
 
 	if ((int) result != -EPERM && (int) result != -EACCES)
 		return 0;
+
+	/* E6: mknod/mknodat with S_ISBLK/S_ISCHR — the node won't
+	 * actually be created on the host, so return ENOENT instead
+	 * of faking success to avoid phantom device nodes.  */
+	sysnum = get_sysnum(tracee, CURRENT);
+	if (sysnum == PR_mknod || sysnum == PR_mknodat) {
+		word_t mode = peek_reg(tracee, CURRENT,
+			sysnum == PR_mknod ? SYSARG_2 : SYSARG_3);
+		if (S_ISBLK(mode) || S_ISCHR(mode)) {
+			poke_reg(tracee, SYSARG_RESULT, -ENOENT);
+			return 0;
+		}
+	}
 
 	/* Force success if the tracee was supposed to have
 	 * the capability.  */

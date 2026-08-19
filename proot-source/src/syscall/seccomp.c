@@ -389,7 +389,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_recvmsg,		0 },
 	{ PR_sendmsg,		0 },
 	{ PR_sendto,		0 },
-	{ PR_socket,		FILTER_SYSEXIT },
+	{ PR_socket,		0 },  /* D4: enter.c requests sysexit dynamically for AF_NETLINK */
 	{ PR_execve,		FILTER_SYSEXIT },
 	{ PR_execveat,		FILTER_SYSEXIT },
 	{ PR_faccessat,		0 },
@@ -442,7 +442,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_removexattr,	0 },
 	{ PR_rename,		FILTER_SYSEXIT },
 	{ PR_renameat,		FILTER_SYSEXIT },
-	{ PR_renameat2,		FILTER_SYSEXIT },
+	{ PR_renameat2,		0 },  /* E1: link2symlink adds FILTER_SYSEXIT when active */
 	{ PR_rmdir,		0 },
 	{ PR_setrlimit,		FILTER_SYSEXIT },
 	{ PR_setxattr,		0 },
@@ -460,7 +460,11 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_truncate64,	0 },
 	{ PR_umount,		FILTER_SYSEXIT },
 	{ PR_umount2,		FILTER_SYSEXIT },
-	{ PR_uname,		FILTER_SYSEXIT },
+#if defined(ARCH_X86_64)
+	{ PR_uname,		FILTER_SYSEXIT },  /* E3: exit handler only on x86_64 */
+#else
+	{ PR_uname,		0 },
+#endif
 	{ PR_unshare,		FILTER_SYSEXIT },
 	{ PR_setns,		FILTER_SYSEXIT },
 	{ PR_unlink,		0 },
