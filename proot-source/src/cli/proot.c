@@ -309,6 +309,11 @@ static int handle_option_h(Tracee *tracee, const Cli *cli, const char *value UNU
  * When 1 (--recommended-etc-rw), they use :rw (legacy behavior). */
 static int g_recommended_etc_rw = 0;
 
+/* C3: defer -R/-S bindings until after all flags are parsed,
+ * so --recommended-etc-rw can take effect before bindings are created. */
+static int g_defer_R_bindings = 0;
+static const char *g_defer_R_value = NULL;
+
 static int handle_option_recommended_etc_rw(Tracee *tracee, const Cli *cli UNUSED,
 			const char *value UNUSED)
 {
@@ -348,8 +353,12 @@ static void new_bindings(Tracee *tracee, const char *bindings[], const char *val
 			? expand_front_variable(tracee->ctx, bindings[i])
 			: value);
 
+		/* C3: use the guest path for access mode check, not the host path */
+		const char *check_path = (strcmp(bindings[i], "*path*") != 0)
+			? bindings[i] : path;
+
 		new_binding(tracee, path, NULL, false,
-				recommended_binding_access(path), BINDING_TYPE_REGULAR);
+				recommended_binding_access(check_path), BINDING_TYPE_REGULAR);
 	}
 }
 
@@ -361,7 +370,10 @@ static int handle_option_R(Tracee *tracee, const Cli *cli, const char *value)
 	if (status < 0)
 		return status;
 
-	new_bindings(tracee, recommended_bindings, value);
+	/* C3: defer recommended bindings until after all flags are parsed,
+	 * so --recommended-etc-rw can take effect first. */
+	g_defer_R_bindings = 1;
+	g_defer_R_value = value;
 
 	return 0;
 }
@@ -1041,13 +1053,19 @@ static int pre_initialize_bindings(Tracee *tracee, const Cli *cli,
 	}
 
 	 /* The default guest rootfs is "/" if none was specified.  */
-	if (get_root(tracee) == NULL) {
-		status = handle_option_r(tracee, cli, "/");
-		if (status < 0)
-			return -1;
-	}
+	 if (get_root(tracee) == NULL) {
+	 	status = handle_option_r(tracee, cli, "/");
+	 	if (status < 0)
+	 		return -1;
+	 }
 
-	return cursor;
+	 /* C3: apply deferred -R/-S bindings now that all flags are parsed. */
+	 if (g_defer_R_bindings) {
+	 	new_bindings(tracee, recommended_bindings, g_defer_R_value);
+	 	g_defer_R_bindings = 0;
+	 }
+
+	 return cursor;
 }
 
 const Cli *get_proot_cli(TALLOC_CTX *context UNUSED)
