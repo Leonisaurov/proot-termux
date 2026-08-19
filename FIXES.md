@@ -5,9 +5,9 @@
 | Fase | Estado | Commits | Notas |
 |------|--------|---------|-------|
 | A — Aislamiento P0 | **Completada** ✅ (en producción) | `573f4cb8d9` (REV 19), `3b98197d8a` (REV 20) | A2 + C1 + V4 (573f4cb8d9); cierre de los 4 MINORs + kill(0)/kill(-pgid) confinados (3b98197d8a). Pentest ampliado con baselines `*_2` y verificaciones `*_3`. |
-| B — Leaks y fds | **En curso** 🔄 (en implementación) | — | 8 fixes B1-B8 especificados en §4; smoke tests `--exec`/`--proxy` + talloc report como verificación. REVISION llegará a 21 al cerrar. |
-| C — Aislamiento P1 | Pendiente | — | C1/V4 ya implementados en la Fase A (eran los escapes reales del pentest). Resto C2-C7 sin tocar. |
-| D — Rendimiento P0/P1 | Pendiente | — | Va AL FINAL (semántica congelada). |
+| B — Leaks y fds | **Completada** ✅ | `ec308f5425` (REV 21) | 8 fixes B1-B8. Pentest: 14/14 tests PASS (B1-B2-B7 concurrent, B3 fd_map sweep, B5 SP integrity, B6 bridge children, B7 signalfd, B8 talloc). Scripts en `pentest/test_b*.sh`, reporte en `pentest/results/REPORT-FASE-B-PENTEST.md`. |
+| C — Aislamiento P1 | **Completada** ✅ | `6d3a556007` (REV 22), `e141f86c56` | C2 MS_RDONLY emulation (insort_binding3_with_mode), C3 /etc :ro default (--recommended-etc-rw), C4 proc blocklist expandido (12 paths), C6 SO_PEERCRED auth, C7 --fake-permissions. Pentest: 7/7 PASS. C3 fix: defer -R bindings + guest path check. |
+| D — Rendimiento P0/P1 | **Parcial** 🔄 | `e30bdb5b43` (REV 23) | D1 BPF sorted copy, D2 ioctl dinámico FICLONE, D3 faccessat2 sin sysexit. DEFERIDOS: D4 (socket sysexit), D5 (hash table — hang por talloc lifecycle), D6 (binding cache — dangling pointers), D7 (canonicalize cache). Pentest: B1/B2/B7 PASS. |
 | E — Resto P2/P3 | Pendiente | — | Sin tocar. |
 
 Documento de referencia INMUTABLE durante la implementación. Resultado de 3 auditorías profundas (rendimiento, leaks/fds, aislamiento). Cada fix especifica archivo:línea, cambio concreto, riesgo y verificación. No re-abrir ítems marcados en §0.
@@ -20,7 +20,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | Leak talloc en shutdown supervise (`free_terminated_tracees`, FU-1..FU-4, `supervise_handle_exited_tracee`, guard `ctl_fd>=0`) | ✅ fixes 5ad187e929 + 414053fc04 |
 | **FASE A COMPLETADA — A2 stat/readlink oracle + C1 kill(-1) broadcast + V4 netlink topology** | ✅ commit `573f4cb8d9` 'fix(isolation): block /proc host stat/readlink oracle, kill(-1) broadcast, netlink topology' (REVISION 19) — pentest ampliado con baselines `*_2` y verificaciones `*_3` |
 | **FASE A COMPLETADA — cierre de los 4 MINORs + hardening señales** | ✅ commit `3b98197d8a` 'fix(isolation): deliver kill broadcasts to guest tracees, block statx on SIGSYS, harden signal validation' (REVISION 20) — kill(-1) entrega real a tracees; statx cubierto en SIGSYS legacy; pentest EMULADO-OK; buffers PATH_MAX; extra kill(0)/kill(-pgid) confinados al guest (ESRCH pgid vacío, EINVAL señal inválida) |
-| REVISION actual en `packages/proot/build.sh` | **20** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/`; irá a 21 al cerrar Fase B |
+|| REVISION actual en `packages/proot/build.sh` | **23** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/` |
 
 ## 1. Resumen ejecutivo de las 3 auditorías
 
