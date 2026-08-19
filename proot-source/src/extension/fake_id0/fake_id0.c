@@ -395,6 +395,22 @@ static int restore_mode(ModifiedNode *node)
 	return 0;
 }
 
+/* C7: when set (--fake-permissions), override_permissions is a no-op.
+ * Permissions are emulated in stat/access responses instead of
+ * mutating host files with real chmod.  Avoids persistence after
+ * SIGKILL and avoids modifying :ro bindings. */
+static int g_fake_permissions = 0;
+
+int fake_id0_fake_permissions_enabled(void)
+{
+	return g_fake_permissions;
+}
+
+void fake_id0_set_fake_permissions(int enabled)
+{
+	g_fake_permissions = enabled;
+}
+
 /**
  * Force permissions of @path to "rwx" during the path translation of
  * current @tracee's syscall, in order to simulate CAP_DAC_OVERRIDE.
@@ -407,6 +423,11 @@ static void override_permissions(const Tracee *tracee, const char *path, bool is
 	struct stat perms;
 	mode_t new_mode;
 	int status;
+
+	/* C7: when --fake-permissions is set, skip the real chmod entirely.
+	 * Permissions are emulated in stat/access exit paths instead. */
+	if (g_fake_permissions)
+		return;
 
 	/* Get the meta-data */
 	if (should_skip_file_access_due_to_f2fs_bug(tracee, path)) 
@@ -673,11 +694,25 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 
 	/* handle_access(tracee path_sysarg, mode_sysarg, dirfd_sysarg, config) */
 	/* int access(const char *pathname, int mode) */
-	case PR_access: 
+	case PR_access:
+		/* C7: when --fake-permissions is set, emulate access() as
+		 * always-successful without checking real permissions. */
+		if (g_fake_permissions) {
+			set_sysnum(tracee, PR_void);
+			poke_reg(tracee, SYSARG_RESULT, 0);
+			VERBOSE(tracee, 2, "fake_id0: emulated access() -> 0 (--fake-permissions)");
+			return 0;
+		}
 		return handle_access_enter_end(tracee, SYSARG_1, SYSARG_2, IGNORE_SYSARG, config);
 	/* int faccessat(int dirfd, const char *pathname, int mode, int flags) */
 	case PR_faccessat:
 	case PR_faccessat2:
+		if (g_fake_permissions) {
+			set_sysnum(tracee, PR_void);
+			poke_reg(tracee, SYSARG_RESULT, 0);
+			VERBOSE(tracee, 2, "fake_id0: emulated faccessat() -> 0 (--fake-permissions)");
+			return 0;
+		}
 		return handle_access_enter_end(tracee, SYSARG_2, SYSARG_3, SYSARG_1, config); 
 
 	/* handle_exec(tracee, filename_sysarg, config) */

@@ -415,8 +415,22 @@ static void insort_binding2(const Tracee *tracee, Binding *binding)
  * otherwise a pointer to the newly created binding.
  */
 Binding *insort_binding3(const Tracee *tracee, const TALLOC_CTX *context,
-			const char host_path[PATH_MAX],
-			const char guest_path[PATH_MAX])
+		const char host_path[PATH_MAX],
+		const char guest_path[PATH_MAX])
+{
+	return insort_binding3_with_mode(tracee, context, host_path, guest_path,
+			BINDING_ACCESS_RW);
+}
+
+/**
+ * C2: Create and insert a new binding with a specified access mode.
+ * Same as insort_binding3() but allows callers (emulate_mount) to set
+ * :ro/:wo/:rw on the binding — critical for MS_RDONLY emulation.
+ */
+Binding *insort_binding3_with_mode(const Tracee *tracee, const TALLOC_CTX *context,
+		const char host_path[PATH_MAX],
+		const char guest_path[PATH_MAX],
+		BindingAccess access_mode)
 {
 	Binding *binding;
 
@@ -429,6 +443,7 @@ Binding *insort_binding3(const Tracee *tracee, const TALLOC_CTX *context,
 
 	binding->host.length = strlen(binding->host.path);
 	binding->guest.length = strlen(binding->guest.path);
+	binding->access_mode = access_mode;
 
 	insort_binding2(tracee, binding);
 

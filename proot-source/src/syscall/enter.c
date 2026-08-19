@@ -262,7 +262,8 @@ static void emulate_mount(Tracee *tracee, const char *src_user,
 	if (guest_canonicalize(tracee, target_user, guest_path) < 0)
 		return;
 
-	(void) insort_binding3(tracee, tracee->fs, host_path, guest_path);
+	(void) insort_binding3_with_mode(tracee, tracee->fs, host_path, guest_path,
+			((flags & MS_RDONLY) != 0) ? BINDING_ACCESS_RO : BINDING_ACCESS_RW);
 }
 
 /**

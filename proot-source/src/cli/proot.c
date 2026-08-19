@@ -305,6 +305,38 @@ static int handle_option_h(Tracee *tracee, const Cli *cli, const char *value UNU
 	return -1;
 }
 
+/* C3: when 0 (default), recommended /etc/ binds use :ro.
+ * When 1 (--recommended-etc-rw), they use :rw (legacy behavior). */
+static int g_recommended_etc_rw = 0;
+
+static int handle_option_recommended_etc_rw(Tracee *tracee, const Cli *cli UNUSED,
+			const char *value UNUSED)
+{
+	g_recommended_etc_rw = 1;
+	VERBOSE(tracee, 1, "--recommended-etc-rw: /etc/ binds will be RW (legacy)");
+	return 0;
+}
+
+/**
+ * C3 helper: returns the access mode for a recommended binding path.
+ * /etc/ paths default to :ro unless --recommended-etc-rw is set.
+ */
+static BindingAccess recommended_binding_access(const char *path)
+{
+	if (!g_recommended_etc_rw && strncmp(path, "/etc/", 5) == 0)
+		return BINDING_ACCESS_RO;
+	return BINDING_ACCESS_RW;
+}
+
+/* C7: --fake-permissions handler */
+static int handle_option_fake_permissions(Tracee *tracee, const Cli *cli UNUSED,
+			const char *value UNUSED)
+{
+	fake_id0_set_fake_permissions(1);
+	VERBOSE(tracee, 1, "--fake-permissions: file permissions will be emulated (no real chmod)");
+	return 0;
+}
+
 static void new_bindings(Tracee *tracee, const char *bindings[], const char *value)
 {
 	int i;
@@ -316,7 +348,8 @@ static void new_bindings(Tracee *tracee, const char *bindings[], const char *val
 			? expand_front_variable(tracee->ctx, bindings[i])
 			: value);
 
-		new_binding(tracee, path, NULL, false, BINDING_ACCESS_RW, BINDING_TYPE_REGULAR);
+		new_binding(tracee, path, NULL, false,
+				recommended_binding_access(path), BINDING_TYPE_REGULAR);
 	}
 }
 

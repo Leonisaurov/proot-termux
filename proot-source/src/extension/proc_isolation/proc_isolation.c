@@ -876,7 +876,19 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
                 if (strcmp(path, "/proc/cpuinfo") == 0 ||
                     strcmp(path, "/proc/meminfo") == 0 ||
                     strcmp(path, "/proc/self/mountinfo") == 0 ||
-                    strcmp(path, "/proc/self/environ") == 0) {
+                    strcmp(path, "/proc/self/environ") == 0 ||
+                    strcmp(path, "/proc/version") == 0 ||
+                    strcmp(path, "/proc/uptime") == 0 ||
+                    strcmp(path, "/proc/stat") == 0 ||
+                    strcmp(path, "/proc/loadavg") == 0 ||
+                    strcmp(path, "/proc/kallsyms") == 0 ||
+                    strcmp(path, "/proc/slabinfo") == 0 ||
+                    strcmp(path, "/proc/zoneinfo") == 0 ||
+                    strcmp(path, "/proc/iomem") == 0 ||
+                    strcmp(path, "/proc/interrupts") == 0 ||
+                    strcmp(path, "/proc/modules") == 0 ||
+                    strcmp(path, "/proc/cmdline") == 0 ||
+                    strcmp(path, "/proc/misc") == 0) {
                     VERBOSE(tracee, 2, "proc_isolation: blocked %s (ENOENT)", path);
                     set_sysnum(tracee, PR_void);
                     poke_reg(tracee, SYSARG_RESULT, -ENOENT);

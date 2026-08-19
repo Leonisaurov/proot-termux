@@ -281,6 +281,27 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	if (client_fd < 0)
 		return;
 
+	/* C6: SO_PEERCRED authentication — verify the connecting process
+	 * is a tracee (same uid as the supervisor), not a random host
+	 * process that found the abstract socket name.  Without this,
+	 * any process on the host could connect and inject commands. */
+	{
+		struct ucred cred;
+		socklen_t cred_len = sizeof(cred);
+		if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) == 0) {
+			uid_t my_uid = getuid();
+			if (cred.uid != my_uid) {
+				VERBOSE(NULL, 2, "supervise: rejected --exec from uid %d (expected %d)",
+					(int)cred.uid, (int)my_uid);
+				close(client_fd);
+				return;
+			}
+		}
+		/* If getsockopt fails (shouldn't on Linux), allow the connection
+		 * for backward compatibility — the SCM_RIGHTS fds will still be
+		 * validated. */
+	}
+
 	/* Receive stdin/stdout/stderr from client via SCM_RIGHTS */
 	int client_fds[EXEC_FD_MAX] = { -1, -1, -1 };
 	{

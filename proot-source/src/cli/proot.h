@@ -84,6 +84,8 @@ static int handle_option_ioport_isolated(Tracee *tracee, const Cli *cli, const c
 static int handle_option_bpf_isolated(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_perf_isolated(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_handle_isolated(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_recommended_etc_rw(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_fake_permissions(Tracee *tracee, const Cli *cli, const char *value);
 
 /* Host-side resource limit options (Fase 1).  */
 static int handle_option_cpu_limit(Tracee *tracee, const Cli *cli, const char *value);
@@ -606,6 +608,22 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
 \t    * /tmp/\n\
 \t    * /run/shm\n\
 \t    * $HOME",
+	},
+	{ .class = "Security options",
+	  .arguments = {
+		{ .name = "--recommended-etc-rw", .separator = '\0', .value = NULL },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_recommended_etc_rw,
+	  .description = "Allow recommended /etc/* binds to be read-write (legacy behavior).",
+	  .detail = "	By default, -R and -S make /etc/* binds read-only to prevent\n	the guest from modifying host configuration files.  This flag\n	restores the legacy behavior where all recommended binds are\n	read-write.  USE WITH CAUTION — the guest can overwrite\n	host /etc/passwd, /etc/hosts, etc.",
+	},
+	{ .class = "Security options",
+	  .arguments = {
+		{ .name = "--fake-permissions", .separator = '\0', .value = NULL },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_fake_permissions,
+	  .description = "Emulate file permissions without mutating host files.",
+	  .detail = "	By default, -0 (--change-id) uses real chmod() to grant the\n	tracee access to host files.  This flag skips the real chmod\n	and instead emulates permissions in stat/access responses.\n	Avoids persisting permission changes after SIGKILL and avoids\n	modifying :ro bindings.  NOTE: open() may fail with EACCES\n	for files that are not actually readable by the host user.",
 	},
 	END_OF_OPTIONS,
 	},
