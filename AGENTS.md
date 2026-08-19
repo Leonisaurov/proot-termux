@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker + CI GitHub Actions). La fuente vive en `proot-source/` — sin parches, sin downloads. Rama `master`.
+Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker + CI GitHub Actions). La fuente vive en `proot-source/` — sin parches, sin downloads. Rama `master`. Security hardening: fases A-D completadas/parcial, fase E pendiente (ver FIXES.md).
 
 ## Build & CI
 
@@ -43,7 +43,7 @@ gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Succ
 
 | Fuente | VERSION | REVISION |
 |--------|---------|----------|
-| `packages/proot/build.sh` | `5.1.107.89` | `14` |
+| `packages/proot/build.sh` | `5.1.107.89` | `23` |
 | `scripts/build-native.sh` | `5.1.107.87` | `16` |
 
 Discrepancia verificada entre ambos. NO asumas cuál es canónica ni la sincronices unilateralmente; usa la del archivo que edites.
@@ -52,7 +52,7 @@ Discrepancia verificada entre ambos. NO asumas cuál es canónica ni la sincroni
 
 ### ⚠️ SIEMPRE bump TERMUX_PKG_REVISION antes de commit
 
-Cada vez que toques `proot-source/src/` o `packages/proot/`, incrementa `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES de commit. Sin esto el CI no se dispara bien y los usuarios no reciben la actualización. Es el error más común.
+Cada vez que toques `proot-source/src/` o `packages/proot/`, incrementa `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES de commit. Sin esto el CI no se dispara bien y los usuarios no reciben la actualización. Es el error más común. REVISION actual: **23**.
 
 ### Orden de commit (secuencial, no omitir pasos)
 
@@ -62,7 +62,7 @@ Cada vez que toques `proot-source/src/` o `packages/proot/`, incrementa `TERMUX_
 4. `git push origin master`
 5. `gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Success)'`
 
-Convención: `<type>(<scope>): <summary>` — types: `fix`, `enhance`, `chore`, `ci`.
+Convención: `<type>(<scope>): <summary>` — types: `fix`, `enhance`, `chore`, `ci`, `test`.
 
 ### Repositorios
 
@@ -76,6 +76,42 @@ Convención: `<type>(<scope>): <summary>` — types: `fix`, `enhance`, `chore`, 
 - Usa `$TMPDIR`, NUNCA `/tmp`.
 - Builds locales: OOM-safe por defecto (`-j2`); usa `-j1` en dispositivos <4GB RAM.
 - `gita` es la herramienta de monitoreo CI (ver Monitoreo CI); no uses `timeout` con ella.
+- **proot necesita `env -i`** para ejecutar binarios en rootfs Alpine — el entorno heredado causa fallos en execve. Siempre limpiar env al invocar proot directamente.
+
+## Security Hardening (Fases A-E)
+
+Resumen en `FIXES.md`. Commits por fase:
+
+| Fase | Estado | Commits | REV |
+|------|--------|---------|-----|
+| A — Aislamiento P0 | ✅ | `573f4cb8d9`, `3b98197d8a` | 19-20 |
+| B — Leaks y fds | ✅ | `ec308f5425` | 21 |
+| C — Aislamiento P1 | ✅ | `6d3a556007`, `e141f86c56` | 22 |
+| D — Rendimiento | 🔄 | `e30bdb5b43` | 23 |
+| E — Resto | ⏸ | — | — |
+
+### Nuevos CLI flags (Fase C)
+
+- `--recommended-etc-rw` — restores legacy RW for /etc/ binds (default: :ro)
+- `--fake-permissions` — emulate permissions without real chmod (no-op in override_permissions + access() emulated)
+
+### Nuevas funciones (Fase C)
+
+- `insort_binding3_with_mode()` — like `insort_binding3()` but accepts `BindingAccess` parameter (wrapper, no signature change)
+
+### Pentest (Fase B+C)
+
+```bash
+# Smoke tests
+pentest/test_b1_b2_b7.sh    # B1/B2/B7: 20 concurrent --exec clients
+pentest/test_b3.sh           # B3: fd_map stale sweep
+pentest/test_b5.sh           # B5: SP integrity bind/connect loop
+pentest/test_b6.sh           # B6: bridge children killed on exit
+pentest/test_b8.sh           # B8: talloc leak verification
+pentest/test_phase_c_final.sh  # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fake-perms
+```
+
+Resultados: B=14/14 PASS, C=7/7 PASS. Reportes en `pentest/results/`.
 
 ## Arquitectura del fork (no obvia desde los nombres de archivo)
 
@@ -117,7 +153,7 @@ Red virtual con **Abstract Unix Domain Sockets** (sin TCP/IP real): `socket(AF_I
 
 ### proc_isolation (extensión `hpc_callback`)
 
-Filtra /proc (solo pids propios vía getdents, cpuinfo/meminfo/mountinfo/environ→ENOENT, maps guest-pure con paths host→guest), ptrace/process_vm_readv/writev/pidfd_open/kill a PIDs host→ESRCH, `socket(AF_NETLINK)`→AF_UNIX fake, unshare(CLONE_NEWNS)/mount→0 emulados.
+Filtra /proc (solo pids propios vía getdents, cpuinfo/meminfo/mountinfo/environ/version/uptime/stat/loadavg/kallsyms/slabinfo/zoneinfo/iomem/interrupts/modules/cmdline/misc→ENOENT, maps guest-pure con paths host→guest), ptrace/process_vm_readv/writev/pidfd_open/kill a PIDs host→ESRCH, `socket(AF_NETLINK)`→AF_UNIX fake, unshare(CLONE_NEWNS)/mount→0 emulados.
 
 ### Filosofía: Emulate, Never Deny
 
@@ -135,6 +171,9 @@ Principio rector: **sin flags → cero overhead**.
 - `pipe_shadow.c`: latch estático `shadow_active` (early-returns) — elimina readlink por close y el scan de slots sin pipes. Latch permanente por diseño.
 - `tracee/tracee.h` + `syscall/enter.c`: `fake_netlink_reply` pasó de `uint8_t[8192]` a puntero talloc perezoso (8 KB × N tracees). OJO: usar la macro `MAX_FAKE_NETLINK_REPLY`, NUNCA `sizeof(tracee->fake_netlink_reply)` (daría 8).
 - vnet registry cache: `dirs_ready` cacheado (name-aware) + fast-path por `generation`+`count` leyendo solo el header (~12 B); re-lee ~59 KB solo si cambian. Clamp de `count > 512`. Cache estático por-proceso → riesgo documentado si un día un proceso manejara múltiples proxies.
+- **D1 BPF**: sysnums sorted copy para construction (qsort + talloc, preparado para binary search futuro).
+- **D2 ioctl**: FILTER_SYSEXIT removido del filtro base; FICLONE detectado dinámicamente en enter.c (`tracee->sysexit_pending = true`).
+- **D3 faccessat2**: FILTER_SYSEXIT removido (no hay exit handler que lo necesite).
 
 ### Fix de accept ARM64 — commit b1b775073b
 
@@ -156,17 +195,21 @@ Port mapping (`-p host:container`, máx 64, auto-puerto libre), auto-redirect de
 | `extension/virtual_net/` (5: .c/h/internal.h/helper.c/helper.h) | Red virtual, registry, helper `--vnp-helper` |
 | `extension/resource_limit/` (3: .c/h/internal.h) | sched_getaffinity fake + gate fork/clone |
 | `extension/proc_isolation/` (2: .c/h) | `hpc_callback`: /proc, ptrace, kill, netlink, maps |
-| `supervise/` (2: .c/h) | `--supervise`/`--exec`, signalfd+poll, socket abstracto |
-| `cli/proot.c` (1004) | handlers `--proxy`/`-p`, `resource_config`, `handle_option_*` |
-| `cli/proot.h` (614) | opciones CLI propias, declaraciones |
+| `extension/fake_id0/fake_id0.c` | `--fake-permissions` (override_permissions no-op + access emulated) |
+| `supervise/` (2: .c/h) | `--supervise`/`--exec`, signalfd+poll, socket abstracto, SO_PEERCRED |
+| `cli/proot.c` (1004+) | handlers `--proxy`/`-p`, `resource_config`, `--recommended-etc-rw`, `--fake-permissions` |
+| `cli/proot.h` (614+) | opciones CLI propias, declaraciones |
 | `cli/cli.c` (694) | dispatch `--vnp-helper`/`--exec`, hook `resource_config_apply()` |
-| `extension/extension.h` | `vnp_callback`, `rlimit_callback`, `hpc_callback` |
+| `extension/extension.h` | `vnp_callback`, `rlimit_callback`, `hpc_callback`, `fake_id0_*` |
+| `path/binding.c` | `insort_binding3_with_mode()` wrapper |
+| `path/binding.h` | `insort_binding3_with_mode()` declaration |
 | `GNUmakefile` (318) | objs virtual_net, virtual_net_helper, resource_limit, proc_isolation |
 | `tracee/event.c` (976) | event loop poll para supervise (idéntico sin flag) |
 | `tracee/tracee.h` (399) | campo `supervise`, `fake_netlink_reply` como puntero |
+| `syscall/seccomp.c` | D1 sorted sysnums, D2 ioctl no-sysexit, D3 faccessat2 no-sysexit |
+| `syscall/enter.c` | `fake_netlink_reply` lazy talloc, D2 FICLONE dynamic detection |
 | `syscall/sysnums-arm64.h` | `[ 202 ] = PR_accept` |
 | `syscall/exit.c` | retry accept→accept4 en ENOSYS |
-| `syscall/enter.c` | `fake_netlink_reply` lazy talloc |
 | `syscall/pipe_shadow.c` | latch `shadow_active` |
 | `execve/exit.c` | `apply_mem_limit_to_tracee()` post-exec |
 | `tracee/seccomp.c` | rewrite accept→accept4 + `SYSARG_4`=0 |
@@ -182,10 +225,24 @@ Port mapping (`-p host:container`, máx 64, auto-puerto libre), auto-redirect de
 - **`/data` mount**: no usar en CI (`-m` en run-docker.sh causa permisos en runners GHA); la caché se monta vía `TERMUX_DOCKER_RUN_EXTRA_ARGS`.
 - **Registry cleanup**: entradas stale de `registry.lock` no se limpian solas (no afectan). Limpieza manual: borrar `$PREFIX/usr/tmp/proot-net/`.
 - **Tamaños reales** (para estimar diffs): `virtual_net.c`=1144, `virtual_net_helper.c`=422, `cli/proot.c`=1004, `cli/proot.h`=614, `cli/cli.c`=694, `GNUmakefile`=318, `tracee/event.c`=976, `tracee/tracee.h`=399.
+- **D5 hash table**: implementación causó hang — el lifecycle de talloc entries conflicta con el event loop de ptrace. Necesita rediseño (hash estática con slots fijos o limpiar en remove_tracee). NO re-intentar sin cambio de diseño.
+- **D6 binding cache**: deferred por dangling pointers — el cache es global pero bindings son por-tracee. Necesita invalidación en free_terminated_tracees.
+- **proot necesita `env -i`** al ejecutar en rootfs Alpine — el entorno heredado causa execve failures. El wrapper `alpine_rootfs` ya lo hace correctamente.
 
 ## Pentest / Hardening Testing
 
-`pentest/` (6 programas C: p_fs, p_sys, p_proc, p_net, p_kernel, memtest.c) — resultados en `pentest/results/*.txt` (10 archivos A/B). `vulneration-report.md` (raíz del repo, refiere `pentest/results/`). Wrappers (NO commitear): `alpine_rootfs` y `alpine_rootfs_hardened` (usan el rootfs de proot-distro y bindean `pentest/`→`/pentest`). Uso: `./alpine_rootfs /pentest/p_sys`. OJO: los wrappers usan `env -i` que borra `PROOT_VERBOSE` — inyectarla dentro del env del wrapper para debug.
+`pentest/` (6 programas C: p_fs, p_sys, p_proc, p_net, p_kernel, memtest.c) — resultados en `pentest/results/*.txt` (10 archivos A/B + B fixes + C fixes). `vulneration-report.md` (raíz del repo, refiere `pentest/results/`). `REPORT-FASE-B-PENTEST.md` (reporte detallado Fase B). Wrappers (NO commitear): `alpine_rootfs` y `alpine_rootfs_hardened` (usan el rootfs de proot-distro y bindean `pentest/`→`/pentest`). Uso: `./alpine_rootfs /pentest/p_sys`. OJO: los wrappers usan `env -i` que borra `PROOT_VERBOSE` — inyectarla dentro del env del wrapper para debug.
+
+### Scripts de pentest (Fase B+C)
+
+```bash
+pentest/test_b1_b2_b7.sh      # 20 clientes --exec concurrentes
+pentest/test_b3.sh             # fd_map stale sweep
+pentest/test_b5.sh             # SP integrity bind/connect loop
+pentest/test_b6.sh             # bridge children killed on exit
+pentest/test_b8.sh             # talloc leak verification
+pentest/test_phase_c_final.sh  # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fake-perms
+```
 
 ## Agent Configuration
 
