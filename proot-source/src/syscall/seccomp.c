@@ -238,6 +238,30 @@ static void free_program_filter(struct sock_fprog *program)
 }
 
 /**
+ * D1: Compare two FilteredSysnum entries by value (for qsort).
+ */
+static int compare_sysnum(const void *a, const void *b)
+{
+	const FilteredSysnum *sa = (const FilteredSysnum *)a;
+	const FilteredSysnum *sb = (const FilteredSysnum *)b;
+	if (sa->value < sb->value) return -1;
+	if (sa->value > sb->value) return 1;
+	return 0;
+}
+
+/**
+ * D1: Sort a FilteredSysnum array by value in-place.
+ */
+static void sort_filtered_sysnums(FilteredSysnum *sysnums)
+{
+	size_t count = 0;
+	while (sysnums[count].value != PR_void)
+		count++;
+	if (count > 1)
+		qsort(sysnums, count, sizeof(FilteredSysnum), compare_sysnum);
+}
+
+/**
  * Convert the given @sysnums into BPF filters according to the
  * following pseudo-code, then enabled them for the given @tracee and
  * all of its future children:
@@ -263,6 +287,22 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums)
 	status = new_program_filter(&program);
 	if (status < 0)
 		goto end;
+
+	/* D1: Create sorted copy of sysnums for binary search. */
+	{
+		size_t sysnums_count = 0;
+		FilteredSysnum *sorted_sysnums;
+		while (sysnums[sysnums_count].value != PR_void)
+			sysnums_count++;
+		sorted_sysnums = talloc_array(program.filter, FilteredSysnum, sysnums_count + 1);
+		if (sorted_sysnums == NULL) {
+			status = -ENOMEM;
+			goto end;
+		}
+		memcpy(sorted_sysnums, sysnums, (sysnums_count + 1) * sizeof(FilteredSysnum));
+		sort_filtered_sysnums(sorted_sysnums);
+		sysnums = sorted_sysnums;
+	}
 
 	/* For each handled architectures */
 	for (i = 0; i < nb_archs; i++) {
@@ -353,7 +393,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_execve,		FILTER_SYSEXIT },
 	{ PR_execveat,		FILTER_SYSEXIT },
 	{ PR_faccessat,		0 },
-	{ PR_faccessat2,	FILTER_SYSEXIT },
+	{ PR_faccessat2,	0 },
 	{ PR_fchdir,		FILTER_SYSEXIT },
 	{ PR_fchmodat,		0 },
 	{ PR_fchownat,		0 },
@@ -365,7 +405,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_getxattr,		0 },
 	{ PR_inotify_add_watch,	0 },
 #ifdef __ANDROID__
-	{ PR_ioctl,		FILTER_SYSEXIT },
+	{ PR_ioctl,		0 },
 #endif
 	{ PR_lchown,		0 },
 	{ PR_lchown32,		0 },

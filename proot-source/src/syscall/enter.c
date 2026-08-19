@@ -2274,6 +2274,14 @@ int translate_syscall_enter(Tracee *tracee)
 			poke_reg(tracee, SYSARG_2, TCSETS);
 #endif
 
+		/* D2: Request sysexit for FICLONE only */
+#ifndef FICLONE
+#define FICLONE _IOW(0x94, 9, int)
+#endif
+		if (cmd == FICLONE) {
+			tracee->sysexit_pending = true;
+		}
+
 		break;
 	}
 	
