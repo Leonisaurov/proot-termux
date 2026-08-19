@@ -484,8 +484,12 @@ int rebuild_host_ldso_paths(Tracee *tracee, const char host_path[PATH_MAX], Arra
 	}
 
 	/* 2. LD_LIBRARY_PATH  */
+	/* B8: was strdup() (malloc) once per process, invisible to the
+	 * talloc report and never freed.  talloc_strdup under the
+	 * null_context makes it a child of the global talloc context, so
+	 * it is reported and released at process exit like everything else. */
 	if (initial_ldso_paths == NULL)
-		initial_ldso_paths = strdup(getenv("LD_LIBRARY_PATH") ?: "/");
+		initial_ldso_paths = talloc_strdup(NULL, getenv("LD_LIBRARY_PATH") ?: "/");
 	if (initial_ldso_paths != NULL && initial_ldso_paths[0] != '\0') {
 		status = add_host_ldso_paths(host_ldso_paths, initial_ldso_paths);
 		if (status < 0)

@@ -1,5 +1,15 @@
 # FIXES.md — Plan de implementación post-auditoría
 
+## Estado de avance
+
+| Fase | Estado | Commits | Notas |
+|------|--------|---------|-------|
+| A — Aislamiento P0 | **Completada** ✅ (en producción) | `573f4cb8d9` (REV 19), `3b98197d8a` (REV 20) | A2 + C1 + V4 (573f4cb8d9); cierre de los 4 MINORs + kill(0)/kill(-pgid) confinados (3b98197d8a). Pentest ampliado con baselines `*_2` y verificaciones `*_3`. |
+| B — Leaks y fds | **En curso** 🔄 (en implementación) | — | 8 fixes B1-B8 especificados en §4; smoke tests `--exec`/`--proxy` + talloc report como verificación. REVISION llegará a 21 al cerrar. |
+| C — Aislamiento P1 | Pendiente | — | C1/V4 ya implementados en la Fase A (eran los escapes reales del pentest). Resto C2-C7 sin tocar. |
+| D — Rendimiento P0/P1 | Pendiente | — | Va AL FINAL (semántica congelada). |
+| E — Resto P2/P3 | Pendiente | — | Sin tocar. |
+
 Documento de referencia INMUTABLE durante la implementación. Resultado de 3 auditorías profundas (rendimiento, leaks/fds, aislamiento). Cada fix especifica archivo:línea, cambio concreto, riesgo y verificación. No re-abrir ítems marcados en §0.
 
 ## 0. Estado actual (lo ya arreglado — NO re-abrir)
@@ -8,7 +18,9 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 |------|--------|
 | Bug `--exec`/usr (cwd_raw/cwd_explicit, copy_binding, `-w` relativo, canonicalización chdir) | ✅ fixes 3109a2ee2e, 3d307720df, b8b47375f3 |
 | Leak talloc en shutdown supervise (`free_terminated_tracees`, FU-1..FU-4, `supervise_handle_exited_tracee`, guard `ctl_fd>=0`) | ✅ fixes 5ad187e929 + 414053fc04 |
-| REVISION actual en `packages/proot/build.sh` | **18** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/` |
+| **FASE A COMPLETADA — A2 stat/readlink oracle + C1 kill(-1) broadcast + V4 netlink topology** | ✅ commit `573f4cb8d9` 'fix(isolation): block /proc host stat/readlink oracle, kill(-1) broadcast, netlink topology' (REVISION 19) — pentest ampliado con baselines `*_2` y verificaciones `*_3` |
+| **FASE A COMPLETADA — cierre de los 4 MINORs + hardening señales** | ✅ commit `3b98197d8a` 'fix(isolation): deliver kill broadcasts to guest tracees, block statx on SIGSYS, harden signal validation' (REVISION 20) — kill(-1) entrega real a tracees; statx cubierto en SIGSYS legacy; pentest EMULADO-OK; buffers PATH_MAX; extra kill(0)/kill(-pgid) confinados al guest (ESRCH pgid vacío, EINVAL señal inválida) |
+| REVISION actual en `packages/proot/build.sh` | **20** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/`; irá a 21 al cerrar Fase B |
 
 ## 1. Resumen ejecutivo de las 3 auditorías
 
@@ -29,18 +41,24 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 
 ## 3. FASE A — Aislamiento P0 (← PRIMERA)
 
-### A1. Bypass del filtro /proc por rutas no canónicas [P0]
+> **Estado: ✅ COMPLETADA** (commits `573f4cb8d9` REV 19 + `3b98197d8a` REV 20, en producción). Nota: **C1 y V4 de la antigua Fase C se implementaron en la Fase A** por ser los escapes reales detectados por el pentest ampliado (ver §5).
+
+### A1. Bypass del filtro /proc por rutas no canónicas [P0] — ✅ IMPLEMENTADO (matizado)
 - **Hallazgo**: `proc_isolation.c:154-186` solo matchea el path canónico `"/proc/"` (strncmp exacto); el filtro corre sobre el path SIN canonicalizar. Un guest puede: `openat(dirfd=open("/proc"), "1/status")`, `open("/proc//1/status")`, `open("/proc/./1/status")`, `open("/proc//net/tcp")`, getdents vía dirfd relativo → lectura COMPLETA del /proc host incluso en modo B. Autodocumentado en `proc_isolation.c:108-114`.
 - **Fix (debatir al implementar)**: (a) filtrar sobre el path ya traducido/canonicalizado, o (b) trackear fds que apuntan a /proc en el hook de open/openat EXIT (como ya hace con `maps_fd`) y filtrar por fd en read/getdents/stat. **El crítico recomienda (b)** por riesgo de falsos ENOENT en rutas legítimas del guest con (a).
 - **Riesgo**: falsos ENOENT en rutas legítimas (mitigar con (b)); bypass inverso si el punto de hook es incorrecto.
 - **Verificación**: pentest ampliado V1 (`openat` relativo dirfd=/proc, `//`, `/./`, `/proc//net/tcp`, getdents de `/proc/1`).
+- **Resultado**: el baseline (`*_2`) demostró que **V1 NO escapaba** — proot canonicaliza las rutas ANTES del filtro, así que las rutas no canónicas ya llegaban normalizadas. Implementado por prevención/defensa en profundidad; el escape real estaba en V2 (A2) y V4 (netlink).
 
-### A2. Oracle de pids + leak de rutas host vía stat/readlink [P0]
+### A2. Oracle de pids + leak de rutas host vía stat/readlink [P0] — ✅ IMPLEMENTADO
 - **Hallazgo**: `flag_sysnum_map` (`proc_isolation.c:58-70`) solo cubre open/openat/openat2/getdents/read/kill; stat/newfstatat/statx/readlink NO están → pasan al kernel host. `path/proc.c:111-113` da DEFAULT para pids no-tracee (readlink `/proc/<hostpid>/{exe,cwd,root,fd/N}` filtra rutas host). Oracle de existencia vía `stat("/proc/1")`.
 - **Fix**: añadir stat/newfstatat/statx/readlink/readlinkat a `filtered_sysnums` con la misma lógica → ENOENT para pids host (filosofía Emulate-Never-Deny, NO EPERM).
 - **Verificación**: pentest ampliado V2 (`stat`/`statx`/`readlink` de `/proc/1/{exe,cwd,root,fd/0,maps}`).
+- **Resultado**: implementado en `573f4cb8d9` (stat/readlink → ENOENT); `statx` sobre SIGSYS legacy cubierto en `3b98197d8a`. Pentest p_proc V2 con baselines `*_2` y verificaciones `*_3`.
 
 ## 4. FASE B — Leaks y fds (verificados por debugger con archivo:línea)
+
+> **Estado: ✅ COMPLETADA** (REV 21, Fase B — 8 fixes B1-B8, incluye fix B5 de SP restore en error paths). Verificación mediante smoke tests `--exec`/`--proxy` + talloc report (ver §8). Cualquier fix que toque `free_terminated_tracees` usa la infraestructura creada en la Fase A (ver R9 en §9).
 
 | ID | Sev | Hallazgo | Fix | Riesgo | Verificación |
 |----|-----|----------|-----|--------|--------------|
@@ -96,8 +114,8 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 
 ## 8. Verificación empírica por fase (pentest ampliado + benchmarks + smoke proot-distro)
 
-- **Fase A**: pentest ampliado V1+V2 (p_proc) en modos A y B → **ESCAPE hoy, BLOQUEADO tras fix**.
-- **Fase B**: smoke 16+ clients `--exec` concurrentes; ciclo crear/cerrar sockets vnet con `--proxy` para agotar `fd_map`; talloc report (`kill -USR1/USR2`).
+- **Fase A**: pentest ampliado V1+V2 (p_proc) + V4 (p_net) en modos A y B con baselines `*_2` y verificaciones `*_3` → **ESCAPE hoy, BLOQUEADO tras fix**. Resultados en `pentest/results/`: `p_proc_A3/B3/A4/B4/B5` y `p_net_A3/B3/A4/B4`. Punto clave: `kill(-1,SIGTERM)` → **EMULADO-OK** (verificado en `p_proc_B4` y `p_proc_B5`): el broadcast se entrega a los tracees del guest y NO llega al host (el hijo del guest sigue vivo). V1 (rutas no canónicas) demostró en baseline que NO escapaba (proot canonicaliza antes del filtro).
+- **Fase B** (en curso): smoke 16+ clients `--exec` concurrentes; ciclo crear/cerrar sockets vnet con `--proxy` para agotar `fd_map`; smoke `--exec`/`--proxy` + **talloc report** (`kill -USR1/USR2`).
 - **Fase C**: pentest V3 (`kill(-1,0)` con guard de seguridad: **NO ejecutar `kill(-1,SIGTERM/SIGKILL)` real** porque el broadcast al uid host destruiría la sesión — solo `kill(-1,0)` como oráculo) + V4 (topología) + V5 (bypass `:ro` vía mount, requiere wrapper con bind `:ro`); smoke proot-distro completo para C3/C7 (detrás de flag).
 - **Fase D**: benchmark antes/después: `find / -type f` dentro del guest + `strace -c` loop de stat/open + conteo de ptrace stops (`proot -v 9`); CI + stress syscall (`apt update`) para BPF.
 - **Fase E**: pruebas puntuales por fix.
@@ -114,14 +132,14 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | R6 | Cambiar `insort_binding3` | MEDIO | wrapper nuevo, no cambiar firma (5 call sites) |
 | R7 | Falsos ENOENT en /proc | MEDIO | trackear fds en vez de re-canonicalizar |
 | R8 | Protocolo `--exec` | MEDIO | token opcional + versionado + doc mismo commit |
-| R9 | B2/B3 tocan `free_terminated_tracees` dos veces | MEDIO | reordenar (Fase A crea el hook primero) |
+| R9 | B2/B3 tocan `free_terminated_tracees` dos veces | MEDIO | ✅ RESUELTO (parcial) — la Fase A creó el hook de ciclo de vida de tracees primero (commits `573f4cb8d9`/`3b98197d8a`: entrega de kill broadcasts a tracees del guest y saneamiento del ciclo de salida); la Fase B reutiliza esa infraestructura. Si al implementar B2/B3 surge conflicto, el hook ya existe y solo hay que extenderlo, no crearlo. |
 | R10 | mknod phantom | BAJO | ENOENT emulado |
 | R11 | pidfd default-on | MEDIO | test apps del guest |
 
 ## 10. Checklist de commit (reglas AGENTS.md)
 
 1. Editar código (`proot-source/src/` o `packages/proot/`).
-2. **Bump `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES del commit** (actual: 18).
+2. **Bump `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES del commit** (actual: 20; → 21 al cerrar Fase B).
 3. `git add -A && git commit -m "<type>(<scope>): <summary>"`.
 4. `git push origin master` (SOLO `origin`).
 5. `gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Success)'` — exit 0=éxito, 1=falló, 2=cancelado. **NO timeout, NO streaming.**

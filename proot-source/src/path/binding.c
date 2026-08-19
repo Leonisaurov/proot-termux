@@ -351,6 +351,19 @@ static void insort_binding(const Tracee *tracee, Side side, Binding *binding)
 			/* Replace this iterator with the new binding.  */
 			CIRCLEQ_INSERT_AFTER_(tracee, iterator, binding, side);
 			remove_binding_from_all_lists(tracee, iterator);
+			/* B4: the replaced binding is dropped from the lists but
+			 * stays allocated under tracee->ctx with its talloc
+			 * destructor still registered.  For MBIND bindings that
+			 * destructor is mbind_cleanup(), which removes the host
+			 * files it copied (e.g. /A for "--mbind /A:/x") — files
+			 * the NEW identical binding has already re-copied and
+			 * owns, so cleaning the old ones would delete the active
+			 * binding's data (data loss).  Disable the destructor so
+			 * the discarded binding never touches the files again.
+			 * No-op for regular bindings (no destructor registered);
+			 * the memory itself stays under ctx and is freed with it
+			 * (bounded, only on duplicate binds).  */
+			talloc_set_destructor(iterator, NULL);
 			return;
 
 		case PATH1_IS_PREFIX:

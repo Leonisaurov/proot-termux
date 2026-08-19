@@ -7,6 +7,8 @@
 #include <sys/un.h>
 #include <string.h>   /* memset(3), memcpy(3) */
 #include <stdio.h>    /* snprintf(3) */
+#include <signal.h>   /* kill(2) — B3: pid liveness check in vnp_add_fd */
+#include <errno.h>    /* ESRCH — B3: pid liveness check in vnp_add_fd */
 
 /* ========================================================================= */
 /*  Paths & Limits                                                           */
@@ -153,11 +155,38 @@ static inline VnpFdEntry *vnp_find_fd(VnpConfig *config, int fd, pid_t pid)
 /**
  * Add an fd entry to the config's fd_map.
  * Returns pointer to new entry, or NULL if full.
+ *
+ * B3 (decision documented): the extension is shared across tracees via
+ * talloc_reference and there is NO per-tracee exit event in
+ * extension.h, so a dead tracee never purges its fd_map entries on its
+ * own (REMOVED fires only when the last talloc reference drops).  A
+ * guest that forks short-lived children creating sockets would fill the
+ * 256-entry map, making vnp_add_fd() return NULL SILENTLY and breaking
+ * fake getsockname/getpeername/accept forever (virtual_net.c:564,734,1026).
+ * Instead of adding an exit hook to tracee/event.c (invasive, touches
+ * normal mode), we reclaim stale slots right here: when the map is
+ * full, sweep for entries whose pid is gone (kill(pid,0) == ESRCH) and
+ * compact them swap-with-last (same strategy as vnp_remove_fd), then
+ * retry.  Zero overhead in the common path: the sweep runs only when
+ * the map is full.  A tracee that is still a zombie (not yet reaped by
+ * waitpid) keeps its slot until the next full-map event — bounded and
+ * self-healing.
  */
 static inline VnpFdEntry *vnp_add_fd(VnpConfig *config, pid_t pid, int fd, uint16_t virtual_port,
                                       int orig_domain)
 {
 	VnpFdEntry *entry;
+	if (config->fd_count >= VNP_MAX_FDS) {
+		int i;
+		for (i = 0; i < config->fd_count; i++) {
+			if (kill(config->fd_map[i].pid, 0) < 0 && errno == ESRCH) {
+				/* Swap with last entry */
+				config->fd_map[i] = config->fd_map[config->fd_count - 1];
+				config->fd_count--;
+				i--; /* re-check the entry just swapped in */
+			}
+		}
+	}
 	if (config->fd_count >= VNP_MAX_FDS)
 		return NULL;
 	entry = &config->fd_map[config->fd_count];

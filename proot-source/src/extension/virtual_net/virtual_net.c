@@ -601,16 +601,35 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 
 	/* Write new sockaddr_un to tracee's stack and update bind() args */
 	{
+		/* B5: alloc_mem() lowers the guest SP (with RED_ZONE_SIZE when
+		 * CURRENT==ORIGINAL).  proot normally restores the SP either
+		 * at the PTRACE_CONT restart (syscall.c:182) or at sysexit
+		 * (push_specific_regs RESTORE(STACK_POINTER)), but when the
+		 * sysexit stage runs with restore_original_regs == false
+		 * (seccomp rewrite paths) the lowered SP persists, so repeated
+		 * bind()/connect() calls would silently eat the guest stack
+		 * (~65k calls to exhaust 8 MiB).  There is no pop_mem() API, so
+		 * restore the SP to its pre-alloc value right here: the tracee
+		 * is stopped in ptrace (nothing can clobber the written
+		 * sockaddr between now and the kernel executing the syscall),
+		 * the same guarantee proot itself relies on for PTRACE_CONT.
+		 * Using the pre-alloc CURRENT (not ORIGINAL) preserves any SP
+		 * lowering that proot's own enter processing did before this
+		 * extension ran.  */
+		word_t sp_before_alloc = peek_reg(tracee, CURRENT, STACK_POINTER);
 		word_t new_addr = alloc_mem(tracee, sizeof(struct sockaddr_un));
 		if (new_addr == 0)
 			return 0;
 
-		if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
+		if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0) {
+			poke_reg(tracee, STACK_POINTER, sp_before_alloc);
 			return 0;
+		}
 
 		poke_reg(tracee, SYSARG_1, sockfd);
 		poke_reg(tracee, SYSARG_2, new_addr);
 		poke_reg(tracee, SYSARG_3, sizeof(struct sockaddr_un));
+		poke_reg(tracee, STACK_POINTER, sp_before_alloc);
 	}
 
 	return 0;
@@ -747,12 +766,21 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 		sa_unix.sun_family = AF_UNIX;
 		memcpy(sa_unix.sun_path, abstract_name, sizeof(abstract_name));
 
+		/* B5: see vnp_handle_bind — restore the SP to its pre-alloc
+		 * value so repeated connect() calls never accumulate stack
+		 * consumption in the guest (seccomp rewrite sysexit paths run
+		 * with restore_original_regs == false and would otherwise keep
+		 * the lowered SP forever).  */
+		word_t sp_before_alloc = peek_reg(tracee, CURRENT, STACK_POINTER);
 		word_t new_addr = alloc_mem(tracee, sizeof(sa_unix));
 		if (new_addr != 0) {
-			if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0)
+			if (vnp_write_to_tracee(tracee, new_addr, &sa_unix, sizeof(sa_unix)) < 0) {
+				poke_reg(tracee, STACK_POINTER, sp_before_alloc);
 				return 0;
+			}
 			poke_reg(tracee, SYSARG_2, new_addr);
 			poke_reg(tracee, SYSARG_3, sizeof(sa_unix));
+			poke_reg(tracee, STACK_POINTER, sp_before_alloc);
 		}
 	}
 

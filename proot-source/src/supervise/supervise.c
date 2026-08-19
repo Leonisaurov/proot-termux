@@ -25,6 +25,7 @@
 #include <unistd.h>     /* close(2), read(2), write(2), fork(2), execvp(3) */
 #include <errno.h>      /* E*, */
 #include <sys/socket.h> /* AF_UNIX, SOCK_STREAM, socket(2), bind(2), listen(2), accept(2), connect(2) */
+#include <fcntl.h>      /* fcntl(2), F_SETFD, FD_CLOEXEC */
 #include <sys/un.h>     /* struct sockaddr_un, */
 #include <sys/signalfd.h> /* signalfd(2), */
 #include <signal.h>     /* sigaddset(3), sigprocmask(3), */
@@ -62,6 +63,8 @@ static ExecClientEntry exec_clients[SUPERVISE_MAX_CLIENTS];
 static int             num_exec_clients = 0;
 
 static int      ctl_fd_global = -1;  /* Listen socket for incoming --exec */
+static int      sig_fd_global = -1;  /* signalfd for SIGCHLD (B7: kept so
+				      * supervise_fini() can close it) */
 static pid_t    own_pid = 0;         /* Our PID (for socket name) */
 static time_t   start_time = 0;      /* When supervise started */
 
@@ -159,6 +162,7 @@ int supervise_init(int *ctl_fd, int *sig_fd, int verbose_level)
 		return -1;
 	}
 	*sig_fd = fd;
+	sig_fd_global = fd;
 
 	/* --- Create abstract listen socket --- */
 	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -167,6 +171,7 @@ int supervise_init(int *ctl_fd, int *sig_fd, int verbose_level)
 		     "supervise: socket: %s", strerror(errno));
 		close(*sig_fd);
 		*sig_fd = -1;
+		sig_fd_global = -1;
 		return -1;
 	}
 
@@ -181,6 +186,7 @@ int supervise_init(int *ctl_fd, int *sig_fd, int verbose_level)
 		close(fd);
 		close(*sig_fd);
 		*sig_fd = -1;
+		sig_fd_global = -1;
 		return -1;
 	}
 
@@ -191,6 +197,7 @@ int supervise_init(int *ctl_fd, int *sig_fd, int verbose_level)
 		close(fd);
 		close(*sig_fd);
 		*sig_fd = -1;
+		sig_fd_global = -1;
 		return -1;
 	}
 
@@ -228,6 +235,14 @@ void supervise_fini(void)
 		close(ctl_fd_global);
 		ctl_fd_global = -1;
 	}
+
+	/* B7: the signalfd lives in the event loop as a local variable and
+	 * was never closed (only ctl_fd_global used to be).  Close it here
+	 * so --supervise cycles do not leak an fd until process exit.  */
+	if (sig_fd_global >= 0) {
+		close(sig_fd_global);
+		sig_fd_global = -1;
+	}
 }
 
 /* FU-3: called by the event loop right after it closes its local
@@ -248,7 +263,21 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	int client_fd;
 	ExecRequest req;
 	pid_t pid;
-	client_fd = accept(ctl_fd, NULL, NULL);
+	/* B1: plain accept() without SOCK_CLOEXEC leaks the control-socket
+	 * fd into every --exec guest: the forked child (line ~378) never
+	 * closes it and it survives execvp, so if the supervisor dies the
+	 * client hangs (the guest keeps the fd -> no EOF).  accept4() with
+	 * SOCK_CLOEXEC is available on all supported targets (the ARM64
+	 * accept->accept4 fix already relies on it); fall back to
+	 * accept + FD_CLOEXEC fcntl() for ancient kernels.  The child only
+	 * needs the SCM_RIGHTS fds (closed before exec), never the control
+	 * socket itself.  */
+	client_fd = accept4(ctl_fd, NULL, NULL, SOCK_CLOEXEC);
+	if (client_fd < 0 && errno == ENOSYS) {
+		client_fd = accept(ctl_fd, NULL, NULL);
+		if (client_fd >= 0)
+			(void) fcntl(client_fd, F_SETFD, FD_CLOEXEC);
+	}
 	if (client_fd < 0)
 		return;
 
@@ -435,9 +464,13 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 
 	/* Parent: create a proper Tracee struct with inherited context.
 	 * This is essential for path translation, bindings, and extensions
-	 * (like virtual_net proxy) to work for the --exec command. */
+	 * (like virtual_net proxy) to work for the --exec command.
+	 *
+	 * B2: child_tracee is hoisted out of the block scope so the
+	 * add_client() failure branch below can mark it terminated.  */
+	Tracee *child_tracee = NULL;
 	{
-		Tracee *child_tracee = get_tracee(NULL, pid, true);
+		child_tracee = get_tracee(NULL, pid, true);
 		if (child_tracee != NULL) {
 			/* Sanity check: should be a fresh tracee */
 			assert(child_tracee->exe == NULL);
@@ -531,6 +564,17 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 		/* Too many clients, kill the tracee and reject */
 		kill(pid, SIGKILL);
 		waitpid(pid, NULL, 0);
+		/* B2: the child_tracee created above (get_tracee at the fork)
+		 * stays in the global tracees list with terminated=false,
+		 * leaking Tracee + fs + heap + cwd + bindings in the
+		 * long-lived supervisor.  Mark it terminated: the event loop's
+		 * free_terminated_tracees() at the top of the next iteration
+		 * TALLOC_FREEs it (remove_tracee unlinks it from the list and
+		 * cleans its life_context).  The pid was already reaped by the
+		 * waitpid() above, so no further ptrace event will reference
+		 * it.  */
+		if (child_tracee != NULL)
+			child_tracee->terminated = true;
 		close(client_fd);
 		return;
 	}

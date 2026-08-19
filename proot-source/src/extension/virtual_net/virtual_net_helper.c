@@ -49,6 +49,17 @@ static uint16_t g_listener_vports[VNP_EXPOSE_MAX]; /* virtual_port for each list
 static uint16_t g_listener_hports[VNP_EXPOSE_MAX]; /* host_port for each listener */
 static int      g_num_listeners = 0;
 
+/* B6: bridge children (forked in accept_and_fork) are tracked here so
+ * they can be killed when the helper exits.  bridge_fds() only ends
+ * when the TCP peer closes; without this, children linger holding
+ * client_fd+unix_fd (2 fds each) until their peer closes, and survive
+ * the helper's own exit.  Bounded: one bridge child per concurrent
+ * connection; the list simply stops recording beyond this cap (still
+ * safe — only a best-effort cleanup on exit).  */
+#define MAX_BRIDGE_PIDS 64
+static pid_t    g_bridge_pids[MAX_BRIDGE_PIDS];
+static int      g_num_bridge_pids = 0;
+
 
 
 /* ================================================================
@@ -256,6 +267,11 @@ static void accept_and_fork(int listener_idx)
 	/* Parent: close connection fds (child owns them) */
 	close(client_fd);
 	close(unix_fd);
+	/* B6: remember the bridge child so it is killed when the helper
+	 * exits (done: label).  SIGCHLD is SIG_IGN + SA_NOCLDWAIT, so no
+	 * waitpid() is needed — the kernel auto-reaps them.  */
+	if (g_num_bridge_pids < MAX_BRIDGE_PIDS)
+		g_bridge_pids[g_num_bridge_pids++] = pid;
 }
 
 /* ================================================================
@@ -416,6 +432,14 @@ done:
 	/* Close all listeners on exit */
 	for (i = 0; i < g_num_listeners; i++)
 		close(g_listener_fds[i]);
+
+	/* B6: kill any lingering bridge children.  They only exit by
+	 * themselves when their TCP peer closes; on helper shutdown
+	 * (stdin closed / VNP_BYE) they would otherwise survive with 2
+	 * fds each.  SA_NOCLDWAIT reaps them automatically, so kill()
+	 * alone is enough — no waitpid() loop needed.  */
+	for (i = 0; i < g_num_bridge_pids; i++)
+		kill(g_bridge_pids[i], SIGKILL);
 }
 	_exit(0);
 	return 0;
