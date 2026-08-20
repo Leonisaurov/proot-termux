@@ -60,9 +60,10 @@ static const FlagSysnumMap flag_sysnum_map[] = {
                         PR_open, PR_openat, PR_openat2, PR_read,
                         PR_stat, PR_lstat, PR_stat64, PR_lstat64,
                         PR_fstatat64, PR_newfstatat, PR_statx,
-                        PR_readlink, PR_readlinkat, -1 } },
+                        PR_readlink, PR_readlinkat,
+                        PR_pidfd_open, -1 } },  /* E5: moved from ISOLATE_PTRACE */
     { ISOLATE_PTRACE, { PR_ptrace, PR_process_vm_readv, PR_process_vm_writev,
-                         PR_pidfd_open, -1 } },
+                         -1 } },
     { ISOLATE_REBOOT, { PR_reboot, -1 } },
     { ISOLATE_SWAP,   { PR_swapon, PR_swapoff, -1 } },
     { ISOLATE_KEXEC,  { PR_kexec_load, -1 } },
@@ -620,6 +621,10 @@ static int hpc_handle_getdents_exit(Tracee *tracee, Sysnum num)
  * Guest-pure /proc/self/maps: remove lines that reference the proot
  * loader.  The tracee sees a maps indistinguishable from a native
  * process of the guest rootfs.
+ *
+ * E7: lazy maps_fd detection — if maps_fd was never registered by
+ * the open handler (non-canonical path, openat with relative path,
+ * etc.), detect it here by checking if the fd points to a maps file.
  */
 static int hpc_handle_maps_read_exit(Tracee *tracee)
 {
@@ -627,7 +632,18 @@ static int hpc_handle_maps_read_exit(Tracee *tracee)
     char proc_path[PATH_MAX];
     int status;
 
-    if (tracee->maps_fd < 0 || fd != tracee->maps_fd)
+    /* E7: lazy detection — if maps_fd not yet registered, check if
+     * this fd points to a maps file and register it. */
+    if (tracee->maps_fd < 0) {
+        status = readlink_proc_pid_fd(tracee->pid, fd, proc_path);
+        if (status < 0 || strstr(proc_path, "/maps") == NULL)
+            return 0;
+        /* Found a maps fd that wasn't registered by the open handler.
+         * Register it now so future reads are filtered. */
+        tracee->maps_fd = fd;
+    }
+
+    if (fd != tracee->maps_fd)
         return 0;
 
     /* Confirm the fd really points at a maps file (robust against
@@ -847,7 +863,10 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
         if ((config->flags & ISOLATE_PTRACE) && num == PR_ptrace)
             return hpc_handle_ptrace_enter(tracee);
 
-        if ((config->flags & ISOLATE_PTRACE) && num == PR_pidfd_open) {
+        /* E5: pidfd_open now under ISOLATE_PROC (was ISOLATE_PTRACE).
+         * Blocks pidfd_open for host PIDs whenever proc isolation is
+         * active, preventing pidfd-based /proc bypass. */
+        if ((config->flags & ISOLATE_PROC) && num == PR_pidfd_open) {
             pid_t target_pid = (pid_t)peek_reg(tracee, CURRENT, SYSARG_1);
             if (target_pid > 0 && !hpc_is_proot_pid(target_pid)) {
                 /* Host process: emulate "no such process" instead of

@@ -191,6 +191,11 @@ static int handle_option_q(Tracee *tracee, const Cli *cli UNUSED, const char *va
 	} while (!last);
 	assert(i == nb_args);
 
+	/* E4: -q (--qemu) binds host root at /host-rootfs.
+	 * SECURITY NOTE: this exposes the entire host filesystem to the
+	 * guest.  Only safe when the guest is fully trusted.  The binding
+	 * is created unconditionally when -q is used — there is no flag
+	 * to disable it separately. */
 	new_binding(tracee, "/", HOST_ROOTFS, true, BINDING_ACCESS_RW, BINDING_TYPE_REGULAR);
 	new_binding(tracee, "/dev/null", "/etc/ld.so.preload", false, BINDING_ACCESS_RW, BINDING_TYPE_REGULAR);
 
