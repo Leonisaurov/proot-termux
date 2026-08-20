@@ -20,7 +20,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | Leak talloc en shutdown supervise (`free_terminated_tracees`, FU-1..FU-4, `supervise_handle_exited_tracee`, guard `ctl_fd>=0`) | ✅ fixes 5ad187e929 + 414053fc04 |
 | **FASE A COMPLETADA — A2 stat/readlink oracle + C1 kill(-1) broadcast + V4 netlink topology** | ✅ commit `573f4cb8d9` 'fix(isolation): block /proc host stat/readlink oracle, kill(-1) broadcast, netlink topology' (REVISION 19) — pentest ampliado con baselines `*_2` y verificaciones `*_3` |
 | **FASE A COMPLETADA — cierre de los 4 MINORs + hardening señales** | ✅ commit `3b98197d8a` 'fix(isolation): deliver kill broadcasts to guest tracees, block statx on SIGSYS, harden signal validation' (REVISION 20) — kill(-1) entrega real a tracees; statx cubierto en SIGSYS legacy; pentest EMULADO-OK; buffers PATH_MAX; extra kill(0)/kill(-pgid) confinados al guest (ESRCH pgid vacío, EINVAL señal inválida) |
-|| REVISION actual en `packages/proot/build.sh` | **23** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/` |
+|| REVISION actual en `packages/proot/build.sh` | **25** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/` |
 
 ## 1. Resumen ejecutivo de las 3 auditorías
 
