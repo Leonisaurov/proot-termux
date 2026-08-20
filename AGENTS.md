@@ -87,7 +87,7 @@ Resumen en `FIXES.md`. Commits por fase:
 | A — Aislamiento P0 | ✅ | `573f4cb8d9`, `3b98197d8a` | 19-20 |
 | B — Leaks y fds | ✅ | `ec308f5425` | 21 |
 | C — Aislamiento P1 | ✅ | `6d3a556007`, `e141f86c56` | 22 |
-| D — Rendimiento | 🔄 | `e30bdb5b43` | 23 |
+| D — Rendimiento | ✅ | `e30bdb5b43`, D5 hash | 25 |
 | E — Resto | ⏸ | — | — |
 
 ### Nuevos CLI flags (Fase C)
@@ -199,13 +199,14 @@ Port mapping (`-p host:container`, máx 64, auto-puerto libre), auto-redirect de
 | `supervise/` (2: .c/h) | `--supervise`/`--exec`, signalfd+poll, socket abstracto, SO_PEERCRED |
 | `cli/proot.c` (1004+) | handlers `--proxy`/`-p`, `resource_config`, `--recommended-etc-rw`, `--fake-permissions` |
 | `cli/proot.h` (614+) | opciones CLI propias, declaraciones |
-| `cli/cli.c` (694) | dispatch `--vnp-helper`/`--exec`, hook `resource_config_apply()` |
+| `cli/cli.c` (694+) | dispatch `--vnp-helper`/`--exec`, hook `resource_config_apply()`, D5 `tracee_hash_update` |
 | `extension/extension.h` | `vnp_callback`, `rlimit_callback`, `hpc_callback`, `fake_id0_*` |
 | `path/binding.c` | `insort_binding3_with_mode()` wrapper |
 | `path/binding.h` | `insort_binding3_with_mode()` declaration |
 | `GNUmakefile` (318) | objs virtual_net, virtual_net_helper, resource_limit, proc_isolation |
 | `tracee/event.c` (976) | event loop poll para supervise (idéntico sin flag) |
-| `tracee/tracee.h` (399) | campo `supervise`, `fake_netlink_reply` como puntero |
+| `tracee/tracee.c` | D5 hash table (insert/remove/update), `get_tracee` O(1), `free_terminated_tracees` hash cleanup |
+| `tracee/tracee.h` (399+) | campo `supervise`, `fake_netlink_reply` como puntero, D5 `hash_next` |
 | `syscall/seccomp.c` | D1 sorted sysnums, D2 ioctl no-sysexit, D3 faccessat2 no-sysexit |
 | `syscall/enter.c` | `fake_netlink_reply` lazy talloc, D2 FICLONE dynamic detection |
 | `syscall/sysnums-arm64.h` | `[ 202 ] = PR_accept` |
@@ -225,8 +226,8 @@ Port mapping (`-p host:container`, máx 64, auto-puerto libre), auto-redirect de
 - **`/data` mount**: no usar en CI (`-m` en run-docker.sh causa permisos en runners GHA); la caché se monta vía `TERMUX_DOCKER_RUN_EXTRA_ARGS`.
 - **Registry cleanup**: entradas stale de `registry.lock` no se limpian solas (no afectan). Limpieza manual: borrar `$PREFIX/usr/tmp/proot-net/`.
 - **Tamaños reales** (para estimar diffs): `virtual_net.c`=1144, `virtual_net_helper.c`=422, `cli/proot.c`=1004, `cli/proot.h`=614, `cli/cli.c`=694, `GNUmakefile`=318, `tracee/event.c`=976, `tracee/tracee.h`=399.
-- **D5 hash table**: implementación causó hang — el lifecycle de talloc entries conflicta con el event loop de ptrace. Necesita rediseño (hash estática con slots fijos o limpiar en remove_tracee). NO re-intentar sin cambio de diseño.
-- **D6 binding cache**: deferred por dangling pointers — el cache es global pero bindings son por-tracee. Necesita invalidación en free_terminated_tracees.
+- **D5 hash table**: ✅ implementada. Hash estático 256 buckets + `tracee_hash_update()` para PID change en cli.c. Sin talloc lifecycle issues. D6 (binding cache) y D7 (canonicalize cache) SKIP — riesgo supera ganancia.
+- **D6 binding cache**: SKIP — riesgo de dangling pointers supera ganancia (3-10 bindings típicas, scan lineal es efectivamente O(1)).
 - **proot necesita `env -i`** al ejecutar en rootfs Alpine — el entorno heredado causa execve failures. El wrapper `alpine_rootfs` ya lo hace correctamente.
 
 ## Pentest / Hardening Testing

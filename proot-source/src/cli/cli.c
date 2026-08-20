@@ -526,7 +526,12 @@ int main(int argc, char *const argv[])
 	tracee = get_tracee(NULL, 0, true);
 	if (tracee == NULL)
 		goto error;
-	tracee->pid = getpid();
+	/* D5: Update hash entry when PID changes from 0 to actual PID. */
+	{
+		pid_t old_pid = tracee->pid;
+		tracee->pid = getpid();
+		tracee_hash_update(tracee, old_pid);
+	}
 
 	/* Set verboseness from env variable, may be overriden by option */
 	{

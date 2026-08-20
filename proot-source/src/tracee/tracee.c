@@ -48,6 +48,71 @@
 
 static Tracees tracees;
 
+/**
+ * D5: Static hash table for O(1) pid→Tracee lookup.
+ * 256 buckets, separate chaining via Tracee.hash_next.
+ * NOT talloc-managed — entries are the Tracee structs themselves,
+ * cleaned up in free_terminated_tracees() BEFORE TALLOC_FREE.
+ * Avoids the talloc lifecycle hang from the first D5 attempt
+ * (which tried to clean up in the remove_tracee destructor).
+ */
+#define TRACEE_HASH_BITS 8
+#define TRACEE_HASH_SIZE (1 << TRACEE_HASH_BITS)  /* 256 */
+#define TRACEE_HASH_MASK (TRACEE_HASH_SIZE - 1)
+
+static Tracee *tracee_hash[TRACEE_HASH_SIZE];
+
+static inline unsigned int tracee_hash_fn(pid_t pid)
+{
+	return ((unsigned int)pid) & TRACEE_HASH_MASK;
+}
+
+static void tracee_hash_insert(Tracee *tracee)
+{
+	unsigned int h = tracee_hash_fn(tracee->pid);
+	tracee->hash_next = tracee_hash[h];
+	tracee_hash[h] = tracee;
+}
+
+/**
+ * D5: Update hash entry when a tracee's PID changes.
+ * Removes the old entry and inserts with the new PID.
+ */
+void tracee_hash_update(Tracee *tracee, pid_t old_pid)
+{
+	unsigned int old_h = tracee_hash_fn(old_pid);
+	Tracee **pp;
+
+	/* Remove old entry from hash. */
+	pp = &tracee_hash[old_h];
+	while (*pp != NULL) {
+		if (*pp == tracee) {
+			*pp = tracee->hash_next;
+			tracee->hash_next = NULL;
+			break;
+		}
+		pp = &(*pp)->hash_next;
+	}
+
+	/* Insert with new PID. */
+	tracee_hash_insert(tracee);
+}
+
+static void tracee_hash_remove(Tracee *tracee)
+{
+	unsigned int h = tracee_hash_fn(tracee->pid);
+	Tracee **pp = &tracee_hash[h];
+
+	while (*pp != NULL) {
+		if (*pp == tracee) {
+			*pp = tracee->hash_next;
+			tracee->hash_next = NULL;
+			return;
+		}
+		pp = &(*pp)->hash_next;
+	}
+	/* Not found — shouldn't happen but be safe. */
+}
 
 /**
  * Remove @zombie from its parent's list of zombies.  Note: this is a
@@ -230,8 +295,10 @@ static Tracee *new_tracee(pid_t pid)
 
 	tracee->pid = pid;
 	tracee->vpid = next_vpid++;
+	tracee->hash_next = NULL;  /* D5: initialize hash chain pointer */
 
 	LIST_INSERT_HEAD(&tracees, tracee, link);
+	tracee_hash_insert(tracee);  /* D5: insert into O(1) hash table */
 
 	tracee->life_context = talloc_new(tracee);
 
@@ -322,6 +389,8 @@ bool has_ptracees(const Tracee *ptracer, pid_t pid, word_t wait_options)
  * Return the entry related to the tracee @pid.  If no entry were
  * found, a new one is created if @create is true, otherwise NULL is
  * returned.
+ *
+ * D5: O(1) hash lookup with list walk fallback for safety.
  */
 Tracee *get_tracee(const Tracee *current_tracee, pid_t pid, bool create)
 {
@@ -333,6 +402,25 @@ Tracee *get_tracee(const Tracee *current_tracee, pid_t pid, bool create)
 	if (current_tracee != NULL && current_tracee->pid == pid)
 		return (Tracee *)current_tracee;
 
+	/* D5 fast path: O(1) hash lookup. */
+	{
+		unsigned int h = tracee_hash_fn(pid);
+
+		tracee = tracee_hash[h];
+		while (tracee != NULL) {
+			if (tracee->pid == pid) {
+				/* Flush then allocate a new memory collector.  */
+				if (tracee->ctx != NULL)
+					TALLOC_FREE(tracee->ctx);
+				tracee->ctx = talloc_new(tracee);
+				return tracee;
+			}
+			tracee = tracee->hash_next;
+		}
+	}
+
+	/* D5: Hash lookup failed — fall back to list walk.
+	 * This shouldn't happen if the hash is correctly maintained. */
 	LIST_FOREACH(tracee, &tracees, link) {
 		if (tracee->pid == pid) {
 			/* Flush then allocate a new memory collector.  */
@@ -364,6 +452,10 @@ void terminate_tracee(Tracee *tracee)
 
 /**
  * Free all tracees marked as terminated.
+ *
+ * D5: Remove from hash table BEFORE TALLOC_FREE to avoid
+ * dangling pointers.  This must happen here (not in the
+ * remove_tracee destructor) to avoid talloc lifecycle hangs.
  */
 void free_terminated_tracees()
 {
@@ -375,8 +467,10 @@ void free_terminated_tracees()
 		Tracee *tracee = next;
 		next = tracee->link.le_next;
 
-		if (tracee->terminated)
+		if (tracee->terminated) {
+			tracee_hash_remove(tracee);  /* D5: O(1) hash cleanup */
 			TALLOC_FREE(tracee);
+		}
 	}
 }
 

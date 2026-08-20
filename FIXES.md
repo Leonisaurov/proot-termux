@@ -7,8 +7,8 @@
 | A — Aislamiento P0 | **Completada** ✅ (en producción) | `573f4cb8d9` (REV 19), `3b98197d8a` (REV 20) | A2 + C1 + V4 (573f4cb8d9); cierre de los 4 MINORs + kill(0)/kill(-pgid) confinados (3b98197d8a). Pentest ampliado con baselines `*_2` y verificaciones `*_3`. |
 | B — Leaks y fds | **Completada** ✅ | `ec308f5425` (REV 21) | 8 fixes B1-B8. Pentest: 14/14 tests PASS (B1-B2-B7 concurrent, B3 fd_map sweep, B5 SP integrity, B6 bridge children, B7 signalfd, B8 talloc). Scripts en `pentest/test_b*.sh`, reporte en `pentest/results/REPORT-FASE-B-PENTEST.md`. |
 | C — Aislamiento P1 | **Completada** ✅ | `6d3a556007` (REV 22), `e141f86c56` | C2 MS_RDONLY emulation (insort_binding3_with_mode), C3 /etc :ro default (--recommended-etc-rw), C4 proc blocklist expandido (12 paths), C6 SO_PEERCRED auth, C7 --fake-permissions. Pentest: 7/7 PASS. C3 fix: defer -R bindings + guest path check. |
-| D — Rendimiento P0/P1 | **Parcial** 🔄 | `e30bdb5b43` (REV 23) | D1 BPF sorted copy, D2 ioctl dinámico FICLONE, D3 faccessat2 sin sysexit. DEFERIDOS: D4 (socket sysexit), D5 (hash table — hang por talloc lifecycle), D6 (binding cache — dangling pointers), D7 (canonicalize cache). Pentest: B1/B2/B7 PASS. |
-| E — Resto P2/P3 | Pendiente | — | Sin tocar. |
+| D — Rendimiento P0/P1 | **Completada** ✅ | `e30bdb5b43` (REV 23), `89e2598828` (REV 24), D5 hash (REV 25) | D1 BPF sorted copy, D2 ioctl dinámico FICLONE, D3 faccessat2 sin sysexit, D4 socket no-sysexit. D5 hash table O(1) get_tracee: implementada con `tracee_hash_update()` para PID change en cli.c. D6 (binding cache) y D7 (canonicalize cache) SKIP — riesgo supera ganancia. |
+| E — Resto P2/P3 | **Parcial** 🔄 | `89e2598828` (REV 24) | E1 renameat2 no-sysexit, E3 uname conditional, E6 mknod phantom fix. Pendientes: E2 registry cache, E4 host-rootfs, E5 pidfd_open, E7 proc bypass, E8 micro-opts. |
 
 Documento de referencia INMUTABLE durante la implementación. Resultado de 3 auditorías profundas (rendimiento, leaks/fds, aislamiento). Cada fix especifica archivo:línea, cambio concreto, riesgo y verificación. No re-abrir ítems marcados en §0.
 

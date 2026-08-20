@@ -394,7 +394,16 @@ typedef struct tracee {
 	 * value as a guest path. */
 	char *cwd_raw;
 
+	/* D5: Hash table chaining for O(1) pid→tracee lookup.
+	 * Embedded in the Tracee struct — no separate allocation,
+	 * no talloc lifecycle conflicts.  Cleaned up in
+	 * free_terminated_tracees() BEFORE TALLOC_FREE. */
+	struct tracee *hash_next;
+
 } Tracee;
+
+/* D5: hash table update when tracee PID changes */
+extern void tracee_hash_update(Tracee *tracee, pid_t old_pid);
 
 #define HOST_ROOTFS "/host-rootfs"
 

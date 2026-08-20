@@ -68,3 +68,7 @@ proot-escape-test*
 /termux-isolated
 /pentest/p_*
 /pentest/results/
+.scripts/
+alpine_rootfs_memwd
+pentest/memtest
+proot-distro-python-cmd
