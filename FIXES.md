@@ -8,7 +8,7 @@
 | B — Leaks y fds | **Completada** ✅ | `ec308f5425` (REV 21) | 8 fixes B1-B8. Pentest: 14/14 tests PASS (B1-B2-B7 concurrent, B3 fd_map sweep, B5 SP integrity, B6 bridge children, B7 signalfd, B8 talloc). Scripts en `pentest/test_b*.sh`, reporte en `pentest/results/REPORT-FASE-B-PENTEST.md`. |
 | C — Aislamiento P1 | **Completada** ✅ | `6d3a556007` (REV 22), `e141f86c56` | C2 MS_RDONLY emulation (insort_binding3_with_mode), C3 /etc :ro default (--recommended-etc-rw), C4 proc blocklist expandido (12 paths), C6 SO_PEERCRED auth, C7 --fake-permissions. Pentest: 7/7 PASS. C3 fix: defer -R bindings + guest path check. |
 | D — Rendimiento P0/P1 | **Completada** ✅ | `e30bdb5b43` (REV 23), `89e2598828` (REV 24), D5 hash (REV 25) | D1 BPF sorted copy, D2 ioctl dinámico FICLONE, D3 faccessat2 sin sysexit, D4 socket no-sysexit. D5 hash table O(1) get_tracee: implementada con `tracee_hash_update()` para PID change en cli.c. D6 (binding cache) y D7 (canonicalize cache) SKIP — riesgo supera ganancia. |
-| E — Resto P2/P3 | **Parcial** 🔄 | `89e2598828` (REV 24), REV 26 | E1 renameat2 no-sysexit, E3 uname conditional, E6 mknod phantom fix. E5 pidfd_open → ISOLATE_PROC. E7 lazy maps_fd detection. E4 doc -q host-rootfs. SKIP: E2 (registry cache, marginal), E8 (micro-opts, P3). |
+| E — Resto P2/P3 | **Completada** ✅ | `89e2598828` (REV 24), REV 27 | E1 renameat2 no-sysexit, E3 uname conditional, E6 mknod phantom fix. E5 pidfd_open → ISOLATE_PROC. E7 lazy maps_fd detection. E4 doc -q host-rootfs. E2 registry fd cache. E8 fake_netlink fast-path. |
 
 Documento de referencia INMUTABLE durante la implementación. Resultado de 3 auditorías profundas (rendimiento, leaks/fds, aislamiento). Cada fix especifica archivo:línea, cambio concreto, riesgo y verificación. No re-abrir ítems marcados en §0.
 
@@ -20,7 +20,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | Leak talloc en shutdown supervise (`free_terminated_tracees`, FU-1..FU-4, `supervise_handle_exited_tracee`, guard `ctl_fd>=0`) | ✅ fixes 5ad187e929 + 414053fc04 |
 | **FASE A COMPLETADA — A2 stat/readlink oracle + C1 kill(-1) broadcast + V4 netlink topology** | ✅ commit `573f4cb8d9` 'fix(isolation): block /proc host stat/readlink oracle, kill(-1) broadcast, netlink topology' (REVISION 19) — pentest ampliado con baselines `*_2` y verificaciones `*_3` |
 | **FASE A COMPLETADA — cierre de los 4 MINORs + hardening señales** | ✅ commit `3b98197d8a` 'fix(isolation): deliver kill broadcasts to guest tracees, block statx on SIGSYS, harden signal validation' (REVISION 20) — kill(-1) entrega real a tracees; statx cubierto en SIGSYS legacy; pentest EMULADO-OK; buffers PATH_MAX; extra kill(0)/kill(-pgid) confinados al guest (ESRCH pgid vacío, EINVAL señal inválida) |
-|| REVISION actual en `packages/proot/build.sh` | **26** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/` |
+|| REVISION actual en `packages/proot/build.sh` | **27** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/` |
 
 ## 1. Resumen ejecutivo de las 3 auditorías
 
@@ -104,13 +104,13 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | ID | Sev | Hallazgo | Fix | Verificación |
 |----|-----|----------|-----|--------------|
 | E1 | P2 | `syscall/seccomp.c:405` `renameat2` FILTER_SYSEXIT sin case → quitar (`link2symlink` lo ORa) | ✅ RESUELTO (REV 24) quitar — link2symlink ya añade FILTER_SYSEXIT en su filtered_sysnums cuando está activo; sin link2symlink no hay handler → ptrace stop inútil eliminado | pentest E1: 8/8 PASS (rename básico, overwrite, cross-dir, nonexistent) |
-| E2 | P2 | `virtual_net.c:279-318` registry flock por bind/connect (4-6 syscalls) | cachear fd LOCK_SH persistente | benchmark bind/connect |
+| E2 | P2 | `virtual_net.c:279-318` registry flock por bind/connect (4-6 syscalls) | ✅ RESUELTO (REV 27) fd cache para LOCK_SH — reusa fd abierto, solo re-abre con LOCK_EX para writes | pentest E2: vnet stress 5/5 PASS |
 | E3 | P2 | `syscall/seccomp.c:423` `uname` FILTER_SYSEXIT solo x86_64 (`exit.c:466` #ifdef) | ✅ RESUELTO (REV 24) `#ifdef ARCH_X86_64`-arlo — en ARM64 el handler está compilado out, ptrace stop inútil; en x86_64 se mantiene (necesario para 32-bit compat) | pentest E3: 8/8 PASS (uname -a/-s/-m/-r) + build aarch64 limpio |
 | E4 | P2 | `cli/proot.c:194` `-q` expone TODO el host en `/host-rootfs` | ✅ RESUELTO (REV 26) doc comment con security note — `new_binding("/", HOST_ROOTFS)` es intencional pero documenta el riesgo | doc comment in-code |
 | E5 | P1 | `proc_isolation.c:560-570` `pidfd_open` escape solo en A (ISOLATE_PTRACE) → mover a ISOLATE_PROC o default-on | ✅ RESUELTO (REV 26) movido a ISOLATE_PROC — `flag_sysnum_map` + handler check; previene pidfd-based /proc bypass en todas las configs con proc isolation | pentest E5: smoke con pidfd_open |
 | E6 | P2 | `fake_id0.c:1026-1039` mknod phantom success (EPERM→0; nodo no existe en host) | ✅ RESUELTO (REV 24) ENOENT emulado para S_ISBLK/S_ISCHR — mknod/mknodat verifica mode antes de forzar éxito; S_ISREG/S_ISFIFO no afectados | pentest E6: 10/10 PASS (block, char, regular, FIFO, mknodat) |
 | E7 | P1 | proc_isolation bypass getdents/maps vía no-canónico (`maps_fd` no se registra) | ✅ RESUELTO (REV 26) lazy maps_fd detection en `hpc_handle_maps_read_exit` — si maps_fd no registrado, verifica fd via readlink_proc_pid_fd y registra | pentest E7: smoke con rutas no canónicas |
-| E8 | P3 | micro-opts: `event.c:855-858` check seccomp antes de GETEVENTMSG; `syscall.c:139-141` save_current_regs doble; `enter.c:573-582` latch `fake_netlink_active`; `path.c:51-111` `join_paths` memcpy | SKIP (P3, bajo impacto, items principales ya optimizados) | — |
+| E8 | P3 | micro-opts: `event.c:855-858` check seccomp antes de GETEVENTMSG; `syscall.c:139-141` save_current_regs doble; `enter.c:573-582` latch `fake_netlink_active`; `path.c:51-111` `join_paths` memcpy | ✅ RESUELTO (REV 27) fast-path en `is_fake_netlink_fd` (skip scan si count==0); seccomp check ya óptimo; save_current_regs ambos necesarios | pentest E8: stress OK |
 
 ## 8. Verificación empírica por fase (pentest ampliado + benchmarks + smoke proot-distro)
 

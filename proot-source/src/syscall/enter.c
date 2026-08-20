@@ -574,7 +574,8 @@ blocked:
 static bool is_fake_netlink_fd(const Tracee *tracee, int fd)
 {
 	int i;
-	if (fd < 0)
+	/* E8: fast-path — skip scan when no fake fds registered. */
+	if (fd < 0 || tracee->fake_netlink_fds_count == 0)
 		return false;
 	for (i = 0; i < tracee->fake_netlink_fds_count; i++)
 		if (tracee->fake_netlink_fds[i] == fd)

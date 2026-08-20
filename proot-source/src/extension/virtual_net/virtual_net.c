@@ -275,12 +275,27 @@ static void vnp_cache_update(const struct VnpRegistryHeader *hdr)
 /**
  * Open registry file with the given lock type.
  * Returns fd, or -1 on error.
+ *
+ * E2: When lock_type is LOCK_SH and a cached fd is available,
+ * reuse it instead of open+flock+close cycle.
  */
 static int vnp_registry_open(const char *proxy_name, int lock_type)
 {
 	char path[VNP_SOCKBUF_LEN];
 	char dir[VNP_SOCKBUF_LEN];
 	int fd;
+
+	/* E2: fd cache for LOCK_SH — reuse if fd is still valid. */
+	static int cached_sh_fd = -1;
+	static char cached_sh_proxy[64] = {0};
+
+	if (lock_type == LOCK_SH
+	    && cached_sh_fd >= 0
+	    && strcmp(cached_sh_proxy, proxy_name) == 0
+	    && fcntl(cached_sh_fd, F_GETFD) >= 0) {
+		/* Re-lock is idempotent for LOCK_SH. */
+		return cached_sh_fd;
+	}
 
 	snprintf(path, sizeof(path), "%s/%s/%s",
 		 VNP_TMP_DIR, proxy_name, VNP_REG_LOCK);
@@ -314,6 +329,16 @@ static int vnp_registry_open(const char *proxy_name, int lock_type)
 		close(fd);
 		return -1;
 	}
+
+	/* E2: cache fd for LOCK_SH reuse. */
+	if (lock_type == LOCK_SH) {
+		if (cached_sh_fd >= 0)
+			close(cached_sh_fd);
+		cached_sh_fd = fd;
+		strncpy(cached_sh_proxy, proxy_name, sizeof(cached_sh_proxy) - 1);
+		cached_sh_proxy[sizeof(cached_sh_proxy) - 1] = '\0';
+	}
+
 	return fd;
 }
 
