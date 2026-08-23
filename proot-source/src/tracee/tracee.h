@@ -323,6 +323,9 @@ typedef struct tracee {
 	 * PR_SET_NO_NEW_PRIVS that PRoot performs itself in the launch child
 	 * (before that execve) when tracking @no_new_privs. */
 	bool seen_execve;
+	/* PRoot-internal executable path translation must not become a guest
+	 * filesystem authorization request. */
+	bool exec_path_translation;
 
 	/**********************************************************************
 	 * Shared or private resources, depending on the CLONE_FS/VM flags.   *

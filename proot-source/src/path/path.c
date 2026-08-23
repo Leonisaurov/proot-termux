@@ -506,28 +506,38 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 		}
 
 		Binding *binding = get_binding(tracee, GUEST, requested_guest_path);
+		int requires_control = net_policy_path_requires_control(tracee,
+								 requested_guest_path, operation);
 		proactive_decision = net_policy_path_rule_precheck(tracee,
 							 requested_guest_path, NULL, operation);
 		if (proactive_decision < 0)
 			return proactive_decision;
+		if (requires_control && proactive_decision == 0) {
+			int dynamic = net_policy_path_access(tracee, requested_guest_path, NULL,
+							 operation, NET_CONTROL_REASON_STATIC_POLICY);
+			if (dynamic < 0)
+				return dynamic;
+		}
 		if (metadata_only && binding != NULL &&
 		    binding->access_mode == BINDING_ACCESS_MASK)
-			status = 0;
-		else if (proactive_decision > 0)
 			status = 0;
 		else
 			status = check_binding_access(tracee, requested_guest_path, is_write);
 		if (status < 0) {
-			int dynamic = net_policy_path_access(tracee, requested_guest_path, NULL,
-						operation,
-						status == -EROFS
-							? NET_CONTROL_REASON_STATIC_RO
-							: (binding != NULL &&
-							   binding->access_mode == BINDING_ACCESS_MASK
-								? NET_CONTROL_REASON_MASKED_SHADOW
-								: NET_CONTROL_REASON_STATIC_POLICY));
-			if (dynamic < 0)
+			if (requires_control)
 				return status;
+			{
+				int dynamic = net_policy_path_access(tracee, requested_guest_path, NULL,
+								 operation,
+								 status == -EROFS
+									? NET_CONTROL_REASON_STATIC_RO
+									: (binding != NULL &&
+									   binding->access_mode == BINDING_ACCESS_MASK
+										? NET_CONTROL_REASON_MASKED_SHADOW
+										: NET_CONTROL_REASON_STATIC_POLICY));
+				if (dynamic < 0)
+					return status;
+			}
 			status = 0;
 		}
 	}

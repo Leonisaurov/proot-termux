@@ -42,6 +42,10 @@ extern int net_policy_path_access(Tracee *tracee, const char *path,
 					 const char *other_path,
 					 NetControlPathOperation operation,
 					 NetControlPathReason reason);
+/* Returns non-zero when this guest path is outside the fixed infrastructure
+ * exemptions and therefore needs a PRCT decision for this operation. */
+extern int net_policy_path_requires_control(Tracee *tracee, const char *path,
+						 NetControlPathOperation operation);
 /* Returns 1/-EACCES for a matching proactive rule, 0 when no rule matches. */
 extern int net_policy_path_rule_precheck(Tracee *tracee, const char *path,
 						 const char *other_path,

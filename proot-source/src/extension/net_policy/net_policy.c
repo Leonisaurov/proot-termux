@@ -1129,8 +1129,13 @@ static int destination_matches(const char *rule, const struct sockaddr_storage *
 	unsigned int rule_port_value;
 	int has_port;
 	const char *scheme = strstr(rule, "://");
-	if (net_class == VNP_NET_CLASS_UNKNOWN)
-		return 0;
+	/* UNKNOWN is deliberately not a network class.  Only the three explicit
+	 * hand-off wildcards may pass the static check; they merely allow the
+	 * request to reach PRCT and never authorize it themselves. */
+	if (net_class == VNP_NET_CLASS_UNKNOWN) {
+		return strcmp(rule, "*") == 0 || strcmp(rule, "tcp://*") == 0 ||
+			strcmp(rule, "udp://*") == 0;
+	}
 	if (scheme != NULL) {
 		if (strncmp(rule, "virtual://", 10) == 0) {
 			if (net_class != VNP_NET_CLASS_VIRTUAL)
@@ -1883,9 +1888,14 @@ static int check_operation(Tracee *tracee, NetPolicyConfig *config, int syscall)
 					     proxy, sizeof(proxy));
 	if (any_rule_matches(config->deny, config->deny_count, &addr, port, net_class))
 		return -EACCES;
-	if (config->mode == NET_POLICY_DENY &&
-	    !any_rule_matches(config->allow, config->allow_count, &addr, port, net_class))
-		return -EACCES;
+	if (config->mode == NET_POLICY_DENY) {
+		int allowed = any_rule_matches(config->allow, config->allow_count,
+					       &addr, port, net_class);
+		int handoff = net_class == VNP_NET_CLASS_UNKNOWN &&
+			config->ask_fd >= 0 && config->control_ready && allowed;
+		if (!allowed && !handoff)
+			return -EACCES;
+	}
 	return 0;
 }
 
@@ -2332,6 +2342,71 @@ int net_policy_path_access(Tracee *tracee, const char *path,
 		(config->path_peer_valid ? config->path_peer : NULL);
 	return control_path_access(config, tracee, path, effective_other,
 					operation, reason);
+}
+
+static int control_path_is_exempt(Tracee *tracee, const char *path,
+				  NetControlPathOperation operation)
+{
+	static const char *const infrastructure[] = {
+		"/system", "/system_ext", "/product", "/vendor", "/apex", "/odm",
+		"/linkerconfig", "/proc", "/sys", "/dev",
+		"/data/data/com.termux/files/usr",
+	};
+	char cwd[PATH_MAX];
+	unsigned int i;
+
+	if (tracee == NULL || path == NULL)
+		return 0;
+	if (getcwd2(tracee, cwd) == 0 && control_path_is_under(path, cwd))
+		return 1;
+	/* Opening a device such as /dev/tty with O_RDWR is not a filesystem
+	 * mutation, although path.c represents O_RDWR as WRITE.  Keep this narrow
+	 * startup/runtime device access inside the fixed /dev exemption; creation,
+	 * truncation, unlink, rename and mkdir remain mediated. */
+	if (control_path_is_under(path, "/dev")) {
+		int syscall = get_sysnum(tracee, CURRENT);
+		word_t flags = 0;
+		if (syscall == PR_open)
+			flags = peek_reg(tracee, CURRENT, SYSARG_2);
+		else if (syscall == PR_openat)
+			flags = peek_reg(tracee, CURRENT, SYSARG_3);
+		if ((syscall == PR_open || syscall == PR_openat) &&
+		    ((flags & (O_CREAT | O_TRUNC)) == 0 ||
+		     strcmp(path, "/dev/null") == 0 || strcmp(path, "/dev/tty") == 0))
+			return 1;
+	}
+	/* Infrastructure is read-only exempt.  Mutations still go through PRCT
+	 * and then through the normal static binding checks. */
+	if (operation != NET_CONTROL_PATH_READ &&
+	    operation != NET_CONTROL_PATH_METADATA)
+		return 0;
+	for (i = 0; i < sizeof(infrastructure) / sizeof(infrastructure[0]); i++)
+		if (control_path_is_under(path, infrastructure[i]))
+			return 1;
+	return 0;
+}
+
+int net_policy_path_requires_control(Tracee *tracee, const char *path,
+					     NetControlPathOperation operation)
+{
+	NetPolicyConfig *config = policy_config(tracee);
+	if (config == NULL || config->ask_fd < 0 || !config->control_ready)
+		return 0;
+	/* The first executable is resolved before the initial tracee has entered
+	 * its guest syscall stream. */
+	if (!tracee->seen_execve)
+		return 0;
+	if (tracee->exec_path_translation)
+		return 0;
+	/* Resolving the executable for execve is tracer setup, not a guest path
+	 * access.  Prompting here would prevent the guest command from starting
+	 * before its first user-visible filesystem operation. */
+	{
+		int syscall = get_sysnum(tracee, CURRENT);
+		if (syscall == PR_execve || syscall == PR_execveat)
+			return 0;
+	}
+	return !control_path_is_exempt(tracee, path, operation);
 }
 
 int net_policy_path_rule_precheck(Tracee *tracee, const char *path,

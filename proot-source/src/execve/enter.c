@@ -136,7 +136,9 @@ int translate_and_check_exec(Tracee *tracee, char host_path[PATH_MAX], const cha
 	if (user_path[0] == '\0')
 		return -ENOEXEC;
 
+	tracee->exec_path_translation = true;
 	status = translate_path(tracee, host_path, AT_FDCWD, user_path, true);
+	tracee->exec_path_translation = false;
 	if (status < 0)
 		return status;
 

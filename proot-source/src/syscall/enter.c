@@ -202,6 +202,7 @@ static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX
 		int sysnum = get_sysnum(tracee, CURRENT);
 		int static_status;
 		int proactive_decision;
+		int requires_control;
 		NetControlPathOperation override =
 			net_policy_path_operation_override(tracee);
 		if (sysnum == PR_rename || sysnum == PR_renameat ||
@@ -216,18 +217,28 @@ static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX
 								 NULL, operation);
 		if (proactive_decision < 0)
 			return proactive_decision;
-		if (proactive_decision > 0)
-			static_status = 0;
-		else
-			static_status = check_binding_access(tracee, guest_target, true);
-		if (static_status < 0) {
+		requires_control = net_policy_path_requires_control(tracee,
+								 guest_target, operation);
+		if (requires_control && proactive_decision == 0) {
 			int dynamic = net_policy_path_access(tracee, guest_target, NULL,
-							 operation,
-							 static_status == -EROFS
-							 ? NET_CONTROL_REASON_STATIC_RO
-							 : NET_CONTROL_REASON_STATIC_POLICY);
+							 operation, NET_CONTROL_REASON_STATIC_POLICY);
 			if (dynamic < 0)
+				return dynamic;
+		}
+		static_status = check_binding_access(tracee, guest_target, true);
+		if (static_status < 0) {
+			if (requires_control)
 				return static_status;
+			{
+				int dynamic = net_policy_path_access(tracee, guest_target, NULL,
+								 operation,
+								 static_status == -EROFS
+									? NET_CONTROL_REASON_STATIC_RO
+									: NET_CONTROL_REASON_STATIC_POLICY);
+				if (dynamic < 0)
+					return static_status;
+			}
+			static_status = 0;
 		}
 	}
 

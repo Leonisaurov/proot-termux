@@ -24,6 +24,13 @@ and validate `HELLO` before returning a ready process. Do not put
 the launcher waits its grace period and then terminates/kills a still-running
 proot.
 
+The control channel is fail-closed. With it enabled, PRCT still authorizes
+network destinations classified as `UNKNOWN` (the static `*`, `tcp://*`, and
+`udp://*` rules only hand such requests off), and external guest filesystem
+paths even when a read-only binding is readable. Fixed guest infrastructure
+roots are exempt for READ/METADATA; approvals never change static binding
+permissions.
+
 Python (the launcher fills in `--control-fd` and validates `HELLO` before
 returning):
 

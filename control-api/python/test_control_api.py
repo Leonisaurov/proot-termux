@@ -46,7 +46,7 @@ class TestControlAPI(unittest.TestCase):
  def test_real_launcher_completes_hello(self):
   proot=shutil.which('proot')
   if proot is None: self.skipTest('proot is not installed')
-  config=ProotConfig(proot_path=proot,guest_command=('/bin/sh','-c','printf integration-ok'))
+  config=ProotConfig(proot_path=proot,guest_command=('/bin/sh','-c','echo -n integration-ok'))
   process=ProotProcess.spawn(config)
   try:
    stdout,stderr=process.process.communicate(timeout=3)

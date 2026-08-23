@@ -44,6 +44,17 @@ malformed magic/version/type/size/payload, truncation, EOF, timeout, or
 request-id mismatch. Paths are absolute guest paths of at most 1023 bytes;
 host paths are never accepted or exposed.
 
+When `--control-fd` is active, an `UNKNOWN` network destination is not a
+virtual-network classification and is never implicitly allowed. The static
+network policy may use only `*`, `tcp://*`, or `udp://*` to hand it to PRCT;
+the harness must still return an allow decision. External guest paths likewise
+produce `PATH_ACCESS_REQUEST` even when a readable binding would pass the
+static check. Only fixed guest exemptions (the current working directory and
+its descendants, plus `/system`, `/system_ext`, `/product`, `/vendor`, `/apex`, `/odm`, `/linkerconfig`, `/proc`, `/sys`, `/dev`,
+and `/data/data/com.termux/files/usr` for READ/METADATA) avoid that request.
+These exemptions are guest paths, not host-derived bindings, and mutating
+operations remain subject to PRCT and static binding permissions.
+
 ## Channel lifecycle
 
 The channel starts in `CREATED`. `HELLO` (type 1, id 0, empty payload) is
