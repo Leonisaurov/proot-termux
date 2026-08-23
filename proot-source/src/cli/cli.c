@@ -44,6 +44,7 @@
 #include "path/binding.h"
 #include "path/canon.h"
 #include "path/path.h"
+#include "extension/net_policy/net_policy.h"
 #include <extension/sysvipc/sysvipc.h>
 #include <extension/virtual_net/virtual_net_helper.h>
 #include "supervise/supervise.h"
@@ -594,6 +595,11 @@ int main(int argc, char *const argv[])
 	status = launch_process(tracee, &argv[status]);
 	if (status < 0) {
 		print_execve_help(tracee, tracee->exe, status);
+		goto error;
+	}
+	status = net_policy_prepare_control_fd(tracee);
+	if (status < 0) {
+		note(tracee, ERROR, SYSTEM, "cannot prepare --control-fd");
 		goto error;
 	}
 

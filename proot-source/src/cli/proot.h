@@ -76,7 +76,7 @@ static int handle_option_net_allow(Tracee *tracee, const Cli *cli, const char *v
 static int handle_option_net_deny(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_net_allow_bind(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_net_deny_bind(Tracee *tracee, const Cli *cli, const char *value);
-static int handle_option_net_ask(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_control_fd(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_mbind(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_supervise(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_exec(Tracee *tracee, const Cli *cli, const char *value);
@@ -92,6 +92,7 @@ static int handle_option_perf_isolated(Tracee *tracee, const Cli *cli, const cha
 static int handle_option_handle_isolated(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_recommended_etc_rw(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_fake_permissions(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_hide(Tracee *tracee, const Cli *cli, const char *value);
 
 /* Host-side resource limit options (Fase 1).  */
 static int handle_option_cpu_limit(Tracee *tracee, const Cli *cli, const char *value);
@@ -259,6 +260,14 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
 	},
 	{ .class = "Extension options",
 	  .arguments = {
+		{ .name = "--hide", .separator = ' ', .value = "path" },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_hide,
+	  .description = "Hide a guest path and its descendants.",
+	  .detail = "Hidden paths are not exposed through lookup or directory enumeration.",
+	},
+	{ .class = "Extension options",
+	  .arguments = {
 		{ .name = "-k", .separator = ' ', .value = "string" },
 		{ .name = "--kernel-release", .separator = '=', .value = "string" },
 		{ .name = NULL, .separator = '\0', .value = NULL } },
@@ -410,11 +419,11 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
         },
         { .class = "Network policy options",
           .arguments = {
-                { .name = "--net-ask", .separator = ' ', .value = "FD" },
+                { .name = "--control-fd", .separator = ' ', .value = "FD" },
                 { .name = NULL, .separator = '\0', .value = NULL } },
-          .handler = handle_option_net_ask,
-          .description = "Ask an external harness after static policy allows.",
-          .detail = "Native-endian fixed-size request/response; timeout is 1000 ms and failures deny.",
+          .handler = handle_option_control_fd,
+          .description = "Use a bidirectional control harness for policy decisions.",
+          .detail = "Versioned full-duplex stream frames for network/path decisions and shadows; requests, malformed frames, EOF, and timeouts fail closed. Commands include ALLOW_ONCE, ALLOW_ALWAYS, DENY_ONCE, DENY_ALWAYS, FORGET, SET_RULE, REVEAL_SHADOW, RESTORE_SHADOW, and GET_STATE.",
         },
         { .class = "Extension options",
           .arguments = {

@@ -37,6 +37,7 @@
 #include "path/proc.h"
 #include "path/f2fs-bug.h"
 #include "extension/extension.h"
+#include "extension/net_policy/net_policy.h"
 
 /**
  * Put an end-of-string ('\0') right before the last component of @path.
@@ -143,6 +144,11 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 	status = substitute_binding(tracee, GUEST, host_path);
 	if (status < 0)
 		return status;
+	/* Consult shadows before lstat() so hidden host nodes cannot leak. */
+	status = net_policy_shadow_access(tracee, guest_path,
+			NET_CONTROL_PATH_READ);
+	if (status < 0)
+		return status;
 
 	/* Don't notify extensions during the initialization of a binding.  */
 	if (tracee->glue_type == 0) {
@@ -197,9 +203,10 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
  * occured, otherwise it returns 0.
  */
 int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
-		 char guest_path[PATH_MAX], unsigned int recursion_level)
+			char guest_path[PATH_MAX], unsigned int recursion_level)
 {
 	char scratch_path[PATH_MAX];
+	char shadow_path[PATH_MAX];
 	Finality finality;
 	const char *cursor;
 	int status;
@@ -217,6 +224,21 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 
 	if (strnlen(guest_path, PATH_MAX) >= PATH_MAX)
 		return -ENAMETOOLONG;
+
+	/* Check the complete guest spelling before component lookup.  The
+	 * canonicalizer may later replace its output with a host-root spelling
+	 * while resolving bindings; consulting shadows only in that later path
+	 * would already have performed an lstat() on hidden host data. */
+	if (user_path[0] == '/')
+		strncpy(shadow_path, user_path, sizeof(shadow_path) - 1);
+	else if (join_paths(2, shadow_path, guest_path, user_path) < 0)
+		return -ENAMETOOLONG;
+	shadow_path[sizeof(shadow_path) - 1] = '\0';
+	if (normalize_guest_path(shadow_path) < 0)
+		return -ENAMETOOLONG;
+	if (net_policy_shadow_access(tracee, shadow_path,
+				NET_CONTROL_PATH_READ) < 0)
+		return -ENOENT;
 
 	if (user_path[0] != '/') {
 		/* Ensure 'guest_path' contains an absolute base of

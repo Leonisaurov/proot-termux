@@ -22,25 +22,59 @@
 #include "cli/note.h"
 #include "extension/net_policy/net_policy.h"
 #include "extension/virtual_net/virtual_net.h"
+#include "path/binding.h"
+#include "path/path.h"
 #include "tracee/mem.h"
 #include "tracee/tracee.h"
 
 #define NET_POLICY_MAX_RULES 128
 #define NET_POLICY_RULE_LEN 256
 #define NET_POLICY_MAX_BINDS 256
-#define NET_ASK_VERSION 1U
-#define NET_ASK_TIMEOUT_MS 1000
+#define CONTROL_MAGIC 0x50524354U /* "PRCT" */
+#define CONTROL_VERSION 1U
+#define CONTROL_MAX_FRAME 4096U
+#define CONTROL_PATH_LEN 1024U
+#define CONTROL_TIMEOUT_MS 1000
 #define NET_DNS_MAX_QUERIES 64
 #define NET_DNS_MAX_LEASES 128
 #define NET_DNS_NAME_LEN 256
 
 enum {
-	NET_ASK_BIND = 1,
-	NET_ASK_CONNECT = 2,
-	NET_ASK_PUBLICATION = 3,
-	NET_ASK_DNS = 4,
-	NET_ASK_BRIDGE_CREATE = 5,
-	NET_ASK_BRIDGE_CLOSE = 6,
+	CONTROL_HELLO = 1,
+	CONTROL_NET_ACCESS_REQUEST = 2,
+	CONTROL_PATH_ACCESS_REQUEST = 3,
+	CONTROL_SHADOW_EVENT = 4,
+	CONTROL_COMMAND_RESULT = 5,
+	CONTROL_ALLOW_ONCE = 16,
+	CONTROL_ALLOW_ALWAYS = 17,
+	CONTROL_DENY_ONCE = 18,
+	CONTROL_DENY_ALWAYS = 19,
+	CONTROL_FORGET = 20,
+	CONTROL_SET_RULE = 21,
+	CONTROL_REVEAL_SHADOW = 22,
+	CONTROL_RESTORE_SHADOW = 23,
+	CONTROL_GET_STATE = 24,
+};
+
+enum {
+	CONTROL_NET_BIND = 1,
+	CONTROL_NET_CONNECT = 2,
+	CONTROL_NET_PUBLICATION = 3,
+	CONTROL_NET_DNS = 4,
+};
+
+enum {
+	CONTROL_PATH_READ = 1,
+	CONTROL_PATH_WRITE = 2,
+	CONTROL_PATH_CREATE = 3,
+	CONTROL_PATH_DELETE = 4,
+	CONTROL_PATH_RENAME = 5,
+	CONTROL_PATH_METADATA = 6,
+};
+
+enum {
+	CONTROL_SHADOW_NODE = 1,
+	CONTROL_SHADOW_RECURSIVE = 2,
 };
 
 enum {
@@ -49,9 +83,15 @@ enum {
 };
 
 typedef struct __attribute__((packed)) {
-	uint32_t version;
-	uint32_t event_type;
+	uint32_t magic;
+	uint16_t version;
+	uint16_t type;
+	uint32_t size;
 	uint64_t request_id;
+} ControlHeader;
+
+typedef struct __attribute__((packed)) {
+	uint32_t operation;
 	int32_t guest_pid;
 	int32_t host_pid;
 	uint16_t family;
@@ -63,15 +103,70 @@ typedef struct __attribute__((packed)) {
 	uint8_t real_exposure;
 	char proxy[64];
 	char domain[128];
-} NetAskRequest;
+} ControlNetRequest;
 
 typedef struct __attribute__((packed)) {
-	uint32_t version;
-	uint64_t request_id;
+	uint32_t operation;
+	uint16_t family;
+	uint16_t port;
+	uint8_t address[16];
+	uint8_t decision;
+	uint8_t reserved[3];
+} ControlNetCommand;
+
+typedef struct __attribute__((packed)) {
+	uint32_t operation;
+	uint32_t reason;
+	char path[CONTROL_PATH_LEN];
+	char other_path[CONTROL_PATH_LEN];
+} ControlPathRequest;
+
+typedef struct __attribute__((packed)) {
+	uint32_t operation;
+	uint32_t scope;
+	uint32_t decision;
+	char path[CONTROL_PATH_LEN];
+	char other_path[CONTROL_PATH_LEN];
+} ControlPathCommand;
+
+typedef struct __attribute__((packed)) {
+	int32_t status;
+	uint32_t flags;
+	uint32_t dynamic_path_rules;
+	uint32_t dynamic_net_rules;
+	uint32_t shadows;
+} ControlCommandResult;
+
+typedef struct __attribute__((packed)) {
 	uint8_t decision;
 	uint8_t reason_code;
 	char reason[96];
-} NetAskResponse;
+} ControlDecision;
+
+typedef struct {
+	uint32_t operation;
+	uint16_t family;
+	uint16_t port;
+	uint8_t address[16];
+	uint8_t decision;
+	int persistent;
+	int active;
+} ControlNetRule;
+
+typedef struct {
+	char path[PATH_MAX];
+	char other_path[PATH_MAX];
+	uint32_t operation;
+	uint8_t decision;
+	int persistent;
+	int active;
+} ControlPathRule;
+
+typedef struct {
+	char path[PATH_MAX];
+	int recursive;
+	int revealed;
+} ControlShadow;
 
 typedef struct {
 	char *value;
@@ -127,8 +222,18 @@ typedef struct {
 	unsigned int bind_count;
 	int ask_fd;
 	int ask_failed;
+	int control_ready;
 	uint64_t next_request_id;
 	char proxy[64];
+	ControlNetRule dynamic_rules[64];
+	unsigned int dynamic_rule_count;
+	ControlPathRule path_rules[128];
+	unsigned int path_rule_count;
+	char path_peer[PATH_MAX];
+	int path_peer_valid;
+	NetControlPathOperation path_operation_override;
+	ControlShadow shadows[128];
+	unsigned int shadow_count;
 	NetDnsQuery dns_queries[NET_DNS_MAX_QUERIES];
 	unsigned int dns_query_count;
 	NetDnsLease dns_leases[NET_DNS_MAX_LEASES];
@@ -144,10 +249,15 @@ static FilteredSysnum net_policy_sysnums[] = {
 	{ PR_recvmsg, FILTER_SYSEXIT },
 	{ PR_ppoll, FILTER_SYSEXIT },
 	{ PR_read, FILTER_SYSEXIT },
+	{ PR_getdents, FILTER_SYSEXIT },
+	{ PR_getdents64, FILTER_SYSEXIT },
 	FILTERED_SYSNUM_END
 };
 
 static int read_sockaddr(Tracee *tracee, word_t ptr, struct sockaddr_storage *addr);
+static int control_filter_getdents(NetPolicyConfig *config, Tracee *tracee);
+static int control_drain_commands(NetPolicyConfig *config);
+
 static void dns_prepare_response(NetPolicyConfig *config, NetDnsQuery *query,
 					 const unsigned char *packet, size_t length,
 					 Tracee *tracee);
@@ -1123,11 +1233,14 @@ static int write_full_timeout(int fd, const void *data, size_t size)
 		struct pollfd pfd = { .fd = fd, .events = POLLOUT };
 		int ready;
 		do {
-			ready = poll(&pfd, 1, NET_ASK_TIMEOUT_MS);
+			ready = poll(&pfd, 1, CONTROL_TIMEOUT_MS);
 		} while (ready < 0 && errno == EINTR);
 		if (ready <= 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
 			return -1;
-		ssize_t n = write(fd, ptr, size);
+		/* The control channel is a full-duplex stream socket.  Use the
+		 * socket API explicitly so this path cannot accidentally be treated
+		 * as a guest/tracee write or lose SIGPIPE protection on Android. */
+		ssize_t n = send(fd, ptr, size, MSG_NOSIGNAL);
 		if (n < 0 && errno == EINTR)
 			continue;
 		if (n <= 0)
@@ -1145,11 +1258,11 @@ static int read_full_timeout(int fd, void *data, size_t size)
 		struct pollfd pfd = { .fd = fd, .events = POLLIN };
 		int ready;
 		do {
-			ready = poll(&pfd, 1, NET_ASK_TIMEOUT_MS);
+			ready = poll(&pfd, 1, CONTROL_TIMEOUT_MS);
 		} while (ready < 0 && errno == EINTR);
 		if (ready <= 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
 			return -1;
-		ssize_t n = read(fd, ptr, size);
+		ssize_t n = recv(fd, ptr, size, 0);
 		if (n < 0 && errno == EINTR)
 			continue;
 		if (n <= 0)
@@ -1160,23 +1273,272 @@ static int read_full_timeout(int fd, void *data, size_t size)
 	return 0;
 }
 
+static int control_type_is_command(uint16_t type)
+{
+	return type >= CONTROL_ALLOW_ONCE && type <= CONTROL_GET_STATE;
+}
+
+static int control_type_is_decision(uint16_t type)
+{
+	return type == CONTROL_ALLOW_ONCE || type == CONTROL_ALLOW_ALWAYS ||
+		type == CONTROL_DENY_ONCE || type == CONTROL_DENY_ALWAYS;
+}
+
+static int control_path_equal(const char *a, const char *b)
+{
+	return a != NULL && b != NULL && strcmp(a, b) == 0;
+}
+
+static void control_remove_path_rule(NetPolicyConfig *config,
+					     const ControlPathCommand *command)
+{
+	unsigned int i;
+	for (i = 0; i < config->path_rule_count; i++) {
+		ControlPathRule *rule = &config->path_rules[i];
+		if (rule->active && rule->operation == command->operation &&
+		    control_path_equal(rule->path, command->path) &&
+		    control_path_equal(rule->other_path, command->other_path)) {
+			memset(rule, 0, sizeof(*rule));
+			return;
+		}
+	}
+}
+
+static int control_net_command(NetPolicyConfig *config, uint16_t type,
+				       const unsigned char *payload, size_t size)
+{
+	const ControlNetCommand *command = (const ControlNetCommand *)payload;
+	unsigned int i;
+	if (size != sizeof(*command) ||
+	    (command->operation != CONTROL_NET_BIND &&
+	     command->operation != CONTROL_NET_CONNECT &&
+	     command->operation != CONTROL_NET_PUBLICATION) ||
+	    (command->family != AF_INET && command->family != AF_INET6) ||
+	    (command->decision != NET_DECISION_ALLOW &&
+	     command->decision != NET_DECISION_DENY))
+		return -EINVAL;
+	if (type == CONTROL_FORGET) {
+		for (i = 0; i < config->dynamic_rule_count; i++) {
+			ControlNetRule *rule = &config->dynamic_rules[i];
+			if (rule->active && rule->operation == command->operation &&
+			    rule->family == command->family &&
+			    rule->port == command->port &&
+			    memcmp(rule->address, command->address,
+				   command->family == AF_INET ? 4 : 16) == 0) {
+				memset(rule, 0, sizeof(*rule));
+				return 0;
+			}
+		}
+		return 0;
+	}
+	for (i = 0; i < config->dynamic_rule_count; i++)
+		if (!config->dynamic_rules[i].active)
+			break;
+	if (i == config->dynamic_rule_count && i < 64)
+		config->dynamic_rule_count++;
+	if (i >= 64)
+		return -ENOSPC;
+	config->dynamic_rules[i].operation = command->operation;
+	config->dynamic_rules[i].family = command->family;
+	config->dynamic_rules[i].port = command->port;
+	memcpy(config->dynamic_rules[i].address,
+	       command->address, command->family == AF_INET ? 4 : 16);
+	config->dynamic_rules[i].decision = command->decision;
+	config->dynamic_rules[i].persistent =
+		type == CONTROL_ALLOW_ALWAYS || type == CONTROL_DENY_ALWAYS;
+	config->dynamic_rules[i].active = 1;
+	return 0;
+}
+
+static int control_send_result(NetPolicyConfig *config, uint64_t request_id,
+				       int status)
+{
+	ControlHeader header;
+	ControlCommandResult result;
+	memset(&header, 0, sizeof(header));
+	memset(&result, 0, sizeof(result));
+	header.magic = CONTROL_MAGIC;
+	header.version = CONTROL_VERSION;
+	header.type = CONTROL_COMMAND_RESULT;
+	header.size = sizeof(result);
+	header.request_id = request_id;
+	result.status = status;
+	result.dynamic_path_rules = config->path_rule_count;
+	result.dynamic_net_rules = config->dynamic_rule_count;
+	result.shadows = config->shadow_count;
+	return write_full_timeout(config->ask_fd, &header, sizeof(header)) < 0 ||
+		write_full_timeout(config->ask_fd, &result, sizeof(result)) < 0 ? -EIO : 0;
+}
+
+static int control_apply_command(NetPolicyConfig *config, uint16_t type,
+					 const unsigned char *payload, size_t size)
+{
+	const ControlPathCommand *command;
+	unsigned int i;
+	if (!control_type_is_command(type))
+		return -EINVAL;
+	if (type == CONTROL_GET_STATE && size == 0)
+		return 0;
+	if ((type == CONTROL_SET_RULE || type == CONTROL_FORGET ||
+	     control_type_is_decision(type)) && size == sizeof(ControlNetCommand))
+		return control_net_command(config, type, payload, size);
+	if (size != sizeof(ControlPathCommand))
+		return -EINVAL;
+	command = (const ControlPathCommand *)payload;
+	if (command->path[CONTROL_PATH_LEN - 1] != '\0' ||
+	    command->other_path[CONTROL_PATH_LEN - 1] != '\0')
+		return -EINVAL;
+	if (command->operation < CONTROL_PATH_READ ||
+	    command->operation > CONTROL_PATH_METADATA)
+		return -EINVAL;
+	if (type == CONTROL_REVEAL_SHADOW || type == CONTROL_RESTORE_SHADOW) {
+		if (command->scope != CONTROL_SHADOW_NODE &&
+		    command->scope != CONTROL_SHADOW_RECURSIVE)
+			return -EINVAL;
+	}
+	if (type == CONTROL_FORGET) {
+		control_remove_path_rule(config, command);
+		return 0;
+	}
+	if (type == CONTROL_REVEAL_SHADOW || type == CONTROL_RESTORE_SHADOW) {
+		for (i = 0; i < config->shadow_count; i++) {
+			ControlShadow *shadow = &config->shadows[i];
+			if (control_path_equal(shadow->path, command->path)) {
+				if (type == CONTROL_RESTORE_SHADOW) {
+					shadow->revealed = 0;
+					shadow->recursive = 0;
+				} else {
+					shadow->revealed = 1;
+					shadow->recursive = command->scope == CONTROL_SHADOW_RECURSIVE;
+				}
+			}
+		}
+		return 0;
+	}
+	if (type == CONTROL_GET_STATE)
+		return 0;
+	if (type == CONTROL_ALLOW_ONCE || type == CONTROL_ALLOW_ALWAYS ||
+	    type == CONTROL_DENY_ONCE || type == CONTROL_DENY_ALWAYS ||
+	    type == CONTROL_SET_RULE) {
+		if (type == CONTROL_SET_RULE && command->decision != NET_DECISION_ALLOW &&
+		    command->decision != NET_DECISION_DENY)
+			return -EINVAL;
+		for (i = 0; i < config->path_rule_count; i++)
+			if (!config->path_rules[i].active)
+			break;
+		if (i == config->path_rule_count && i < 128)
+			config->path_rule_count++;
+		if (i >= 128)
+			return -ENOSPC;
+		strncpy(config->path_rules[i].path, command->path, CONTROL_PATH_LEN - 1);
+		strncpy(config->path_rules[i].other_path, command->other_path,
+			CONTROL_PATH_LEN - 1);
+		config->path_rules[i].operation = command->operation;
+		config->path_rules[i].decision = type == CONTROL_SET_RULE
+			? command->decision
+			: (type == CONTROL_ALLOW_ONCE || type == CONTROL_ALLOW_ALWAYS);
+		config->path_rules[i].persistent =
+			type == CONTROL_ALLOW_ALWAYS || type == CONTROL_DENY_ALWAYS ||
+			type == CONTROL_SET_RULE;
+		config->path_rules[i].active = 1;
+		return 0;
+	}
+	return -EINVAL;
+}
+
+/* Drain unsolicited harness commands without adding work when no control FD
+ * is installed. A partial frame is treated as a protocol failure, so the
+ * stream can never be reinterpreted after desynchronization. */
+static int control_drain_commands(NetPolicyConfig *config)
+{
+	struct pollfd pfd;
+	ControlHeader header;
+	unsigned char payload[CONTROL_MAX_FRAME];
+	int ready;
+	if (config->ask_fd < 0 || !config->control_ready || config->ask_failed)
+		return config->ask_failed ? -EACCES : 0;
+	pfd.fd = config->ask_fd;
+	pfd.events = POLLIN;
+	ready = poll(&pfd, 1, 0);
+	/* This path is only active when a control FD exists. */
+	if (ready <= 0)
+		return ready < 0 && errno != EINTR ? -EACCES : 0;
+	if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+		config->ask_failed = 1;
+		return -EACCES;
+	}
+	if (read_full_timeout(config->ask_fd, &header, sizeof(header)) < 0 ||
+	    header.magic != CONTROL_MAGIC || header.version != CONTROL_VERSION ||
+	    header.size > CONTROL_MAX_FRAME ||
+	    read_full_timeout(config->ask_fd, payload, header.size) < 0) {
+		config->ask_failed = 1;
+		return -EACCES;
+	}
+	if (!control_type_is_command(header.type) ||
+	    (control_type_is_decision(header.type) == 0 &&
+	    header.type != CONTROL_FORGET && header.type != CONTROL_SET_RULE &&
+	    header.type != CONTROL_REVEAL_SHADOW &&
+	    header.type != CONTROL_RESTORE_SHADOW &&
+	    header.type != CONTROL_GET_STATE)) {
+		config->ask_failed = 1;
+		return -EACCES;
+	}
+	if (header.type == CONTROL_GET_STATE && header.size == 0) {
+		if (control_send_result(config, header.request_id, 0) < 0) {
+			config->ask_failed = 1;
+			return -EACCES;
+		}
+	} else if (control_apply_command(config, header.type, payload,
+					 header.size) < 0 ||
+			   control_send_result(config, header.request_id, 0) < 0) {
+		config->ask_failed = 1;
+		return -EACCES;
+	}
+	return 0;
+}
+
 static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 			       uint32_t event, const struct sockaddr_storage *addr,
 			       uint16_t guest_port, uint16_t host_port,
 			       uint8_t real_exposure, VnpNetworkClass net_class,
 			       const char *proxy)
 {
-	NetAskRequest request;
-	NetAskResponse response;
-	int protocol_failed;
-	if (config->ask_fd < 0)
+	ControlHeader header;
+	ControlNetRequest request;
+	ControlHeader response_header;
+	ControlDecision response;
+	unsigned char payload[CONTROL_MAX_FRAME];
+	int protocol_failed = 0;
+	if (config->ask_fd < 0 || !config->control_ready)
 		return 0;
 	if (config->ask_failed)
 		return -EACCES;
+	if (addr != NULL) {
+		unsigned int i;
+		for (i = 0; i < config->dynamic_rule_count; i++) {
+			ControlNetRule *rule = &config->dynamic_rules[i];
+			const void *ip = addr->ss_family == AF_INET
+				? (const void *)&((const struct sockaddr_in *)addr)->sin_addr
+				: (const void *)&((const struct sockaddr_in6 *)addr)->sin6_addr;
+			if (rule->active && rule->operation == event &&
+			    rule->family == addr->ss_family &&
+			    rule->port == guest_port &&
+			    memcmp(rule->address, ip, addr->ss_family == AF_INET ? 4 : 16) == 0) {
+				int decision = rule->decision;
+				if (!rule->persistent)
+					memset(rule, 0, sizeof(*rule));
+				return decision == NET_DECISION_ALLOW ? 0 : -EACCES;
+			}
+		}
+	}
+	memset(&header, 0, sizeof(header));
 	memset(&request, 0, sizeof(request));
-	request.version = NET_ASK_VERSION;
-	request.event_type = event;
-	request.request_id = ++config->next_request_id;
+	header.magic = CONTROL_MAGIC;
+	header.version = CONTROL_VERSION;
+	header.type = CONTROL_NET_ACCESS_REQUEST;
+	header.size = sizeof(request);
+	header.request_id = ++config->next_request_id;
+	request.operation = event;
 	request.guest_pid = (int32_t)tracee->pid;
 	request.host_pid = (int32_t)getpid();
 	request.guest_port = guest_port;
@@ -1194,14 +1556,74 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 		proxy = config->proxy;
 	if (proxy[0] != '\0')
 		memcpy(request.proxy, proxy, sizeof(request.proxy));
-	protocol_failed = write_full_timeout(config->ask_fd, &request, sizeof(request)) < 0;
-	if (!protocol_failed)
-		protocol_failed = read_full_timeout(config->ask_fd, &response, sizeof(response)) < 0;
-	if (!protocol_failed)
-		protocol_failed = response.version != NET_ASK_VERSION ||
-			response.request_id != request.request_id ||
-			(response.decision != NET_DECISION_ALLOW &&
-			 response.decision != NET_DECISION_DENY);
+	(void) event;
+	if (write_full_timeout(config->ask_fd, &header, sizeof(header)) < 0 ||
+	    write_full_timeout(config->ask_fd, &request, sizeof(request)) < 0)
+		protocol_failed = 1;
+	else {
+		unsigned int unsolicited = 0;
+		while (unsolicited++ < 32) {
+			if (read_full_timeout(config->ask_fd, &response_header,
+					     sizeof(response_header)) < 0 ||
+			    response_header.magic != CONTROL_MAGIC ||
+			    response_header.version != CONTROL_VERSION ||
+			    response_header.size > CONTROL_MAX_FRAME ||
+			    read_full_timeout(config->ask_fd, payload,
+					     response_header.size) < 0) {
+				protocol_failed = 1;
+				break;
+			}
+			if (control_type_is_command(response_header.type) &&
+			    response_header.request_id != header.request_id) {
+				if (control_apply_command(config, response_header.type, payload,
+							 response_header.size) < 0 ||
+				    control_send_result(config, response_header.request_id, 0) < 0) {
+					protocol_failed = 1;
+					break;
+				}
+				continue;
+			}
+			protocol_failed = response_header.request_id != header.request_id ||
+				response_header.size < sizeof(response) ||
+				(response_header.type != CONTROL_COMMAND_RESULT &&
+				 response_header.type != CONTROL_ALLOW_ONCE &&
+				 response_header.type != CONTROL_ALLOW_ALWAYS &&
+				 response_header.type != CONTROL_DENY_ONCE &&
+				 response_header.type != CONTROL_DENY_ALWAYS);
+			if (protocol_failed)
+				break;
+			memcpy(&response, payload, sizeof(response));
+			protocol_failed = response.decision != NET_DECISION_ALLOW &&
+				response.decision != NET_DECISION_DENY;
+			if (!protocol_failed &&
+			    (response_header.type == CONTROL_ALLOW_ALWAYS ||
+			     response_header.type == CONTROL_DENY_ALWAYS) && addr != NULL) {
+				unsigned int slot;
+				for (slot = 0; slot < config->dynamic_rule_count; slot++)
+					if (!config->dynamic_rules[slot].active)
+						break;
+				if (slot >= 64) {
+					protocol_failed = 1;
+					break;
+				}
+				if (slot == config->dynamic_rule_count)
+					config->dynamic_rule_count++;
+				ControlNetRule *rule = &config->dynamic_rules[slot];
+				const void *ip = addr->ss_family == AF_INET
+					? (const void *)&((const struct sockaddr_in *)addr)->sin_addr
+					: (const void *)&((const struct sockaddr_in6 *)addr)->sin6_addr;
+				rule->operation = event;
+				rule->family = addr->ss_family;
+				rule->port = guest_port;
+				memcpy(rule->address, ip, addr->ss_family == AF_INET ? 4 : 16);
+				rule->decision = response_header.type == CONTROL_ALLOW_ALWAYS
+					? NET_DECISION_ALLOW : NET_DECISION_DENY;
+				rule->persistent = 1;
+				rule->active = 1;
+			}
+			break;
+		}
+	}
 	if (protocol_failed) {
 		/* A partial frame makes the stream untrustworthy.  Do not reuse it for
 		 * later requests; all future decisions fail closed until the CLI
@@ -1210,6 +1632,158 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 		return -EACCES;
 	}
 	return response.decision == NET_DECISION_ALLOW ? 0 : -EACCES;
+}
+
+static int control_path_access(NetPolicyConfig *config, Tracee *tracee,
+				       const char *path, const char *other_path,
+				       uint32_t operation, uint32_t reason)
+{
+	ControlHeader header, response_header;
+	ControlPathRequest request;
+	ControlDecision response;
+	ControlPathCommand command;
+	unsigned char payload[CONTROL_MAX_FRAME];
+	unsigned int i, unsolicited = 0;
+	int protocol_failed = 0;
+
+	if (path == NULL || path[0] != '/' || strlen(path) >= CONTROL_PATH_LEN ||
+	    (other_path != NULL && other_path[0] != '/') ||
+	    (other_path != NULL && strlen(other_path) >= CONTROL_PATH_LEN))
+		return -EACCES;
+	if (control_drain_commands(config) < 0)
+		return -EACCES;
+	for (i = 0; i < config->path_rule_count; i++) {
+		ControlPathRule *rule = &config->path_rules[i];
+		if (rule->active && rule->operation == operation &&
+		    control_path_equal(rule->path, path) &&
+		    control_path_equal(rule->other_path, other_path ?: "")) {
+			int decision = rule->decision;
+			if (!rule->persistent)
+				memset(rule, 0, sizeof(*rule));
+			return decision ? 0 : -EACCES;
+		}
+	}
+	if (config->ask_fd < 0 || !config->control_ready)
+		return -EACCES;
+	memset(&header, 0, sizeof(header));
+	memset(&request, 0, sizeof(request));
+	header.magic = CONTROL_MAGIC;
+	header.version = CONTROL_VERSION;
+	header.type = CONTROL_PATH_ACCESS_REQUEST;
+	header.size = sizeof(request);
+	header.request_id = ++config->next_request_id;
+	request.operation = operation;
+	request.reason = reason;
+	strncpy(request.path, path, sizeof(request.path) - 1);
+	if (other_path != NULL)
+		strncpy(request.other_path, other_path, sizeof(request.other_path) - 1);
+	if (write_full_timeout(config->ask_fd, &header, sizeof(header)) < 0 ||
+	    write_full_timeout(config->ask_fd, &request, sizeof(request)) < 0) {
+		protocol_failed = 1;
+	}
+	while (!protocol_failed && unsolicited++ < 32) {
+		if (read_full_timeout(config->ask_fd, &response_header,
+					     sizeof(response_header)) < 0 ||
+		    response_header.magic != CONTROL_MAGIC ||
+		    response_header.version != CONTROL_VERSION ||
+		    response_header.size > CONTROL_MAX_FRAME ||
+		    read_full_timeout(config->ask_fd, payload, response_header.size) < 0) {
+			protocol_failed = 1;
+			break;
+		}
+		if (control_type_is_command(response_header.type) &&
+		    response_header.request_id != header.request_id) {
+			if (control_apply_command(config, response_header.type, payload,
+					       response_header.size) < 0 ||
+			    control_send_result(config, response_header.request_id, 0) < 0) {
+				protocol_failed = 1;
+				break;
+			}
+			continue;
+		}
+		if (response_header.request_id != header.request_id ||
+		    response_header.size < sizeof(response) ||
+		    (response_header.type != CONTROL_COMMAND_RESULT &&
+		     response_header.type != CONTROL_ALLOW_ONCE &&
+		     response_header.type != CONTROL_ALLOW_ALWAYS &&
+		     response_header.type != CONTROL_DENY_ONCE &&
+		     response_header.type != CONTROL_DENY_ALWAYS)) {
+			protocol_failed = 1;
+			break;
+		}
+		memcpy(&response, payload, sizeof(response));
+		if (response.decision != NET_DECISION_ALLOW &&
+		    response.decision != NET_DECISION_DENY) {
+			protocol_failed = 1;
+			break;
+		}
+		if (response_header.type == CONTROL_ALLOW_ALWAYS ||
+		    response_header.type == CONTROL_DENY_ALWAYS) {
+			memset(&command, 0, sizeof(command));
+			command.operation = operation;
+			strncpy(command.path, path, sizeof(command.path) - 1);
+			if (other_path != NULL)
+				strncpy(command.other_path, other_path, sizeof(command.other_path) - 1);
+			control_apply_command(config, response_header.type,
+					      (const unsigned char *)&command, sizeof(command));
+		}
+		return response.decision == NET_DECISION_ALLOW ? 0 : -EACCES;
+	}
+	if (protocol_failed || unsolicited >= 32)
+		config->ask_failed = 1;
+	(void) tracee;
+	return -EACCES;
+}
+
+static int control_shadow_event(NetPolicyConfig *config, const char *path,
+					uint32_t operation)
+{
+	ControlHeader header;
+	ControlPathRequest event;
+	if (config->ask_fd < 0 || !config->control_ready)
+		return 0;
+	memset(&header, 0, sizeof(header));
+	memset(&event, 0, sizeof(event));
+	header.magic = CONTROL_MAGIC;
+	header.version = CONTROL_VERSION;
+	header.type = CONTROL_SHADOW_EVENT;
+	header.size = sizeof(event);
+	header.request_id = ++config->next_request_id;
+	event.operation = operation;
+	event.reason = NET_CONTROL_REASON_HIDDEN_SHADOW;
+	strncpy(event.path, path, sizeof(event.path) - 1);
+	if (write_full_timeout(config->ask_fd, &header, sizeof(header)) < 0 ||
+	    write_full_timeout(config->ask_fd, &event, sizeof(event)) < 0) {
+		config->ask_failed = 1;
+		return -EACCES;
+	}
+	return 0;
+}
+
+static int control_fd_path_operation(Tracee *tracee, int fd,
+					     NetControlPathOperation operation)
+{
+	char path[PATH_MAX];
+	int status;
+	if (fd < 0)
+		return 0;
+	status = readlink_proc_pid_fd(tracee->pid, fd, path);
+	if (status < 0 || path[0] != '/')
+		return 0;
+	status = detranslate_path(tracee, path, NULL);
+	if (status < 0)
+		return 0;
+	status = check_binding_access(tracee, path, true);
+	if (status < 0) {
+		int dynamic = net_policy_path_access(tracee, path, NULL,
+						     operation,
+						     status == -EROFS
+						     ? NET_CONTROL_REASON_STATIC_RO
+						     : NET_CONTROL_REASON_STATIC_POLICY);
+		if (dynamic < 0)
+			return status;
+	}
+	return 0;
 }
 
 static int read_sockaddr(Tracee *tracee, word_t ptr, struct sockaddr_storage *addr)
@@ -1246,7 +1820,8 @@ static int check_operation(Tracee *tracee, NetPolicyConfig *config, int syscall)
 	int is_bind = syscall == PR_bind || syscall == PR_listen;
 	int is_datagram = syscall == PR_sendto || syscall == PR_recvfrom;
 
-	if (config->mode == NET_POLICY_OFF)
+	if (config->mode == NET_POLICY_OFF &&
+	    !(config->ask_fd >= 0 && config->control_ready))
 		return 0;
 	if (syscall == PR_recvmsg || syscall == PR_ppoll || syscall == PR_read)
 		return 0;
@@ -1323,6 +1898,7 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 			return -ENOMEM;
 		config->mode = NET_POLICY_OFF;
 		config->ask_fd = -1;
+		config->control_ready = 0;
 		config->next_request_id = 0;
 		extension->config = config;
 		extension->filtered_sysnums = net_policy_sysnums;
@@ -1332,8 +1908,45 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 		Tracee *tracee = TRACEE(extension);
 		NetPolicyConfig *config = talloc_get_type_abort(extension->config, NetPolicyConfig);
 		int syscall = get_sysnum(tracee, CURRENT);
-		if (config->mode == NET_POLICY_OFF)
-			return 0;
+		config->path_peer_valid = 0;
+		config->path_peer[0] = '\0';
+		config->path_operation_override = 0;
+		/* Proactive rules and shadow commands must be observed before path
+		 * translation, including operations that static policy already allows. */
+		if (config->ask_fd >= 0 && config->control_ready &&
+		    control_drain_commands(config) < 0) {
+			set_sysnum(tracee, PR_void);
+			poke_reg(tracee, SYSARG_RESULT, -EACCES);
+			return 1;
+		}
+		/* On ARM64 some kernels/launchers do not preserve the extension's
+		 * FILTER_SYSEXIT request for getdents64.  Request the ptrace exit
+		 * explicitly whenever shadows are active; without this, lookup checks
+		 * remain hidden but directory enumeration leaks the entry. */
+		if (config->shadow_count != 0 &&
+		    (syscall == PR_getdents || syscall == PR_getdents64)) {
+			tracee->sysexit_pending = true;
+			tracee->restart_how = PTRACE_SYSCALL;
+		}
+	if (config->mode == NET_POLICY_OFF &&
+	    !(config->ask_fd >= 0 && config->control_ready))
+		return 0;
+	if (config->ask_fd >= 0 && config->control_ready) {
+		NetControlPathOperation fd_operation = NET_CONTROL_PATH_METADATA;
+		int fd = -1;
+		switch (syscall) {
+		case PR_fchmod: case PR_fchown: case PR_fchown32:
+			fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+			break;
+		default:
+			break;
+		}
+		if (fd >= 0 && control_fd_path_operation(tracee, fd, fd_operation) < 0) {
+			set_sysnum(tracee, PR_void);
+			poke_reg(tracee, SYSARG_RESULT, -EACCES);
+			return 1;
+		}
+	}
 		if (syscall == PR_bind || syscall == PR_listen || syscall == PR_connect ||
 		    syscall == PR_sendto || syscall == PR_recvfrom || syscall == PR_recvmsg ||
 		    syscall == PR_ppoll || syscall == PR_read) {
@@ -1365,7 +1978,8 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 				VERBOSE(tracee, 1, "net_policy: denied syscall %d", syscall);
 				return 1;
 			}
-			if (network_syscall && syscall != PR_listen && config->ask_fd >= 0) {
+		if (network_syscall && syscall != PR_listen &&
+		    config->ask_fd >= 0 && config->control_ready) {
 				struct sockaddr_storage addr;
 				word_t ptr = (syscall == PR_sendto || syscall == PR_recvfrom) ?
 					peek_reg(tracee, CURRENT, SYSARG_5) :
@@ -1375,7 +1989,7 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 						ntohs(((struct sockaddr_in *)&addr)->sin_port) :
 						ntohs(((struct sockaddr_in6 *)&addr)->sin6_port);
 					status = ask_harness(config, tracee,
-						syscall == PR_bind ? NET_ASK_BIND : NET_ASK_CONNECT,
+						syscall == PR_bind ? CONTROL_NET_BIND : CONTROL_NET_CONNECT,
 						&addr, (uint16_t)port, (uint16_t)port, 0,
 						vnp_classify_destination(tracee, &addr, (uint16_t)port,
 									 config->proxy, sizeof(config->proxy)),
@@ -1389,6 +2003,16 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 			}
 		}
 		return 0;
+	}
+	if (event == SYSCALL_CHAINED_EXIT || event == SYSCALL_EXIT_END) {
+		NetPolicyConfig *config = talloc_get_type_abort(extension->config, NetPolicyConfig);
+		int syscall = get_sysnum(TRACEE(extension), ORIGINAL);
+		if (syscall == PR_getdents || syscall == PR_getdents64) {
+			if (control_filter_getdents(config, TRACEE(extension)) < 0)
+				/* No filtered bytes may escape after protocol failure. */
+				poke_reg(TRACEE(extension), SYSARG_RESULT, 0);
+			return 0;
+		}
 	}
 	if (event == SYSCALL_EXIT_START) {
 		Tracee *tracee = TRACEE(extension);
@@ -1487,7 +2111,299 @@ int net_policy_add_bind(Tracee *tracee, const char *value, int deny)
 int net_policy_is_active(Tracee *tracee)
 {
 	NetPolicyConfig *config = policy_config(tracee);
-	return config != NULL && config->mode != NET_POLICY_OFF;
+	return config != NULL && (config->mode != NET_POLICY_OFF ||
+		(config->ask_fd >= 0 && config->control_ready));
+}
+
+static int control_path_is_under(const char *path, const char *base)
+{
+	size_t length = strlen(base);
+	return strcmp(path, base) == 0 ||
+		(strncmp(path, base, length) == 0 && path[length] == '/');
+}
+
+static int control_shadow_hides_entry(NetPolicyConfig *config, Tracee *tracee,
+					      const char *parent, const char *name)
+{
+	char path[PATH_MAX], host_entry[PATH_MAX], host_shadow[PATH_MAX];
+	unsigned int i;
+	if (strcmp(parent, "/") == 0)
+		snprintf(path, sizeof(path), "/%s", name);
+	else
+		snprintf(path, sizeof(path), "%s/%s", parent, name);
+	if (join_paths(2, host_entry, parent, name) < 0)
+		host_entry[0] = '\0';
+	for (i = 0; i < config->shadow_count; i++) {
+		ControlShadow *shadow = &config->shadows[i];
+		int exact = strcmp(path, shadow->path) == 0;
+		int under = control_path_is_under(path, shadow->path);
+		if (exact && !shadow->revealed)
+			return 1;
+		if (under && !exact && !(shadow->revealed && shadow->recursive))
+			return 1;
+		/* Directory FDs expose the host spelling after Android symlink
+		 * resolution (for example guest /etc becomes /system/etc). Resolve
+		 * the declared guest shadow through PRoot's own mapper as well, so
+		 * enumeration cannot leak through that alias. Host paths remain an
+		 * internal comparison and are never sent over control-fd. */
+		if (host_entry[0] != '\0') {
+			unsigned int j;
+			int saved_revealed[128], saved_recursive[128];
+			for (j = 0; j < config->shadow_count; j++) {
+				saved_revealed[j] = config->shadows[j].revealed;
+				saved_recursive[j] = config->shadows[j].recursive;
+				config->shadows[j].revealed = 1;
+				config->shadows[j].recursive = 1;
+			}
+			int resolved = translate_path(tracee, host_shadow, AT_FDCWD,
+						     shadow->path, true) == 0;
+			for (j = 0; j < config->shadow_count; j++) {
+				config->shadows[j].revealed = saved_revealed[j];
+				config->shadows[j].recursive = saved_recursive[j];
+			}
+			if (resolved && (strcmp(host_entry, host_shadow) == 0 ||
+				control_path_is_under(host_entry, host_shadow)) &&
+			    !(shadow->revealed &&
+				 (strcmp(host_entry, host_shadow) == 0 ? 1 : shadow->recursive)))
+				return 1;
+		}
+	}
+	return 0;
+}
+
+static int control_filter_getdents(NetPolicyConfig *config, Tracee *tracee)
+{
+	word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	char parent[PATH_MAX], *data, *ptr;
+	size_t remaining, kept = 0;
+	int status;
+	if (config->shadow_count == 0 || (int)result <= 0)
+		return 0;
+	if (control_drain_commands(config) < 0)
+		return -EACCES;
+	status = readlink_proc_pid_fd(tracee->pid,
+			(int)peek_reg(tracee, ORIGINAL, SYSARG_1), parent);
+	if (status < 0)
+		return 0;
+	/* With the native Termux root (no guest-root binding), procfs already
+	 * reports the guest spelling.  detranslate_path() may legitimately have
+	 * no binding to remove; retain that spelling instead of silently skipping
+	 * the directory filter.  For a rootfs it succeeds and replaces parent with
+	 * the canonical guest path. */
+	(void)detranslate_path(tracee, parent, NULL);
+	data = talloc_size(tracee->ctx, (size_t)result);
+	if (data == NULL || read_data(tracee, data,
+			peek_reg(tracee, CURRENT, SYSARG_2), result) < 0) {
+		talloc_free(data);
+		return 0;
+	}
+	ptr = data;
+	remaining = (size_t)result;
+	while (remaining > 0) {
+		unsigned short reclen;
+		char *name, *end;
+		if (get_sysnum(tracee, ORIGINAL) == PR_getdents64) {
+			struct linux_dirent64 { unsigned long long ino; long long off;
+				unsigned short reclen; unsigned char type; char name[]; } *d;
+			d = (void *)ptr;
+			reclen = d->reclen;
+			name = d->name;
+		} else {
+			struct linux_dirent { unsigned long ino; unsigned long off;
+				unsigned short reclen; char name[]; } *d;
+			d = (void *)ptr;
+			reclen = d->reclen;
+			name = d->name;
+		}
+		if (reclen < (unsigned short)(name - ptr) || reclen > remaining)
+			break;
+		end = memchr(name, '\0', reclen - (size_t)(name - ptr));
+		if (end == NULL)
+			break;
+		if (!control_shadow_hides_entry(config, tracee, parent, name)) {
+			if (ptr != data + kept)
+				memmove(data + kept, ptr, reclen);
+			kept += reclen;
+		}
+		ptr += reclen;
+		remaining -= reclen;
+	}
+	if (kept != (size_t)result) {
+		if (kept != 0)
+			write_data(tracee, peek_reg(tracee, CURRENT, SYSARG_2), data, kept);
+		poke_reg(tracee, SYSARG_RESULT, kept);
+	}
+	talloc_free(data);
+	return 0;
+}
+
+int net_policy_add_shadow(Tracee *tracee, const char *path)
+{
+	NetPolicyConfig *config;
+	char normalized[PATH_MAX];
+	if (path == NULL || path[0] != '/' || strlen(path) >= PATH_MAX)
+		return -EINVAL;
+	strncpy(normalized, path, sizeof(normalized) - 1);
+	normalized[sizeof(normalized) - 1] = '\0';
+	if (normalize_guest_path(normalized) < 0)
+		return -EINVAL;
+	if (ensure_extension(tracee) < 0)
+		return -ENOMEM;
+	config = policy_config(tracee);
+	if (config->shadow_count >= 128)
+		return -ENOSPC;
+	strncpy(config->shadows[config->shadow_count].path, normalized, PATH_MAX - 1);
+	config->shadows[config->shadow_count].path[PATH_MAX - 1] = '\0';
+	config->shadow_count++;
+	return 0;
+}
+
+int net_policy_shadow_access(Tracee *tracee, const char *path,
+				     NetControlPathOperation operation)
+{
+	NetPolicyConfig *config = policy_config(tracee);
+	unsigned int i;
+	if (config == NULL || path == NULL)
+		return 0;
+	/* canonicalize() runs before path.c has classified the operation.  Use the
+	 * explicit two-operand override when present, otherwise derive the same
+	 * operation from the syscall so a hidden write is never presented as a
+	 * read authorization to the harness. */
+	if (config->path_operation_override != 0)
+		operation = config->path_operation_override;
+	else {
+		int syscall = get_sysnum(tracee, CURRENT);
+		if (syscall == PR_open || syscall == PR_openat) {
+			word_t flags = peek_reg(tracee, CURRENT,
+				syscall == PR_open ? SYSARG_2 : SYSARG_3);
+			operation = (flags & O_CREAT) ? NET_CONTROL_PATH_CREATE :
+				((flags & (O_WRONLY | O_RDWR | O_TRUNC)) != 0 ?
+				 NET_CONTROL_PATH_WRITE : NET_CONTROL_PATH_READ);
+		} else if (syscall == PR_creat || syscall == PR_mkdir ||
+			   syscall == PR_mkdirat || syscall == PR_symlink ||
+			   syscall == PR_symlinkat || syscall == PR_link ||
+			   syscall == PR_linkat || syscall == PR_mknod ||
+			   syscall == PR_mknodat)
+			operation = NET_CONTROL_PATH_CREATE;
+		else if (syscall == PR_unlink || syscall == PR_unlinkat ||
+			 syscall == PR_rmdir)
+			operation = NET_CONTROL_PATH_DELETE;
+		else if (syscall == PR_rename || syscall == PR_renameat ||
+			 syscall == PR_renameat2)
+			operation = NET_CONTROL_PATH_RENAME;
+		else if (syscall == PR_chmod || syscall == PR_fchmod ||
+			 syscall == PR_fchmodat || syscall == PR_chown ||
+			 syscall == PR_chown32 || syscall == PR_lchown ||
+			 syscall == PR_lchown32 || syscall == PR_fchownat ||
+			 syscall == PR_utime || syscall == PR_utimes ||
+			 syscall == PR_futimesat || syscall == PR_utimensat)
+			operation = NET_CONTROL_PATH_METADATA;
+	}
+	for (i = 0; i < config->shadow_count; i++) {
+		ControlShadow *shadow = &config->shadows[i];
+		int exact = strcmp(path, shadow->path) == 0;
+		int under = control_path_is_under(path, shadow->path);
+		if (!under)
+			continue;
+		if (shadow->revealed && (exact || shadow->recursive))
+			return 0;
+		if (config->ask_fd >= 0 && config->control_ready &&
+		    control_shadow_event(config, path, operation) < 0)
+			return -EACCES;
+		if (config->ask_fd >= 0 && config->control_ready &&
+		    control_path_access(config, tracee, path, NULL, operation,
+					NET_CONTROL_REASON_HIDDEN_SHADOW) == 0)
+			return 1;
+		return -ENOENT;
+	}
+	return 0;
+}
+
+int net_policy_path_access(Tracee *tracee, const char *path,
+				   const char *other_path,
+				   NetControlPathOperation operation,
+				   NetControlPathReason reason)
+{
+	NetPolicyConfig *config = policy_config(tracee);
+	const char *effective_other;
+	if (config == NULL || config->ask_fd < 0 || !config->control_ready)
+		return -EACCES;
+	effective_other = other_path != NULL ? other_path :
+		(config->path_peer_valid ? config->path_peer : NULL);
+	return control_path_access(config, tracee, path, effective_other,
+					operation, reason);
+}
+
+int net_policy_path_rule_precheck(Tracee *tracee, const char *path,
+					  const char *other_path,
+					  NetControlPathOperation operation)
+{
+	NetPolicyConfig *config = policy_config(tracee);
+	const char *effective_other;
+	unsigned int i;
+	if (config == NULL || path == NULL)
+		return 0;
+	effective_other = other_path != NULL ? other_path :
+		(config->path_peer_valid ? config->path_peer : NULL);
+	for (i = 0; i < config->path_rule_count; i++) {
+		ControlPathRule *rule = &config->path_rules[i];
+		if (!rule->active || rule->operation != operation ||
+		    !control_path_equal(rule->path, path) ||
+		    !control_path_equal(rule->other_path, effective_other ?: ""))
+			continue;
+		{
+			int decision = rule->decision;
+			if (!rule->persistent)
+				memset(rule, 0, sizeof(*rule));
+			return decision ? 1 : -EACCES;
+		}
+	}
+	return 0;
+}
+
+int net_policy_set_path_peer(Tracee *tracee, const char *path)
+{
+	NetPolicyConfig *config = policy_config(tracee);
+	if (config == NULL)
+		return 0;
+	if (path == NULL || path[0] != '/' ||
+	    strlen(path) >= PATH_MAX)
+		return -EINVAL;
+	strncpy(config->path_peer, path, PATH_MAX - 1);
+	config->path_peer[PATH_MAX - 1] = '\0';
+	if (normalize_guest_path(config->path_peer) < 0)
+		return -ENAMETOOLONG;
+	config->path_peer_valid = 1;
+	return 0;
+}
+
+int net_policy_set_path_operation(Tracee *tracee,
+					  NetControlPathOperation operation)
+{
+	NetPolicyConfig *config = policy_config(tracee);
+	if (config == NULL)
+		return 0;
+	if (operation < NET_CONTROL_PATH_READ ||
+	    operation > NET_CONTROL_PATH_METADATA)
+		return -EINVAL;
+	config->path_operation_override = operation;
+	return 0;
+}
+
+NetControlPathOperation net_policy_path_operation_override(Tracee *tracee)
+{
+	NetPolicyConfig *config = policy_config(tracee);
+	return config == NULL ? 0 : config->path_operation_override;
+}
+
+void net_policy_clear_path_peer(Tracee *tracee)
+{
+	NetPolicyConfig *config = policy_config(tracee);
+	if (config != NULL) {
+		config->path_peer[0] = '\0';
+		config->path_peer_valid = 0;
+		config->path_operation_override = 0;
+	}
 }
 
 int net_policy_allow_publication(Tracee *tracee, uint16_t host_port,
@@ -1495,23 +2411,26 @@ int net_policy_allow_publication(Tracee *tracee, uint16_t host_port,
 {
 	NetPolicyConfig *config = policy_config(tracee);
 	(void)host_port;
-	if (config == NULL || config->mode == NET_POLICY_OFF)
+	if (config == NULL || (config->mode == NET_POLICY_OFF &&
+				      !(config->ask_fd >= 0 && config->control_ready)))
 		return 0;
 	if (bind_matches(config->deny_bind, config->deny_bind_count, guest_port))
 		return -EACCES;
 	if (config->mode == NET_POLICY_DENY &&
 	    !bind_matches(config->allow_bind, config->allow_bind_count, guest_port))
 		return -EACCES;
-	return ask_harness(config, tracee, NET_ASK_PUBLICATION, NULL,
+	return ask_harness(config, tracee, CONTROL_NET_PUBLICATION, NULL,
 			   guest_port, host_port, 1, VNP_NET_CLASS_BRIDGE,
 			   config->proxy);
 }
 
-int net_policy_set_ask_fd(Tracee *tracee, const char *value)
+int net_policy_set_control_fd(Tracee *tracee, const char *value)
 {
 	NetPolicyConfig *config;
 	char *end;
 	long fd;
+	int socket_type;
+	socklen_t socket_type_size = sizeof(socket_type);
 	if (value == NULL || *value == '\0')
 		return -EINVAL;
 	fd = strtol(value, &end, 10);
@@ -1520,12 +2439,60 @@ int net_policy_set_ask_fd(Tracee *tracee, const char *value)
 	if (ensure_extension(tracee) < 0)
 		return -ENOMEM;
 	config = policy_config(tracee);
+	if (fcntl((int)fd, F_GETFD) < 0)
+		return -errno;
+	if (getsockopt((int)fd, SOL_SOCKET, SO_TYPE, &socket_type,
+			       &socket_type_size) < 0 || socket_type != SOCK_STREAM)
+		return -ENOTSOCK;
 	if (fcntl((int)fd, F_SETFD, FD_CLOEXEC) < 0)
 		return -errno;
-	/* A closed harness must produce a deny, never terminate the tracer via
-	 * SIGPIPE while the fixed-size request is being written. */
+	if (config->ask_fd >= 0 && config->ask_fd != (int)fd)
+		close(config->ask_fd);
+	/* CLOEXEC is installed before launch_process(), so the guest never sees
+	 * this descriptor.  Keep the original endpoint in the tracer: CLI-time
+	 * publication checks (for --port) must use the same channel as runtime
+	 * network and path checks. */
 	signal(SIGPIPE, SIG_IGN);
 	config->ask_fd = (int)fd;
 	config->ask_failed = 0;
+	config->control_ready = 1;
+	{
+		ControlHeader hello;
+		memset(&hello, 0, sizeof(hello));
+		hello.magic = CONTROL_MAGIC;
+		hello.version = CONTROL_VERSION;
+		hello.type = CONTROL_HELLO;
+		if (write_full_timeout(config->ask_fd, &hello, sizeof(hello)) < 0)
+			config->ask_failed = 1;
+	}
+	return 0;
+}
+
+int net_policy_prepare_control_fd(Tracee *tracee)
+{
+	NetPolicyConfig *config = policy_config(tracee);
+	ControlHeader hello;
+	int stable_fd;
+	if (config == NULL || config->ask_fd < 0)
+		return 0;
+	if (config->control_ready)
+		return 0;
+	stable_fd = fcntl(config->ask_fd, F_DUPFD_CLOEXEC, 64);
+	if (stable_fd < 0) {
+		config->ask_failed = 1;
+		return -errno;
+	}
+	close(config->ask_fd);
+	config->ask_fd = stable_fd;
+	config->control_ready = 1;
+	/* Kept for callers that install a descriptor through an older setup path;
+	 * normal CLI parsing performs the handshake in set_control_fd() so
+	 * publication decisions cannot bypass the harness. */
+	memset(&hello, 0, sizeof(hello));
+	hello.magic = CONTROL_MAGIC;
+	hello.version = CONTROL_VERSION;
+	hello.type = CONTROL_HELLO;
+	if (write_full_timeout(config->ask_fd, &hello, sizeof(hello)) < 0)
+		config->ask_failed = 1;
 	return 0;
 }

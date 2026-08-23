@@ -33,11 +33,14 @@ typedef enum {
 	BINDING_ACCESS_RW = 0,
 	BINDING_ACCESS_RO,
 	BINDING_ACCESS_WO,
+	/* The node remains visible, but traversal and content access are denied. */
+	BINDING_ACCESS_MASK,
 } BindingAccess;
 
 typedef enum {
 	BINDING_TYPE_REGULAR = 0,
 	BINDING_TYPE_MBIND,
+	BINDING_TYPE_SHADOW,
 } BindingType;
 
 typedef struct binding {

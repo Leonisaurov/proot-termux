@@ -112,6 +112,8 @@ static void print_bindings(const Tracee *tracee)
 			mode_str = ":ro";
 		else if (binding->access_mode == BINDING_ACCESS_WO)
 			mode_str = ":wo";
+		else if (binding->access_mode == BINDING_ACCESS_MASK)
+			mode_str = ":mask";
 
 		if (compare_paths(binding->host.path, binding->guest.path) == PATHS_ARE_EQUAL)
 			note(tracee, INFO, USER, "binding = %s%s", binding->host.path, mode_str);
@@ -1070,6 +1072,9 @@ int check_binding_access(const Tracee *tracee, const char guest_path[PATH_MAX], 
 	binding = get_binding(tracee, GUEST, guest_path);
 	if (binding == NULL)
 		return 0;
+
+	if (binding->access_mode == BINDING_ACCESS_MASK)
+		return -EACCES;
 
 	if (is_write && binding->access_mode == BINDING_ACCESS_RO)
 		return -EROFS;

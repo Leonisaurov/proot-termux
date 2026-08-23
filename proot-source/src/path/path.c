@@ -38,6 +38,7 @@
 #include "path/canon.h"
 #include "path/proc.h"
 #include "extension/extension.h"
+#include "extension/net_policy/net_policy.h"
 #include "cli/note.h"
 #include "build.h"
 
@@ -108,6 +109,58 @@ int join_paths(int number_paths, char result[PATH_MAX], ...)
 	va_end(paths);
 
 	return status;
+}
+
+int normalize_guest_path(char path[PATH_MAX])
+{
+	char normalized[PATH_MAX];
+	char component[NAME_MAX];
+	char *out = normalized;
+	const char *cursor;
+	if (path == NULL || path[0] != '/')
+		return -EINVAL;
+	*out++ = '/';
+	*out = '\0';
+	cursor = path;
+	while (*cursor != '\0') {
+		size_t length = 0;
+		while (*cursor == '/')
+			cursor++;
+		while (cursor[length] != '\0' && cursor[length] != '/')
+			length++;
+		if (length == 0)
+			break;
+		if (length >= sizeof(component))
+			return -ENAMETOOLONG;
+		memcpy(component, cursor, length);
+		component[length] = '\0';
+		if (strcmp(component, ".") == 0) {
+			cursor += length;
+			continue;
+		}
+		if (strcmp(component, "..") == 0) {
+			if (out > normalized + 1) {
+				out--;
+				while (out > normalized && out[-1] != '/')
+					out--;
+				*out = '\0';
+			}
+		} else {
+			size_t used = (size_t)(out - normalized);
+			if (used > 1 && out[-1] != '/')
+				*out++ = '/';
+			if (used + length + 2 > PATH_MAX)
+				return -ENAMETOOLONG;
+			memcpy(out, component, length);
+			out += length;
+			*out = '\0';
+		}
+		cursor += length;
+	}
+	if (out > normalized + 1 && out[-1] == '/')
+		out[-1] = '\0';
+	strcpy(path, normalized);
+	return 0;
 }
 
 /**
@@ -319,6 +372,7 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 		const char *user_path, bool deref_final)
 {
 	char guest_path[PATH_MAX];
+	char requested_guest_path[PATH_MAX];
 	int status;
 
 	/* Use "/" as the base if it is an absolute guest path. */
@@ -367,6 +421,10 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 	status = join_paths(2, guest_path, result, user_path);
 	if (status < 0)
 		return status;
+	strcpy(requested_guest_path, guest_path);
+	status = normalize_guest_path(requested_guest_path);
+	if (status < 0)
+		return status;
 	strcpy(result, "/");
 
 	/* Canonicalize regarding the new root. */
@@ -378,36 +436,100 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 	{
 		int sysnum = get_sysnum(tracee, CURRENT);
 		bool is_write = false;
+		bool metadata_only = false;
+		int proactive_decision;
+		NetControlPathOperation operation = NET_CONTROL_PATH_READ;
 
 		switch (sysnum) {
-		case PR_open: case PR_creat:
+		case PR_open:
 			is_write = (peek_reg(tracee, CURRENT, SYSARG_2)
 				    & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) != 0;
+			if (peek_reg(tracee, CURRENT, SYSARG_2) & O_CREAT)
+				operation = NET_CONTROL_PATH_CREATE;
+			else if (is_write)
+				operation = NET_CONTROL_PATH_WRITE;
+			break;
+		case PR_creat:
+			is_write = true;
+			operation = NET_CONTROL_PATH_CREATE;
 			break;
 		case PR_openat:
 			is_write = (peek_reg(tracee, CURRENT, SYSARG_3)
 				    & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) != 0;
+			if (peek_reg(tracee, CURRENT, SYSARG_3) & O_CREAT)
+				operation = NET_CONTROL_PATH_CREATE;
+			else if (is_write)
+				operation = NET_CONTROL_PATH_WRITE;
 			break;
 		case PR_truncate:
 			is_write = true;
+			operation = NET_CONTROL_PATH_WRITE;
 			break;
 		case PR_mkdir: case PR_mkdirat:
-		case PR_rmdir: case PR_unlink: case PR_unlinkat:
-		case PR_rename: case PR_renameat: case PR_renameat2:
-		case PR_symlink: case PR_symlinkat:
-		case PR_link: case PR_linkat:
-		case PR_chmod: case PR_fchmod: case PR_fchmodat:
-		case PR_chown: case PR_lchown: case PR_fchownat:
-		case PR_utimensat: case PR_mknod: case PR_mknodat:
 			is_write = true;
+			operation = NET_CONTROL_PATH_CREATE;
+			break;
+		case PR_rmdir: case PR_unlink: case PR_unlinkat:
+			is_write = true;
+			operation = NET_CONTROL_PATH_DELETE;
+			break;
+		case PR_rename: case PR_renameat: case PR_renameat2:
+			is_write = true;
+			operation = NET_CONTROL_PATH_RENAME;
+			break;
+		case PR_symlink: case PR_symlinkat:
+		case PR_link: case PR_linkat: case PR_mknod: case PR_mknodat:
+			is_write = true;
+			operation = NET_CONTROL_PATH_CREATE;
+			break;
+		case PR_chmod: case PR_fchmod: case PR_fchmodat:
+		case PR_chown: case PR_chown32: case PR_lchown: case PR_lchown32:
+		case PR_fchownat: case PR_utime: case PR_utimes:
+		case PR_futimesat: case PR_utimensat:
+			is_write = true;
+			operation = NET_CONTROL_PATH_METADATA;
+			break;
+		case PR_stat: case PR_stat64: case PR_lstat: case PR_lstat64:
+		case PR_oldstat: case PR_oldlstat: case PR_newfstatat:
+		case PR_fstatat64: case PR_statx: case PR_statfs: case PR_statfs64:
+			metadata_only = true;
+			operation = NET_CONTROL_PATH_METADATA;
 			break;
 		default:
 			break;
 		}
+		{
+			NetControlPathOperation override =
+				net_policy_path_operation_override(tracee);
+			if (override != 0)
+				operation = override;
+		}
 
-		status = check_binding_access(tracee, result, is_write);
-		if (status < 0)
-			return status;
+		Binding *binding = get_binding(tracee, GUEST, requested_guest_path);
+		proactive_decision = net_policy_path_rule_precheck(tracee,
+							 requested_guest_path, NULL, operation);
+		if (proactive_decision < 0)
+			return proactive_decision;
+		if (metadata_only && binding != NULL &&
+		    binding->access_mode == BINDING_ACCESS_MASK)
+			status = 0;
+		else if (proactive_decision > 0)
+			status = 0;
+		else
+			status = check_binding_access(tracee, requested_guest_path, is_write);
+		if (status < 0) {
+			int dynamic = net_policy_path_access(tracee, requested_guest_path, NULL,
+						operation,
+						status == -EROFS
+							? NET_CONTROL_REASON_STATIC_RO
+							: (binding != NULL &&
+							   binding->access_mode == BINDING_ACCESS_MASK
+								? NET_CONTROL_REASON_MASKED_SHADOW
+								: NET_CONTROL_REASON_STATIC_POLICY));
+			if (dynamic < 0)
+				return status;
+			status = 0;
+		}
 	}
 
 	/* Final binding substitution to convert "result" into a host

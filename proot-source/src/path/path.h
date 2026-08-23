@@ -83,6 +83,7 @@ extern int detranslate_path(Tracee *tracee, char path[PATH_MAX], const char t_re
 extern bool belongs_to_guestfs(const Tracee *tracee, const char *path);
 
 extern int join_paths(int number_paths, char result[PATH_MAX], ...);
+extern int normalize_guest_path(char path[PATH_MAX]);
 extern int list_open_fd(const Tracee *tracee);
 
 extern Comparison compare_paths(const char *path1, const char *path2);

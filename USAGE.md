@@ -462,11 +462,39 @@ sintética usando únicamente ese snapshot A/AAAA; no se envían al servidor DNS
 del guest. Las consultas de dominios no fijados reciben NXDOMAIN y el resultado
 solo puede usarse si la IP también satisface las reglas numéricas. Esto evita que
 `/etc/hosts`, un DNS alternativo o una respuesta manipulada amplíen el permiso.
-`--net-ask FD`
-permite un harness externo fail-closed: usa mensajes nativos de tamaño fijo,
-versión 1, request ID y timeout de 1000 ms; una respuesta incompleta, inválida,
-EOF o timeout deniega la operación. Si el canal queda truncado o
-desincronizado, el tracer lo marca como fallido y deniega las solicitudes
-posteriores hasta que se instale explícitamente otro FD con `--net-ask`.
-La regresión local `pentest/test_net_ask.sh` ejercita el FD heredado con un
-harness `socketpair`, incluyendo respuestas allow, deny, fragmentadas y timeout.
+`--control-fd FD`
+instala un canal bidireccional para un harness externo fail-closed. Usa frames
+con magic `PRCT`, versión 1, tipo, tamaño acotado a 4096 bytes y `request_id`.
+El encabezado es `u32 magic, u16 version, u16 type, u32 size, u64 request_id`;
+los enteros se envían en el endian nativo de la instancia. El harness debe
+entregar un `SOCK_STREAM` full-duplex (normalmente un `socketpair(AF_UNIX,
+SOCK_STREAM)`). `HELLO` se envía al instalar el FD, incluso antes de arrancar
+el guest, para que las decisiones de publicación de `--port` usen el mismo
+canal.
+
+Proot envía `NET_ACCESS_REQUEST`, `PATH_ACCESS_REQUEST`, `SHADOW_EVENT` y
+`COMMAND_RESULT`. Las operaciones de path son `READ`, `WRITE`, `CREATE`,
+`DELETE`, `RENAME` y `METADATA`; las peticiones incluyen la ruta guest
+canónica y, para rename/link, el segundo operando guest cuando corresponde.
+Las respuestas a una petición deben conservar su `request_id` y pueden usar
+`ALLOW_ONCE`, `ALLOW_ALWAYS`, `DENY_ONCE`, `DENY_ALWAYS` o
+`COMMAND_RESULT`. Una respuesta incompleta, inválida, EOF o timeout deniega la
+operación. Tras una desincronización el canal queda inutilizado hasta instalar
+explícitamente otro FD. El descriptor es `FD_CLOEXEC` y no se hereda al guest.
+
+Los tipos de decisión son `ALLOW_ONCE`, `ALLOW_ALWAYS`, `DENY_ONCE`,
+`DENY_ALWAYS` y `FORGET`. Los comandos espontáneos `SET_RULE` permiten
+instalar reglas proactivas antes del primer acceso; `GET_STATE` responde con
+`COMMAND_RESULT`. `FORGET` elimina únicamente la regla dinámica indicada y
+restaura la política estática. Los tipos de shadows son `REVEAL_SHADOW` y
+`RESTORE_SHADOW`, con alcance `node` o `recursive`; el alcance por defecto es
+`node`. Las decisiones futuras usan rutas guest canónicas y nunca aceptan una
+ruta host suministrada por el harness.
+
+`--hide /ruta` instala un shadow oculto recursivo. Para un nodo visible pero
+bloqueado puede usarse `--bind SRC:/ruta:mask`; a diferencia de `:ro`, el modo
+`mask` conserva la presencia y metadata mínima del nodo, pero bloquea lectura,
+escritura, apertura y traversal del contenido. `REVEAL_SHADOW` con alcance
+`node` revela solo el nodo; sus shadows descendientes siguen activos. El
+alcance `recursive` revela el subárbol y `RESTORE_SHADOW` vuelve al estado
+declarado por CLI.

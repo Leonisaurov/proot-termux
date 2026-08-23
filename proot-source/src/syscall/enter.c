@@ -78,6 +78,7 @@
 #include "path/canon.h"
 #include "path/binding.h"
 #include "path/temp.h"
+#include "extension/net_policy/net_policy.h"
 #include "arch.h"
 
 /* Older kernel headers may lack these. */
@@ -125,12 +126,15 @@ static int translate_path2(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg 
 static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg reg)
 {
 	char parent[PATH_MAX];
+	char guest_parent[PATH_MAX];
+	char guest_target[PATH_MAX];
 	char translated_parent[PATH_MAX];
 	char translated_path[PATH_MAX];
 	char *last_slash;
 	char *leaf;
 	size_t length;
 	int status;
+	NetControlPathOperation operation = NET_CONTROL_PATH_CREATE;
 
 	/* Special case where the argument was NULL. */
 	if (path[0] == '\0')
@@ -165,6 +169,67 @@ static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX
 	status = translate_path(tracee, translated_parent, dir_fd, parent, true);
 	if (status < 0)
 		return status;
+
+	/* The final leaf is deliberately left for the kernel, but policy must
+	 * still see it before a create/link/rename can reach the host. */
+	if (path[0] == '/')
+		strcpy(guest_parent, "/");
+	else if (dir_fd != AT_FDCWD) {
+		status = readlink_proc_pid_fd(tracee->pid, dir_fd, guest_parent);
+		if (status < 0 || guest_parent[0] != '/')
+			return status < 0 ? status : -ENOTDIR;
+		status = detranslate_path(tracee, guest_parent, NULL);
+		if (status < 0)
+			return status;
+	}
+	else {
+		status = getcwd2(tracee, guest_parent);
+		if (status < 0)
+			return status;
+	}
+	status = canonicalize(tracee, parent, true, guest_parent, 0);
+	if (status < 0)
+		return status;
+	chop_finality(guest_parent);
+	status = join_paths(2, guest_target, guest_parent, leaf);
+	if (status < 0)
+		return status;
+	status = normalize_guest_path(guest_target);
+	if (status < 0)
+		return status;
+
+	{
+		int sysnum = get_sysnum(tracee, CURRENT);
+		int static_status;
+		int proactive_decision;
+		NetControlPathOperation override =
+			net_policy_path_operation_override(tracee);
+		if (sysnum == PR_rename || sysnum == PR_renameat ||
+		    sysnum == PR_renameat2)
+			operation = NET_CONTROL_PATH_RENAME;
+		if (override != 0)
+			operation = override;
+		status = net_policy_shadow_access(tracee, guest_target, operation);
+		if (status < 0)
+			return status;
+		proactive_decision = net_policy_path_rule_precheck(tracee, guest_target,
+								 NULL, operation);
+		if (proactive_decision < 0)
+			return proactive_decision;
+		if (proactive_decision > 0)
+			static_status = 0;
+		else
+			static_status = check_binding_access(tracee, guest_target, true);
+		if (static_status < 0) {
+			int dynamic = net_policy_path_access(tracee, guest_target, NULL,
+							 operation,
+							 static_status == -EROFS
+							 ? NET_CONTROL_REASON_STATIC_RO
+							 : NET_CONTROL_REASON_STATIC_POLICY);
+			if (dynamic < 0)
+				return static_status;
+		}
+	}
 
 	status = join_paths(2, translated_path, translated_parent, leaf);
 	if (status < 0)
@@ -214,6 +279,38 @@ static int guest_canonicalize(Tracee *tracee, const char *user_path,
 
 	chop_finality(guest_path);
 	return 0;
+}
+
+/* A destination may not exist yet, so canonicalize() can legitimately fail
+ * while the lexical guest spelling is still sufficient to correlate the two
+ * operands of rename/link. */
+static int path_peer_guest(Tracee *tracee, int dir_fd, const char *user_path,
+			   char guest_path[PATH_MAX])
+{
+	char base[PATH_MAX];
+	int status;
+	if (user_path[0] == '/') {
+		/* The peer may be a destination that does not exist yet. Resolve it
+		 * lexically only; canonicalize() would probe host data and could emit a
+		 * premature authorization request for the wrong operand. */
+		strncpy(guest_path, user_path, PATH_MAX - 1);
+		guest_path[PATH_MAX - 1] = '\0';
+		return normalize_guest_path(guest_path);
+	}
+	if (dir_fd == AT_FDCWD)
+		status = getcwd2(tracee, guest_path);
+	else {
+		status = readlink_proc_pid_fd(tracee->pid, dir_fd, guest_path);
+		if (status >= 0 && guest_path[0] == '/')
+			status = detranslate_path(tracee, guest_path, NULL);
+	}
+	if (status < 0 || guest_path[0] != '/')
+		return status < 0 ? status : -ENOTDIR;
+	strcpy(base, guest_path);
+	status = join_paths(2, guest_path, base, user_path);
+	if (status < 0)
+		return status;
+	return normalize_guest_path(guest_path);
 }
 
 /**
@@ -2034,15 +2131,40 @@ int translate_syscall_enter(Tracee *tracee)
 		status = get_sysarg_path(tracee, newpath, SYSARG_4);
 		if (status < 0)
 			break;
+		status = path_peer_guest(tracee, newdirfd, newpath, path);
+		if (status < 0)
+			break;
+		status = net_policy_set_path_peer(tracee, path);
+		if (status < 0)
+			break;
+		status = net_policy_set_path_operation(tracee,
+			NET_CONTROL_PATH_READ);
+		if (status < 0)
+			break;
 
 		if ((flags & AT_SYMLINK_FOLLOW) != 0)
 			status = translate_path2(tracee, olddirfd, oldpath, SYSARG_2, REGULAR);
 		else
 			status = translate_path2(tracee, olddirfd, oldpath, SYSARG_2, SYMLINK);
+		if (status < 0) {
+			net_policy_clear_path_peer(tracee);
+			break;
+		}
+		status = path_peer_guest(tracee, olddirfd, oldpath, path);
+		if (status < 0) {
+			net_policy_clear_path_peer(tracee);
+			break;
+		}
+		status = net_policy_set_path_peer(tracee, path);
+		if (status < 0)
+			break;
+		status = net_policy_set_path_operation(tracee,
+			NET_CONTROL_PATH_CREATE);
 		if (status < 0)
 			break;
 
 		status = translate_path2_parent(tracee, newdirfd, newpath, SYSARG_4);
+		net_policy_clear_path_peer(tracee);
 		break;
 
 	case PR_openat2: {
@@ -2115,19 +2237,60 @@ int translate_syscall_enter(Tracee *tracee)
 
 	case PR_link:
 	case PR_rename:
-		status = translate_sysarg(tracee, SYSARG_1, SYMLINK);
+		status = get_sysarg_path(tracee, oldpath, SYSARG_1);
 		if (status < 0)
 			break;
+		status = get_sysarg_path(tracee, newpath, SYSARG_2);
+		if (status < 0)
+			break;
+		status = path_peer_guest(tracee, AT_FDCWD, newpath, path);
+		if (status < 0)
+			break;
+		status = net_policy_set_path_peer(tracee, path);
+		if (status < 0)
+			break;
+		status = net_policy_set_path_operation(tracee,
+				syscall_number == PR_link ? NET_CONTROL_PATH_READ
+							   : NET_CONTROL_PATH_RENAME);
+		if (status < 0)
+			break;
+		status = translate_path2(tracee, AT_FDCWD, oldpath, SYSARG_1, SYMLINK);
+		if (status < 0) {
+			net_policy_clear_path_peer(tracee);
+			break;
+		}
 
 		if (syscall_number == PR_link) {
-			status = get_sysarg_path(tracee, path, SYSARG_2);
+			status = path_peer_guest(tracee, AT_FDCWD, oldpath, path);
+			if (status < 0) {
+				net_policy_clear_path_peer(tracee);
+				break;
+			}
+			status = net_policy_set_path_peer(tracee, path);
 			if (status < 0)
 				break;
-
-			status = translate_path2_parent(tracee, AT_FDCWD, path, SYSARG_2);
+			status = net_policy_set_path_operation(tracee,
+				NET_CONTROL_PATH_CREATE);
+			if (status < 0)
+				break;
+			status = translate_path2_parent(tracee, AT_FDCWD, newpath, SYSARG_2);
 		}
-		else
-			status = translate_sysarg(tracee, SYSARG_2, SYMLINK);
+		else {
+			status = path_peer_guest(tracee, AT_FDCWD, oldpath, path);
+			if (status < 0) {
+				net_policy_clear_path_peer(tracee);
+				break;
+			}
+			status = net_policy_set_path_peer(tracee, path);
+			if (status < 0)
+				break;
+			status = net_policy_set_path_operation(tracee,
+				NET_CONTROL_PATH_RENAME);
+			if (status < 0)
+				break;
+			status = translate_path2(tracee, AT_FDCWD, newpath, SYSARG_2, SYMLINK);
+		}
+		net_policy_clear_path_peer(tracee);
 		break;
 
 	case PR_renameat:
@@ -2142,12 +2305,37 @@ int translate_syscall_enter(Tracee *tracee)
 		status = get_sysarg_path(tracee, newpath, SYSARG_4);
 		if (status < 0)
 			break;
+		status = path_peer_guest(tracee, newdirfd, newpath, path);
+		if (status < 0)
+			break;
+		status = net_policy_set_path_peer(tracee, path);
+		if (status < 0)
+			break;
+		status = net_policy_set_path_operation(tracee,
+			NET_CONTROL_PATH_RENAME);
+		if (status < 0)
+			break;
 
 		status = translate_path2(tracee, olddirfd, oldpath, SYSARG_2, SYMLINK);
+		if (status < 0) {
+			net_policy_clear_path_peer(tracee);
+			break;
+		}
+		status = path_peer_guest(tracee, olddirfd, oldpath, path);
+		if (status < 0) {
+			net_policy_clear_path_peer(tracee);
+			break;
+		}
+		status = net_policy_set_path_peer(tracee, path);
+		if (status < 0)
+			break;
+		status = net_policy_set_path_operation(tracee,
+			NET_CONTROL_PATH_RENAME);
 		if (status < 0)
 			break;
 
 		status = translate_path2(tracee, newdirfd, newpath, SYSARG_4, SYMLINK);
+		net_policy_clear_path_peer(tracee);
 		break;
 
 	case PR_symlink:

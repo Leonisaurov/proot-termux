@@ -88,6 +88,8 @@ static int handle_option_b(Tracee *tracee, const Cli *cli UNUSED, const char *va
 				access_mode = BINDING_ACCESS_RO;
 			else if (strcmp(perm, "wo") == 0)
 				access_mode = BINDING_ACCESS_WO;
+			else if (strcmp(perm, "mask") == 0)
+				access_mode = BINDING_ACCESS_MASK;
 			else if (strcmp(perm, "rw") != 0)
 				note(tracee, WARNING, USER,
 					"ignoring unknown access mode '%s' for binding", perm);
@@ -96,6 +98,19 @@ static int handle_option_b(Tracee *tracee, const Cli *cli UNUSED, const char *va
 
 	new_binding(tracee, host, guest, true, access_mode, BINDING_TYPE_REGULAR);
 	return 0;
+}
+
+static int handle_option_hide(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	if (value == NULL || value[0] != '/') {
+		note(tracee, ERROR, USER, "--hide requires an absolute guest path");
+		return -EINVAL;
+	}
+	if (strchr(value, ':') != NULL || strlen(value) >= PATH_MAX) {
+		note(tracee, ERROR, USER, "invalid --hide path '%s'", value);
+		return -EINVAL;
+	}
+	return net_policy_add_shadow(tracee, value);
 }
 
 static int handle_option_mbind(Tracee *tracee, const Cli *cli UNUSED, const char *value)
@@ -614,11 +629,11 @@ static int handle_option_net_deny_bind(Tracee *tracee, const Cli *cli UNUSED, co
 	return net_policy_add_bind(tracee, value, 1);
 }
 
-static int handle_option_net_ask(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+static int handle_option_control_fd(Tracee *tracee, const Cli *cli UNUSED, const char *value)
 {
-	int status = net_policy_set_ask_fd(tracee, value);
+	int status = net_policy_set_control_fd(tracee, value);
 	if (status < 0)
-		note(tracee, ERROR, USER, "invalid --net-ask FD '%s'", value ?: "(null)");
+		note(tracee, ERROR, USER, "invalid --control-fd FD '%s'", value ?: "(null)");
 	return status;
 }
 
