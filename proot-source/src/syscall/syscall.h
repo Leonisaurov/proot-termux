@@ -33,6 +33,7 @@ extern int set_sysarg_path(Tracee *tracee, const char path[PATH_MAX], Reg reg);
 extern int set_sysarg_data(Tracee *tracee, const void *tracer_ptr, word_t size, Reg reg);
 
 extern void translate_syscall(Tracee *tracee);
+extern bool is_voided_syscall(const Tracee *tracee, RegVersion version);
 extern int  translate_syscall_enter(Tracee *tracee);
 extern void translate_syscall_exit(Tracee *tracee);
 

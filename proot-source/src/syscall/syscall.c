@@ -100,6 +100,20 @@ int set_sysarg_path(Tracee *tracee, const char path[PATH_MAX], Reg reg)
 	return set_sysarg_data(tracee, path, strlen(path) + 1, reg);
 }
 
+/** Tell whether PRoot replaced the tracee's syscall with its avoider. */
+bool is_voided_syscall(const Tracee *tracee, RegVersion version)
+{
+	word_t avoider = SYSCALL_AVOIDER;
+
+#if defined(ARCH_ARM64) || defined(ARCH_X86_64)
+	if (is_32on64_mode(tracee))
+		avoider &= 0xFFFFFFFF;
+#endif
+
+	return peek_reg(tracee, version, SYSARG_NUM) == avoider
+	    && peek_reg(tracee, ORIGINAL, SYSARG_NUM) != avoider;
+}
+
 void translate_syscall(Tracee *tracee)
 {
 	const bool is_enter_stage = IS_IN_SYSENTER(tracee);
@@ -114,6 +128,7 @@ void translate_syscall(Tracee *tracee)
 	int suppressed_syscall_status = 0;
 
 	if (is_enter_stage) {
+		tracee->voided_syscall_cancelled = false;
 		/* Never restore original register values at the end
 		 * of this stage.  */
 		tracee->restore_original_regs = false;
@@ -224,6 +239,7 @@ void translate_syscall(Tracee *tracee)
 
 	bool override_sysnum = is_enter_stage && tracee->chain.syscalls == NULL;
 	int push_regs_status = push_specific_regs(tracee, override_sysnum);
+	bool sysnum_pushed = override_sysnum && push_regs_status == 0;
 
 	/* Handle inability to change syscall number */
 	if (push_regs_status < 0 && override_sysnum) {
@@ -266,6 +282,11 @@ void translate_syscall(Tracee *tracee)
 			}
 		}
 	}
+
+	if (is_enter_stage)
+		tracee->voided_syscall_cancelled = sysnum_pushed
+			&& (long) SYSCALL_AVOIDER < 0
+			&& is_voided_syscall(tracee, CURRENT);
 
 	if (is_enter_stage)
 		print_current_regs(tracee, 5, "sysenter end" );

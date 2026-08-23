@@ -825,6 +825,12 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 
 			signal = 0;
 
+			/* A cancelled syscall does not produce the sysenter stop
+			 * that old-kernel seccomp ordering would otherwise make us
+			 * swallow as an already handled entry. */
+			if (tracee->voided_syscall_cancelled)
+				tracee->seccomp_already_handled_enter = false;
+
 			if (!seccomp_detected) {
 				tracee->seccomp = ENABLED;
 				seccomp_detected = true;
@@ -886,7 +892,8 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			if (tracee->seccomp == DISABLING)
 				tracee->restart_how = PTRACE_SYSCALL;
 
-			if (!seccomp_after_ptrace_enter && tracee->restart_how == PTRACE_SYSCALL)
+			if (!seccomp_after_ptrace_enter && tracee->restart_how == PTRACE_SYSCALL
+			    && !tracee->voided_syscall_cancelled)
 				tracee->seccomp_already_handled_enter = true;
 			break;
 		}
@@ -931,6 +938,9 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			siginfo_t siginfo = {};
 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
 			if (siginfo.si_code == SYS_SECCOMP) {
+				/* SECCOMP_RET_TRAP cancels the syscall and can skip the
+				 * sysenter stop on old syscall-order kernels. */
+				tracee->seccomp_already_handled_enter = false;
 				/* Signal cannot happen when we're inside syscall,
 				 * tracee would have to exit from syscall first.
 				 * Execute exit handler now if seccomp triggered sysexit skip.  */

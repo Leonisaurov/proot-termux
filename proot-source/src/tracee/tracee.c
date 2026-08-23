@@ -534,6 +534,7 @@ int new_child(Tracee *parent, word_t clone_flags)
 	child->verbose = parent->verbose;
 	child->seccomp = parent->seccomp;
 	child->sysexit_pending = parent->sysexit_pending;
+	child->voided_syscall_cancelled = parent->voided_syscall_cancelled;
 	child->execfn_addr = parent->execfn_addr;
 	child->auxv_fd = parent->auxv_fd;
 	child->maps_fd = parent->maps_fd;

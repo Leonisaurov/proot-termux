@@ -305,6 +305,11 @@ typedef struct tracee {
 	/* Ensure the sysexit stage is always hit under seccomp.  */
 	bool sysexit_pending;
 
+	/* True when the sysenter stage replaced a syscall with an avoider
+	 * number that the host kernel cancels instead of executing.  Such a
+	 * syscall has no sysenter ptrace stop on affected kernels.  */
+	bool voided_syscall_cancelled;
+
 	/* If true, syscall entry was handled by seccomp and next SIGTRAP | 0x80
 	 * has to be ignored as it's same syscall entry */
 	bool seccomp_already_handled_enter;
