@@ -2,12 +2,11 @@
 
 [![GitHub repo size](https://img.shields.io/github/repo-size/Leonisaurov/proot-termux)](https://github.com/Leonisaurov/proot-termux)
 [![Build proot](https://github.com/Leonisaurov/proot-termux/actions/workflows/build-proot.yml/badge.svg)](https://github.com/Leonisaurov/proot-termux/actions/workflows/build-proot.yml)
-[![Docker image](https://github.com/Leonisaurov/proot-termux/actions/workflows/docker_image.yml/badge.svg)](https://github.com/Leonisaurov/proot-termux/actions/workflows/docker_image.yml)
 [![proot-latest](https://img.shields.io/github/v/release/Leonisaurov/proot-termux?include_prereleases&label=proot-latest)](https://github.com/Leonisaurov/proot-termux/releases/tag/proot-latest)
 
 **proot-termux** is a minimal fork of [termux-packages](https://github.com/termux/termux-packages) that cross-compiles [proot](https://proot-me.github.io/) for Android **aarch64** using the Android NDK r29 via Docker. All other packages and build infrastructure have been stripped away — only proot remains.
 
-The goal is a lean, automated build pipeline that produces a ready-to-install `.pkg.tar.xz` artifact on every push, with virtual networking extensions built in.
+The goal is a lean, automated build pipeline that produces a ready-to-install `.pkg.tar.xz` artifact on every push. Proot remains a standalone, multipurpose tool; its capabilities are selected explicitly by the caller.
 
 ---
 
@@ -35,7 +34,17 @@ To modify proot:
 2. Bump `TERMUX_PKG_REVISION` in [`packages/proot/build.sh`](./packages/proot/build.sh)
 3. Push — the [CI workflow](#cicd) triggers automatically
 
-The build process copies `proot-source/` into the build directory via `rsync` during `termux_step_pre_configure()`, then compiles with `make`. No external source extraction is needed (`TERMUX_PKG_SKIP_SRC_EXTRACT=true`).
+For local Termux builds use [`scripts/build-native.sh`](./scripts/build-native.sh),
+not `make` directly. Its jobs option takes a separate argument (`-j 2` or
+`--jobs 2`; `-j2` is invalid). The CI build copies `proot-source/` into the
+build directory via `rsync` during `termux_step_pre_configure()`, then invokes
+the project makefile. No external source extraction is needed
+(`TERMUX_PKG_SKIP_SRC_EXTRACT=true`).
+
+Para probar, elige primero un modo de rutas y mantenlo: con
+`--termux-paths` usa `$PREFIX/bin/sh` y `$PREFIX/etc`; con un rootfs usa
+`/bin/sh` y `/etc`. `PROOT_TMP_DIR` y `PROOT_RUNTIME_DIR` son rutas host para
+el propio proot, no rutas guest.
 
 ---
 
@@ -81,6 +90,21 @@ Key capabilities:
 
 For the full technical reference — syscall translation, registry format, cross-instance token model, and known bugs — see [`AGENTS.md`](./AGENTS.md) (sections *Virtual Networking* and *Bugs Fixed*).
 
+## Optional protocol integrations
+
+Proot can expose explicit protocol capabilities such as `--control-fd`. A
+consumer such as [`control-api`](./control-api/) requires a compatible proot
+version and protocol implementation; without that compatibility, the consumer
+cannot operate. A harness is the program that owns the control fd, receives
+events, and decides how to respond.
+
+The dependency is intentionally one-way: proot does not require `control-api`,
+does not choose its authorization policy, and does not contain its launcher's
+presets or application-specific configuration. `termux-isolated` is a separate
+launcher with its own explicit Termux configuration. A harness may provide
+presets, but it must pass the resulting options to proot and remain
+responsible for their effects.
+
 ---
 
 ## Dependencies
@@ -96,7 +120,7 @@ Proot depends on two libraries, both built automatically by the `-I` flag in the
 
 ## CI/CD
 
-Two GitHub Actions workflows automate the entire build and release process.
+The active GitHub Actions workflow automates the package build and release process.
 
 ### `build-proot.yml`
 
@@ -112,9 +136,7 @@ Two GitHub Actions workflows automate the entire build and release process.
 **First run**: ~5 min (seeds the cache).  
 **Subsequent runs**: ~20–30 s on cache hit.
 
-### `docker_image.yml`
-
-Builds and pushes the build container image to `ghcr.io/leonisaurov/package-builder:latest`. Triggered manually via `workflow_dispatch`.
+The `docker_image.yml` workflow is currently disabled and is not part of the active build path.
 
 ---
 

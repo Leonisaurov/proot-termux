@@ -438,6 +438,7 @@ static struct SysVIpcSharedMemMap *sysvipc_shm_find_pending_mapping(struct SysVI
 		}
 	}
 	assert(!"No pending mapping found");
+	return NULL;
 }
 
 int sysvipc_shmat_chain(Tracee *tracee, struct SysVIpcConfig *config)

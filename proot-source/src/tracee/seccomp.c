@@ -70,7 +70,7 @@ void set_result_after_seccomp(Tracee *tracee, word_t result) {
  */
 int handle_seccomp_event(Tracee* tracee)
 {
-	int ret;
+	int ret = 0;
 
 	/* Reset status so next SIGTRAP | 0x80 is
 	 * recognized as syscall entry.  */
@@ -133,7 +133,7 @@ void fix_and_restart_enosys_syscall(Tracee* tracee)
 
 static int handle_seccomp_event_common(Tracee *tracee)
 {
-	int ret;
+	int ret = 0;
 	int status;
 	Sysnum sysnum = get_sysnum(tracee, CURRENT);
 
@@ -327,7 +327,7 @@ static int handle_seccomp_event_common(Tracee *tracee)
             	translate_path(tracee, path, AT_FDCWD, original, true);
 		errno = 0;
 		status = statfs64(path, &my_statfs64); 
-		if (errno != 0) {
+		if (status < 0) {
 			set_result_after_seccomp(tracee, -errno);
 			break;
 		}
@@ -632,11 +632,11 @@ static int handle_seccomp_event_common(Tracee *tracee)
 			break;
 		}
 		ret = 0;
-		if (rxid != rxid_ && rxid != -1)
+		if (rxid != rxid_ && rxid != (gid_t)-1)
 			ret = -EPERM;
-		if (exid != exid_ && exid != -1)
+		if (exid != exid_ && exid != (gid_t)-1)
 			ret = -EPERM;
-		if (sxid != sxid_ && sxid != -1)
+		if (sxid != sxid_ && sxid != (gid_t)-1)
 			ret = -EPERM;
 		set_result_after_seccomp(tracee, ret);
 		break;

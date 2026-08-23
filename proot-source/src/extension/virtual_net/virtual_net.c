@@ -48,6 +48,49 @@
 #include "arch.h"
 #include "path/path.h"
 
+const char *vnp_runtime_dir(void)
+{
+	const char *dir = getenv("PROOT_RUNTIME_DIR");
+	if (dir != NULL && dir[0] != '\0')
+		return dir;
+	dir = getenv("TMPDIR");
+	if (dir != NULL && dir[0] != '\0')
+		return dir;
+	return NULL;
+}
+
+static ssize_t vnp_read_full(int fd, void *buffer, size_t size)
+{
+	size_t done = 0;
+	while (done < size) {
+		ssize_t n = read(fd, (uint8_t *)buffer + done, size - done);
+		if (n > 0) {
+			done += (size_t)n;
+			continue;
+		}
+		if (n < 0 && errno == EINTR)
+			continue;
+		return n;
+	}
+	return (ssize_t)done;
+}
+
+static ssize_t vnp_write_full(int fd, const void *buffer, size_t size)
+{
+	size_t done = 0;
+	while (done < size) {
+		ssize_t n = write(fd, (const uint8_t *)buffer + done, size - done);
+		if (n > 0) {
+			done += (size_t)n;
+			continue;
+		}
+		if (n < 0 && errno == EINTR)
+			continue;
+		return n;
+	}
+	return (ssize_t)done;
+}
+
 /**
  * Filtered sysnums for this extension.
  */
@@ -127,7 +170,7 @@ static int vnp_start_helper(VnpConfig *config, const char *proxy_name)
 	/* Wait for HELLO response */
 	{
 		struct VnpResponse resp;
-		ssize_t n = read(config->helper_pipe_out, &resp, sizeof(resp));
+		ssize_t n = vnp_read_full(config->helper_pipe_out, &resp, sizeof(resp));
 		if (n != sizeof(resp) || resp.result != 0) {
 			close(config->helper_pipe_in);
 			close(config->helper_pipe_out);
@@ -147,14 +190,10 @@ static int vnp_helper_request(VnpConfig *config, struct VnpRequest *req,
 	ssize_t n;
 	if (config->helper_pipe_in < 0 || config->helper_pipe_out < 0)
 		return -1;
-	do {
-		n = write(config->helper_pipe_in, req, sizeof(*req));
-	} while (n < 0 && errno == EINTR);
+	n = vnp_write_full(config->helper_pipe_in, req, sizeof(*req));
 	if (n != sizeof(*req))
 		return -1;
-	do {
-		n = read(config->helper_pipe_out, resp, sizeof(*resp));
-	} while (n < 0 && errno == EINTR);
+	n = vnp_read_full(config->helper_pipe_out, resp, sizeof(*resp));
 	if (n != sizeof(*resp))
 		return -1;
 	return 0;
@@ -220,17 +259,35 @@ static char vnp_dirs_proxy[VNP_MAX_NAME] = "";
 
 static int vnp_ensure_directories(const char *proxy_name)
 {
+	if (proxy_name == NULL || proxy_name[0] == '\0') {
+		errno = EINVAL;
+		return -1;
+	}
 	/* Fast path: directories already created for this proxy */
 	if (vnp_dirs_ready && strcmp(vnp_dirs_proxy, proxy_name) == 0)
 		return 0;
 
 	/* Create base directory */
-	if (mkdir(VNP_TMP_DIR, 0755) < 0 && errno != EEXIST)
+	char runtime_dir[PATH_MAX];
+	if (vnp_runtime_dir() == NULL) {
+		errno = ENOENT;
+		return -1;
+	}
+	if (snprintf(runtime_dir, sizeof(runtime_dir), "%s/proot-net",
+		     vnp_runtime_dir()) >= (int)sizeof(runtime_dir)) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	if (mkdir(runtime_dir, 0755) < 0 && errno != EEXIST)
 		return -1;
 
 	/* Create per-proxy subdirectory */
 	char proxy_dir[VNP_SOCKBUF_LEN];
 	vnp_net_path(proxy_name, proxy_dir, sizeof(proxy_dir));
+	if (proxy_dir[0] == '\0') {
+		errno = ENOENT;
+		return -1;
+	}
 	if (mkdir(proxy_dir, 0755) < 0 && errno != EEXIST)
 		return -1;
 
@@ -261,6 +318,8 @@ static uint32_t vnp_cache_generation = VNP_CACHE_GENERATION_INVALID;
 static uint32_t vnp_cache_count = 0;
 static struct VnpRegistryEntry vnp_cache_entries[VNP_REG_MAX];
 static char vnp_cache_proxy[VNP_MAX_NAME];
+static int vnp_cached_sh_fd = -1;
+static char vnp_cached_sh_proxy[VNP_MAX_NAME];
 
 /**
  * Refresh the per-instance cache from a fully-read registry header.
@@ -285,23 +344,37 @@ static void vnp_cache_update(const char *proxy, const struct VnpRegistryHeader *
 static int vnp_registry_open(const char *proxy_name, int lock_type)
 {
 	char path[VNP_SOCKBUF_LEN];
-	char dir[VNP_SOCKBUF_LEN];
+	const char *runtime_dir;
 	int fd;
 
-	/* E2: fd cache for LOCK_SH — reuse if fd is still valid. */
-	static int cached_sh_fd = -1;
-	static char cached_sh_proxy[64] = {0};
-
-	if (lock_type == LOCK_SH
-	    && cached_sh_fd >= 0
-	    && strcmp(cached_sh_proxy, proxy_name) == 0
-	    && fcntl(cached_sh_fd, F_GETFD) >= 0) {
-		/* Re-lock is idempotent for LOCK_SH. */
-		return cached_sh_fd;
+	if (proxy_name == NULL) {
+		errno = ENOENT;
+		return -1;
 	}
 
-	snprintf(path, sizeof(path), "%s/%s/%s",
-		 VNP_TMP_DIR, proxy_name, VNP_REG_LOCK);
+	if (lock_type == LOCK_SH
+	    && vnp_cached_sh_fd >= 0
+	    && strcmp(vnp_cached_sh_proxy, proxy_name) == 0
+	    && fcntl(vnp_cached_sh_fd, F_GETFD) >= 0) {
+		/* vnp_registry_close() unlocks, but deliberately keeps this fd
+		 * open.  Reacquire the lock before reusing it. */
+		if (flock(vnp_cached_sh_fd, LOCK_SH) == 0)
+			return vnp_cached_sh_fd;
+		close(vnp_cached_sh_fd);
+		vnp_cached_sh_fd = -1;
+		vnp_cached_sh_proxy[0] = '\0';
+	}
+
+	runtime_dir = vnp_runtime_dir();
+	if (runtime_dir == NULL) {
+		errno = ENOENT;
+		return -1;
+	}
+	if (snprintf(path, sizeof(path), "%s/proot-net/%s/%s",
+		     runtime_dir, proxy_name, VNP_REG_LOCK) >= (int)sizeof(path)) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
 
 	/* Ensure all parent directories exist */
 	if (vnp_ensure_directories(proxy_name) < 0) {
@@ -335,11 +408,12 @@ static int vnp_registry_open(const char *proxy_name, int lock_type)
 
 	/* E2: cache fd for LOCK_SH reuse. */
 	if (lock_type == LOCK_SH) {
-		if (cached_sh_fd >= 0)
-			close(cached_sh_fd);
-		cached_sh_fd = fd;
-		strncpy(cached_sh_proxy, proxy_name, sizeof(cached_sh_proxy) - 1);
-		cached_sh_proxy[sizeof(cached_sh_proxy) - 1] = '\0';
+		if (vnp_cached_sh_fd >= 0)
+			close(vnp_cached_sh_fd);
+		vnp_cached_sh_fd = fd;
+		strncpy(vnp_cached_sh_proxy, proxy_name,
+			sizeof(vnp_cached_sh_proxy) - 1);
+		vnp_cached_sh_proxy[sizeof(vnp_cached_sh_proxy) - 1] = '\0';
 	}
 
 	return fd;
@@ -349,14 +423,27 @@ static void vnp_registry_close(int fd)
 {
 	if (fd >= 0) {
 		flock(fd, LOCK_UN);
-		close(fd);
+		if (fd != vnp_cached_sh_fd)
+			close(fd);
+	}
+}
+
+static void vnp_registry_cache_fini(void)
+{
+	if (vnp_cached_sh_fd >= 0) {
+		close(vnp_cached_sh_fd);
+		vnp_cached_sh_fd = -1;
+		vnp_cached_sh_proxy[0] = '\0';
 	}
 }
 
 static int vnp_registry_read(int fd, struct VnpRegistryHeader *hdr)
 {
-	lseek(fd, 0, SEEK_SET);
-	ssize_t n = read(fd, hdr, sizeof(*hdr));
+	ssize_t n;
+	if (lseek(fd, 0, SEEK_SET) < 0)
+		n = -1;
+	else
+		n = vnp_read_full(fd, hdr, sizeof(*hdr));
 	if (n != sizeof(*hdr) || hdr->magic != VNP_REG_MAGIC) {
 		memset(hdr, 0, sizeof(*hdr));
 		hdr->magic = VNP_REG_MAGIC;
@@ -376,16 +463,24 @@ static int vnp_registry_read(int fd, struct VnpRegistryHeader *hdr)
 
 static int vnp_registry_write(int fd, const struct VnpRegistryHeader *hdr)
 {
+	const uint8_t *data = (const uint8_t *)hdr;
+	size_t left = sizeof(*hdr);
 	ssize_t n;
 
 	if (lseek(fd, 0, SEEK_SET) < 0)
 		return -1;
 
-	n = write(fd, hdr, sizeof(*hdr));
-	if (n != (ssize_t)sizeof(*hdr))
-		return -1;
+	while (left > 0) {
+		do {
+			n = write(fd, data, left);
+		} while (n < 0 && errno == EINTR);
+		if (n <= 0)
+			return -1;
+		data += n;
+		left -= (size_t)n;
+	}
 
-	if (ftruncate(fd, n) < 0)
+	if (ftruncate(fd, (off_t)sizeof(*hdr)) < 0)
 		return -1;
 
 	return 0;
@@ -517,15 +612,17 @@ static inline int extract_port_from_tracee(Tracee *tracee, word_t addr_ptr,
 static int vnp_write_to_tracee(Tracee *tracee, word_t dest, 
                                 const void *src, size_t size)
 {
-	const word_t *words = (const word_t *)src;
 	size_t nwords = size / sizeof(word_t);
 	size_t trailing = size % sizeof(word_t);
 	size_t i;
 
 	for (i = 0; i < nwords; i++) {
+		word_t word;
+		memcpy(&word, (const uint8_t *)src + i * sizeof(word_t),
+		       sizeof(word));
 		if (ptrace(PTRACE_POKEDATA, tracee->pid,
 			   (word_t)(dest + i * sizeof(word_t)),
-			   words[i]) < 0)
+			   word) < 0)
 			return -1;
 	}
 
@@ -551,6 +648,7 @@ static int vnp_write_to_tracee(Tracee *tracee, word_t dest,
  */
 static int vnp_handle_socket(Tracee *tracee, VnpConfig *config)
 {
+	(void)config;
 	word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
 	if (domain == AF_INET || domain == AF_INET6) {
 		VERBOSE(tracee, 2, "virtual_net: socket(AF_INET%s, ...) -> AF_UNIX",
@@ -595,17 +693,6 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 	} else {
 		entry->virtual_port = port;
 		entry->orig_domain = family;
-	}
-
-	/* Check if this port is exposed via -p */
-	{
-		int i;
-		for (i = 0; i < config->expose_count; i++) {
-			if (config->expose_map[i].virtual_port == port) {
-				entry->exposed_port = port;
-				break;
-			}
-		}
 	}
 
 	/* Build unique abstract Unix socket address with instance token */
@@ -868,6 +955,8 @@ static int vnp_handle_connect(Tracee *tracee, VnpConfig *config)
 static int vnp_handle_close(Tracee *tracee, VnpConfig *config)
 {
 	word_t fd = peek_reg(tracee, CURRENT, SYSARG_1);
+	if (config->fd_count == 0)
+		return 0;
 	vnp_remove_fd(config, (int)fd, tracee->pid);
 	return 0;
 }
@@ -1011,8 +1100,6 @@ static int vnp_handle_accept_exit(Tracee *tracee, VnpConfig *config,
 	if (entry == NULL) {
 		entry = vnp_add_fd(config, tracee->pid, newfd, listen_entry->virtual_port,
 				    listen_entry->orig_domain);
-		if (entry != NULL)
-			entry->exposed_port = listen_entry->exposed_port;
 	}
 
 	/* Fake the client address as AF_INET or AF_INET6 loopback,
@@ -1054,6 +1141,7 @@ static int vnp_handle_accept_exit(Tracee *tracee, VnpConfig *config,
 int vnp_callback(Extension *extension, ExtensionEvent event,
                   intptr_t data1, intptr_t data2)
 {
+	(void)data2;
 	switch (event) {
 	case INITIALIZATION: {
 		const char *proxy_name = (const char *)data1;
@@ -1176,6 +1264,7 @@ int vnp_callback(Extension *extension, ExtensionEvent event,
 	case REMOVED: {
 		VnpConfig *config = talloc_get_type_abort(extension->config, VnpConfig);
 		vnp_stop_helper(config);
+		vnp_registry_cache_fini();
 		return 0;
 	}
 
@@ -1202,8 +1291,8 @@ int vnp_configure(Tracee *tracee, const char *proxy_name)
 	}
 
 	if (vnp_ensure_directories(proxy_name) < 0) {
-		note(tracee, WARNING, SYSTEM, "vnet: can't create %s/%s: %s",
-		     VNP_TMP_DIR, proxy_name, strerror(errno));
+		note(tracee, WARNING, SYSTEM, "vnet: can't create runtime registry for %s: %s",
+		     proxy_name, strerror(errno));
 		return -1;
 	}
 

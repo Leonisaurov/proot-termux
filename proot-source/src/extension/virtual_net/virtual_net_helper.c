@@ -52,15 +52,12 @@ static uint8_t  g_listener_addresses[VNP_EXPOSE_MAX][16];
 static int      g_num_listeners = 0;
 
 /* B6: bridge children (forked in accept_and_fork) are tracked here so
- * they can be killed when the helper exits.  bridge_fds() only ends
- * when the TCP peer closes; without this, children linger holding
- * client_fd+unix_fd (2 fds each) until their peer closes, and survive
- * the helper's own exit.  Bounded: one bridge child per concurrent
- * connection; the list simply stops recording beyond this cap (still
- * safe — only a best-effort cleanup on exit).  */
-#define MAX_BRIDGE_PIDS 64
-static pid_t    g_bridge_pids[MAX_BRIDGE_PIDS];
-static int      g_num_bridge_pids = 0;
+ * they can be killed when the helper exits.  The list grows with the
+ * number of concurrent connections and removes reaped children; a fixed
+ * cap would either leak children or break the 65th concurrent connection. */
+static pid_t  *g_bridge_pids;
+static size_t  g_num_bridge_pids;
+static size_t  g_bridge_pid_capacity;
 
 
 
@@ -76,6 +73,43 @@ static void helper_send_response(int result, uint16_t host_port)
 	resp.host_port = host_port;
 	if (write(STDOUT_FILENO, &resp, sizeof(resp)) != sizeof(resp))
 		_exit(1);
+}
+
+static void remove_bridge_pid(pid_t pid)
+{
+	size_t i;
+	for (i = 0; i < g_num_bridge_pids; i++) {
+		if (g_bridge_pids[i] == pid) {
+			g_bridge_pids[i] = g_bridge_pids[g_num_bridge_pids - 1];
+			g_num_bridge_pids--;
+			return;
+		}
+	}
+}
+
+static void reap_bridge_children(void)
+{
+	int status;
+	pid_t pid;
+
+	while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
+		remove_bridge_pid(pid);
+}
+
+static int track_bridge_pid(pid_t pid)
+{
+	if (g_num_bridge_pids == g_bridge_pid_capacity) {
+		size_t new_capacity = g_bridge_pid_capacity == 0
+			? 64 : g_bridge_pid_capacity * 2;
+		pid_t *new_pids = realloc(g_bridge_pids,
+			new_capacity * sizeof(*new_pids));
+		if (new_pids == NULL)
+			return -1;
+		g_bridge_pids = new_pids;
+		g_bridge_pid_capacity = new_capacity;
+	}
+	g_bridge_pids[g_num_bridge_pids++] = pid;
+	return 0;
 }
 
 /* ================================================================
@@ -231,7 +265,7 @@ static void accept_and_fork(int listener_idx)
 {
 	int tcp_fd = g_listener_fds[listener_idx];
 	uint16_t virtual_port = g_listener_vports[listener_idx];
-	struct sockaddr_in client_addr;
+	struct sockaddr_storage client_addr;
 	socklen_t client_len = sizeof(client_addr);
 	int client_fd;
 	struct sockaddr_un unix_addr;
@@ -285,11 +319,9 @@ static void accept_and_fork(int listener_idx)
 	/* Parent: close connection fds (child owns them) */
 	close(client_fd);
 	close(unix_fd);
-	/* B6: remember the bridge child so it is killed when the helper
-	 * exits (done: label).  SIGCHLD is SIG_IGN + SA_NOCLDWAIT, so no
-	 * waitpid() is needed — the kernel auto-reaps them.  */
-	if (g_num_bridge_pids < MAX_BRIDGE_PIDS)
-		g_bridge_pids[g_num_bridge_pids++] = pid;
+	/* B6: remember the bridge child so it is killed when the helper exits. */
+	if (track_bridge_pid(pid) < 0)
+		kill(pid, SIGKILL);
 }
 
 /* ================================================================
@@ -353,8 +385,6 @@ static void helper_handle_unexpose(uint16_t host_port)
 
 int vnp_helper_main(int argc, char *argv[])
 {
-	struct sigaction sa;
-
 	if (argc < 3)
 		_exit(1);
 
@@ -362,13 +392,6 @@ int vnp_helper_main(int argc, char *argv[])
 	g_proxy_name[VNP_MAX_NAME - 1] = '\0';
 	if (argc > 3)
 		g_instance_token = (uint32_t)strtoul(argv[3], NULL, 10);
-
-	/* Ignore SIGCHLD: auto-reap bridge children */
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = SIG_IGN;
-	sa.sa_flags = SA_NOCLDWAIT;
-	if (sigaction(SIGCHLD, &sa, NULL) < 0)
-		_exit(1);
 
 	/* Send HELLO response */
 	{
@@ -385,6 +408,9 @@ int vnp_helper_main(int argc, char *argv[])
 		int nfds = 0;
 		int ret;
 		int i;
+		bool command_processed = false;
+
+		reap_bridge_children();
 
 		/* stdin (commands from tracer) */
 		fds[nfds].fd = STDIN_FILENO;
@@ -426,20 +452,27 @@ int vnp_helper_main(int argc, char *argv[])
 				case VNP_EXPOSE:
 					helper_handle_expose(req.host_port, req.virtual_port,
 						     req.host_family, req.host_address);
+					command_processed = true;
 					break;
 				case VNP_UNEXPOSE:
 					helper_handle_unexpose(req.host_port);
+					command_processed = true;
 					break;
 				case VNP_BYE:
 					helper_send_response(0, 0);
 					goto done;
 				default:
 					helper_send_response(-EINVAL, 0);
+					command_processed = true;
 					break;
 				}
 				break; /* one command per poll cycle */
 			}
 		}
+		/* The command may have added/removed a listener.  The pollfd array
+		 * was built before that mutation, so never index it afterward. */
+		if (command_processed)
+			continue;
 
 		/* Handle incoming connections on TCP listeners */
 		for (i = 0; i < g_num_listeners; i++) {
@@ -458,13 +491,17 @@ done:
 	for (i = 0; i < g_num_listeners; i++)
 		close(g_listener_fds[i]);
 
-	/* B6: kill any lingering bridge children.  They only exit by
-	 * themselves when their TCP peer closes; on helper shutdown
-	 * (stdin closed / VNP_BYE) they would otherwise survive with 2
-	 * fds each.  SA_NOCLDWAIT reaps them automatically, so kill()
-	 * alone is enough — no waitpid() loop needed.  */
-	for (i = 0; i < g_num_bridge_pids; i++)
+	/* B6: kill any lingering bridge children.  Reap each one so the PID
+	 * cannot remain a zombie and cannot be reused while this list is read. */
+	for (i = 0; (size_t)i < g_num_bridge_pids; i++)
 		kill(g_bridge_pids[i], SIGKILL);
+	for (i = 0; (size_t)i < g_num_bridge_pids; i++)
+		while (waitpid(g_bridge_pids[i], NULL, 0) < 0 && errno == EINTR)
+			;
+	free(g_bridge_pids);
+	g_bridge_pids = NULL;
+	g_num_bridge_pids = 0;
+	g_bridge_pid_capacity = 0;
 }
 	_exit(0);
 	return 0;

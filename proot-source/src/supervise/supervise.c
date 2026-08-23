@@ -63,6 +63,17 @@ static ExecClientEntry exec_clients[SUPERVISE_MAX_CLIENTS];
 static int             num_exec_clients = 0;
 
 static int      ctl_fd_global = -1;  /* Listen socket for incoming --exec */
+
+static const char *supervise_runtime_dir(void)
+{
+	const char *dir = getenv("PROOT_RUNTIME_DIR");
+	if (dir != NULL && dir[0] != '\0')
+		return dir;
+	dir = getenv("TMPDIR");
+	if (dir != NULL && dir[0] != '\0')
+		return dir;
+	return NULL;
+}
 static int      sig_fd_global = -1;  /* signalfd for SIGCHLD (B7: kept so
 				      * supervise_fini() can close it) */
 static pid_t    own_pid = 0;         /* Our PID (for socket name) */
@@ -74,6 +85,38 @@ static time_t   start_time = 0;      /* When supervise started */
  * iteration, so supervise_tracee_exited() must NEVER dereference it:
  * the log gating uses this copy instead (FU-1, UAF fix). */
 static int      g_verbose_level = 0;
+
+static ssize_t read_full(int fd, void *buffer, size_t size)
+{
+	size_t done = 0;
+	while (done < size) {
+		ssize_t n = read(fd, (char *)buffer + done, size - done);
+		if (n > 0) {
+			done += (size_t)n;
+			continue;
+		}
+		if (n < 0 && errno == EINTR)
+			continue;
+		return n;
+	}
+	return (ssize_t)done;
+}
+
+static ssize_t write_full(int fd, const void *buffer, size_t size)
+{
+	size_t done = 0;
+	while (done < size) {
+		ssize_t n = write(fd, (const char *)buffer + done, size - done);
+		if (n > 0) {
+			done += (size_t)n;
+			continue;
+		}
+		if (n < 0 && errno == EINTR)
+			continue;
+		return n;
+	}
+	return (ssize_t)done;
+}
 
 /* ---------------------------------------------------------------------------
  * Helpers
@@ -88,10 +131,22 @@ static void build_sockaddr(struct sockaddr_un *sa, pid_t pid)
 		 "%s%u", SUPERVISE_SOCKET_PREFIX, pid);
 }
 
-static void build_logpath(char *buf, size_t bufsz, pid_t pid)
+static int build_logpath(char *buf, size_t bufsz, pid_t pid)
 {
-	snprintf(buf, bufsz, "%s/%s%d.log",
-		 SUPERVISE_TMP_DIR, SUPERVISE_LOG_PREFIX, pid);
+	const char *runtime_dir = supervise_runtime_dir();
+	int n;
+
+	if (buf == NULL || bufsz == 0 || runtime_dir == NULL) {
+		errno = ENOENT;
+		return -1;
+	}
+	n = snprintf(buf, bufsz, "%s/%s%d.log",
+		     runtime_dir, SUPERVISE_LOG_PREFIX, pid);
+	if (n < 0 || (size_t)n >= bufsz) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	return 0;
 }
 
 static int add_client(int fd, pid_t tracee_pid)
@@ -145,6 +200,12 @@ int supervise_init(int *ctl_fd, int *sig_fd, int verbose_level)
 
 	if (ctl_fd == NULL || sig_fd == NULL)
 		return -1;
+	if (supervise_runtime_dir() == NULL) {
+		note(NULL, WARNING, USER,
+		     "supervise requires PROOT_RUNTIME_DIR or TMPDIR");
+		errno = ENOENT;
+		return -1;
+	}
 
 	own_pid = getpid();
 	start_time = time(NULL);
@@ -336,8 +397,8 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	}
 
 	/* Read the exec request (now proceed normally) */
-	ssize_t n = read(client_fd, &req, sizeof(req));
-	if (n != sizeof(req) || req.argc < 1) {
+	ssize_t n = read_full(client_fd, &req, sizeof(req));
+	if (n != sizeof(req) || req.argc < 1 || req.argc > 255) {
 		close_client_fds(client_fds);
 		close(client_fd);
 		return;
@@ -349,13 +410,16 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	char *p = req.argv;
 	char *end = req.argv + sizeof(req.argv);
 
-	while (argc < req.argc && argc < 255 && p < end) {
+	while (argc < req.argc && p < end) {
+		char *nul = memchr(p, '\0', (size_t)(end - p));
+		if (nul == NULL)
+			break;
 		argv_ptrs[argc++] = p;
-		p += strlen(p) + 1;
+		p = nul + 1;
 	}
 	argv_ptrs[argc] = NULL;
 
-	if (argc < 1) {
+	if (argc != req.argc) {
 		close_client_fds(client_fds);
 		close(client_fd);
 		return;
@@ -384,7 +448,7 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 		memset(&resp, 0, sizeof(resp));
 		resp.rejected = true;
 		resp.reject_errno = EAGAIN;
-		w = write(client_fd, &resp, sizeof(resp));
+		w = write_full(client_fd, &resp, sizeof(resp));
 		if (w != (ssize_t)sizeof(resp))
 			VERBOSE(root_tracee, 1,
 				"supervise: failed to send rejection to client on fd=%d: %s",
@@ -629,7 +693,7 @@ int supervise_tracee_exited(pid_t pid, int status)
 			}
 
 			/* Send response to client */
-			ssize_t w = write(exec_clients[i].fd, &resp, sizeof(resp));
+			ssize_t w = write_full(exec_clients[i].fd, &resp, sizeof(resp));
 			if (w != (ssize_t)sizeof(resp)) {
 				/* FU-1: never dereference the root tracee here: it may
 				 * already be freed (root exited before this client and
@@ -664,7 +728,8 @@ void supervise_log_exit(const char *who, int status)
 	char path[SUPERVISE_MAX_PATH];
 	FILE *f;
 
-	build_logpath(path, sizeof(path), own_pid);
+	if (build_logpath(path, sizeof(path), own_pid) < 0)
+		return;
 	f = fopen(path, "w");
 	if (f == NULL)
 		return;
@@ -828,14 +893,14 @@ int exec_connect(const Tracee *tracee, int argc, char *const argv[])
 	}
 
 	/* Send request */
-	if (write(fd, &req, sizeof(req)) != sizeof(req)) {
+	if (write_full(fd, &req, sizeof(req)) != sizeof(req)) {
 		close(fd);
 		errno = EIO;
 		return -1;
 	}
 
 	/* Wait for response (blocks until the tracee finishes) */
-	n = read(fd, &resp, sizeof(resp));
+	n = read_full(fd, &resp, sizeof(resp));
 	close(fd);
 
 	if (n != sizeof(resp)) {
@@ -863,7 +928,11 @@ try_log:
 		FILE *f;
 		int saved_errno = errno;
 
-		build_logpath(logpath, sizeof(logpath), target_pid);
+		if (build_logpath(logpath, sizeof(logpath), target_pid) < 0) {
+			errno = saved_errno;
+			fprintf(stderr, "supervise: no target process %d found\n", target_pid);
+			return -1;
+		}
 		f = fopen(logpath, "r");
 		if (f != NULL) {
 			if (fgets(buf, sizeof(buf), f) != NULL) {

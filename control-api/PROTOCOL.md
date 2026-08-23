@@ -49,11 +49,11 @@ virtual-network classification and is never implicitly allowed. The static
 network policy may use only `*`, `tcp://*`, or `udp://*` to hand it to PRCT;
 the harness must still return an allow decision. External guest paths likewise
 produce `PATH_ACCESS_REQUEST` even when a readable binding would pass the
-static check. Only fixed guest exemptions (the current working directory and
-its descendants, plus `/system`, `/system_ext`, `/product`, `/vendor`, `/apex`, `/odm`, `/linkerconfig`, `/proc`, `/sys`, `/dev`,
-and `/data/data/com.termux/files/usr` for READ/METADATA) avoid that request.
-These exemptions are guest paths, not host-derived bindings, and mutating
-operations remain subject to PRCT and static binding permissions.
+static check. The current working directory and its descendants may be
+handled by core path semantics, but proot has no fixed Android, Termux, or
+rootfs exemptions. The harness must explicitly allow any infrastructure paths
+it needs. Mutating operations remain subject to PRCT and static binding
+permissions.
 
 ## Channel lifecycle
 

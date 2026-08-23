@@ -2347,13 +2347,8 @@ int net_policy_path_access(Tracee *tracee, const char *path,
 static int control_path_is_exempt(Tracee *tracee, const char *path,
 				  NetControlPathOperation operation)
 {
-	static const char *const infrastructure[] = {
-		"/system", "/system_ext", "/product", "/vendor", "/apex", "/odm",
-		"/linkerconfig", "/proc", "/sys", "/dev",
-		"/data/data/com.termux/files/usr",
-	};
 	char cwd[PATH_MAX];
-	unsigned int i;
+	(void)operation;
 
 	if (tracee == NULL || path == NULL)
 		return 0;
@@ -2375,14 +2370,8 @@ static int control_path_is_exempt(Tracee *tracee, const char *path,
 		     strcmp(path, "/dev/null") == 0 || strcmp(path, "/dev/tty") == 0))
 			return 1;
 	}
-	/* Infrastructure is read-only exempt.  Mutations still go through PRCT
-	 * and then through the normal static binding checks. */
-	if (operation != NET_CONTROL_PATH_READ &&
-	    operation != NET_CONTROL_PATH_METADATA)
-		return 0;
-	for (i = 0; i < sizeof(infrastructure) / sizeof(infrastructure[0]); i++)
-		if (control_path_is_under(path, infrastructure[i]))
-			return 1;
+	/* No Android, Termux, rootfs, or consumer path is implicit here.  The
+	 * controller owns those decisions and can answer the PRCT request. */
 	return 0;
 }
 

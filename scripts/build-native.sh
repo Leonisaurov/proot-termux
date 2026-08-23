@@ -35,7 +35,7 @@ Options:
   -i, --install        Install built binaries to $PREFIX (default: false)
   -c, --clean          Run make clean before building (default: false)
   --skip-build         Skip compilation, only create package from existing files
-  --skip-package       Build only, don't create .pkg.tar.xz
+  --skip-package       Build and install, but don't create .pkg.tar.xz
   -h, --help           Show this help message
 
 Environment variables:
@@ -45,7 +45,7 @@ Environment variables:
 
 Examples:
   ./scripts/build-native.sh                    # Build + package
-  ./scripts/build-native.sh -j4                # Build with 4 jobs
+  ./scripts/build-native.sh -j 4               # Build with 4 jobs
   ./scripts/build-native.sh -i -c              # Clean build + install to system
   ./scripts/build-native.sh --skip-build       # Package from existing install
 EOF

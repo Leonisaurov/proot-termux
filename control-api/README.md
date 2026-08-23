@@ -1,5 +1,12 @@
 # PRCT control API
 
+This is an external consumer of proot. It requires a proot build that supports
+the PRCT control protocol and the corresponding `--control-fd` capability. A
+proot build without that protocol support cannot run this API successfully.
+
+The dependency is one-way: proot remains usable without this directory and
+does not depend on these libraries, launchers, presets, or policies.
+
 This directory contains three small consumers for `proot --control-fd`:
 
 * `python/control_api.py` — synchronous, standard library only.
@@ -24,12 +31,24 @@ and validate `HELLO` before returning a ready process. Do not put
 the launcher waits its grace period and then terminates/kills a still-running
 proot.
 
+The launcher owns this setup and its policy. It must pass all desired rootfs,
+binding, environment, authorization, and Termux-specific options explicitly;
+none of those settings are implied or installed as proot defaults. A consumer
+may offer presets such as `load termux`, but those presets belong to the
+consumer and are not built into proot.
+
 The control channel is fail-closed. With it enabled, PRCT still authorizes
 network destinations classified as `UNKNOWN` (the static `*`, `tcp://*`, and
 `udp://*` rules only hand such requests off), and external guest filesystem
-paths even when a read-only binding is readable. Fixed guest infrastructure
-roots are exempt for READ/METADATA; approvals never change static binding
-permissions.
+paths even when a read-only binding is readable. Proot has no fixed list of
+Android, Termux, or rootfs paths exempt from the protocol: the harness decides
+what to allow and answers the PRCT request. Approvals never change static
+binding permissions.
+
+El harness debe seguir leyendo el control fd después de enviar un comando: el
+guest puede generar inmediatamente nuevas solicitudes de ruta o red. Leer
+solo el resultado del comando y luego esperar al proceso puede bloquearlo y
+producir un error engañoso del loader.
 
 Python (the launcher fills in `--control-fd` and validates `HELLO` before
 returning):

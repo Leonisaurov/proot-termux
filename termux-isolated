@@ -13,13 +13,16 @@ uso: termux-isolated [opciones] [comando...]
 
   sin argumentos   shell interactivo (bash -l) aislado
   --with-sys       bind /sys:/sys (opcional)
-  --with-storage   bind /storage:/storage (opcional; sin él, ~/storage queda oculto)
   --no-proc-isolated
                    Desactiva el aislamiento de /proc
   --               Fin de opciones; todo lo siguiente se ejecuta como comando
   --as-root        --change-id=0:0 (simula root)
   --rw-dir <path>  Solo <path> es escribible; el resto del sandbox es de solo lectura (apt/pkg no funcionan en este modo)
   --termux-paths  Usa los paths reales de Termux (/data/data/com.termux/files/...) en vez de la jerarquía Linux (/usr, /home); misma seguridad extra
+  --proot-arg <arg>
+                   Pasa un argumento literal a proot (repetible; usar antes de --)
+  --cwd <path>     Fija el cwd guest explícitamente; evita depender del cwd del runner
+  --verbose        Muestra información del wrapper y del aislamiento
   --as <nombre>    Muestra <nombre> en whoami/id (estético; el uid real no cambia). Excluyente con --as-root.
 
 Ejemplos:
@@ -34,11 +37,13 @@ fi
 # Separa las opciones del wrapper del comando a ejecutar
 cmd=""
 extra=""
+PROOT_ARGS=()
+CWD_OVERRIDE=""
 RW_DIR=""
 TERMUX_PATHS=0
 AS_USER=""
 AS_ROOT=0
-WITH_STORAGE=0
+VERBOSE=0
 PROC_ISOLATED=1
 COMMAND_MODE=0
 arg_count=0
@@ -61,10 +66,28 @@ while [ "$#" -gt 0 ]; do
     case "$arg" in
         --)             COMMAND_MODE=1; shift ;;
         --with-sys)     extra="$extra --bind=/sys:/sys"; shift ;;
-        --with-storage) WITH_STORAGE=1; extra="$extra --bind=/storage:/storage"; shift ;;
         --no-proc-isolated) PROC_ISOLATED=0; shift ;;
         --as-root)      AS_ROOT=1; extra="$extra --change-id=0:0"; shift ;;
         --termux-paths) TERMUX_PATHS=1; shift ;;
+        --verbose)      VERBOSE=1; shift ;;
+        --proot-arg)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "error: --proot-arg requiere un valor" >&2
+                exit 1
+            fi
+            PROOT_ARGS+=("$1")
+            shift
+            ;;
+        --cwd)
+            shift
+            if [ "$#" -eq 0 ]; then
+                echo "error: --cwd requiere un path guest" >&2
+                exit 1
+            fi
+            CWD_OVERRIDE="$1"
+            shift
+            ;;
         --as=*)
             AS_USER="${arg#--as=}"
             shift ;;
@@ -166,22 +189,6 @@ else
     as_env=""
 fi
 
-# Oculta ~/storage si NO se pidió --with-storage: el host $HOME contiene el
-# dir ~/storage (creado por termux-setup-storage) con symlinks internos a
-# /storage/emulated/0 (shared, downloads, dcim, ...). Como $HOME queda
-# bindeado/visible en el sandbox, esos symlinks se filtran al guest y
-# exponen el storage real del host. Se tapa el path guest con un bind de un
-# dir vacío (los binds de proot tienen prioridad sobre el host).
-storage_hide_bind=""
-if [ "$WITH_STORAGE" = "0" ] && { [ -L "$TERMUX_ROOT/home/storage" ] || [ -d "$TERMUX_ROOT/home/storage" ]; }; then
-    mkdir -p "$TERMUX_PREFIX/tmp/ti-empty-storage"
-    if [ "$TERMUX_PATHS" = "1" ]; then
-        storage_hide_bind="--bind=$TERMUX_PREFIX/tmp/ti-empty-storage:$TERMUX_ROOT/home/storage"
-    else
-        storage_hide_bind="--bind=$TERMUX_PREFIX/tmp/ti-empty-storage:/home/storage"
-    fi
-fi
-
 # Sin comando -> shell interactivo de login; con comando -> --cwd= traducido
 # host->guest (proot interpreta el cwd como path GUEST: un cwd absoluto del
 # host genera el warning "can't chdir(...) in the guest rootfs" y cae a "/").
@@ -194,9 +201,13 @@ if [ -z "$cmd" ]; then
         cwd_arg="--cwd=/home"
         cmd="exec bash -l"
     fi
-    echo "[sandbox] Termux aislado — shell interactivo (--help para opciones)" >&2
+    if [ "$VERBOSE" = "1" ]; then
+        echo "[sandbox] Termux aislado — shell interactivo (--help para opciones)" >&2
+    fi
 else
-    if [ "$TERMUX_PATHS" = "1" ]; then
+    if [ -n "$CWD_OVERRIDE" ]; then
+        cwd_arg="--cwd=$CWD_OVERRIDE"
+    elif [ "$TERMUX_PATHS" = "1" ]; then
         # termux-paths: el cwd del host es un path guest válido (binds
         # directos host==guest) -> --cwd=. sin traducción jerárquica.
         cwd_arg="--cwd=."
@@ -207,7 +218,9 @@ else
     else
         cwd_arg="--cwd=/home"
     fi
-    echo "[sandbox] Termux aislado — /data y /storage ocultos, procesos host invisibles" >&2
+    if [ "$VERBOSE" = "1" ]; then
+        echo "[sandbox] Termux aislado — prefijo de Termux y binds explícitos del launcher; /data y /storage no se usan; procesos host invisibles" >&2
+    fi
 fi
 
 # Modo estricto (--rw-dir): traduce el path del dir RW a su par host/guest.
@@ -243,7 +256,9 @@ if [ -n "$RW_DIR" ]; then
         esac
     fi
     if [ ! -d "$HOST_RW_DIR" ]; then
-        echo "[sandbox] creando dir RW: $HOST_RW_DIR" >&2
+        if [ "$VERBOSE" = "1" ]; then
+            echo "[sandbox] creando dir RW: $HOST_RW_DIR" >&2
+        fi
         mkdir -p "$HOST_RW_DIR" 2>/dev/null || {
             echo "error: no se pudo crear $HOST_RW_DIR" >&2
             exit 1
@@ -333,6 +348,14 @@ if [ "$PROC_ISOLATED" = "1" ]; then
     proc_isolated_arg="--proc-isolated"
 fi
 
+# In Termux-paths mode the host cwd must also be inside the app prefix. A
+# runner may invoke this wrapper from a cwd outside the Termux app prefix;
+# letting proot inherit it would turn that host path into a guest path before
+# the explicit guest cwd is applied.
+if [ "$TERMUX_PATHS" = "1" ] && [ -n "$CWD_OVERRIDE" ]; then
+    cd "$TERMUX_PREFIX" || exit 1
+fi
+
 exec env \
   -i \
   HOME=$sandbox_home \
@@ -342,6 +365,9 @@ exec env \
   LANG=${LANG:-en_US.UTF-8} \
   COLORTERM=${COLORTERM:-truecolor} \
   TMPDIR=$sandbox_tmpdir \
+  PROOT_TMP_DIR=$TERMUX_PREFIX/tmp \
+  PROOT_RUNTIME_DIR=$TERMUX_PREFIX/tmp \
+  PROOT_VERBOSE=${PROOT_VERBOSE:-0} \
   LD_LIBRARY_PATH=$sandbox_ld \
   SSL_CERT_FILE=$sandbox_ssl \
   GIT_SSL_CAINFO=$sandbox_ssl \
@@ -368,8 +394,8 @@ exec env \
   $runtime_binds \
   $strict_binds \
   $passwd_bind \
-  $storage_hide_bind \
   --bind=/dev:/dev \
   --bind=/proc:/proc \
   $extra \
+  "${PROOT_ARGS[@]}" \
   $guest_bash -c "$cmd"

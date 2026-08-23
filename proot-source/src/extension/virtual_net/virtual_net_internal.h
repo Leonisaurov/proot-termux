@@ -14,7 +14,6 @@
 /*  Paths & Limits                                                           */
 /* ========================================================================= */
 
-#define VNP_TMP_DIR      "/data/data/com.termux/files/usr/tmp/proot-net"
 #define VNP_MAX_NAME     64
 #define VNP_MAX_FDS      256
 #define VNP_EXPOSE_MAX   64
@@ -24,6 +23,9 @@
  * Full name: @proot-vnet-{proxy_name}-{port}\0
  * Max sun_path = 108 bytes, '@' + prefix + name + '-' + port digits < 108 */
 #define VNP_ABSTRACT_PREFIX "proot-vnet-"
+
+/* The runtime directory is selected by the caller's environment. */
+const char *vnp_runtime_dir(void);
 
 /* ========================================================================= */
 /*  Opcodes: communication tracer ↔ helper (via pipe)                        */
@@ -61,7 +63,6 @@ typedef struct {
 	int      fd;            /* Tracee's file descriptor */
 	pid_t    pid;           /* Tracee's pid (to prevent cross-process removal) */
 	uint16_t virtual_port;  /* Virtual port this fd is bound/connect to */
-	uint16_t exposed_port;  /* If > 0, this port is exposed via -p */
 	int      orig_domain;   /* Original AF_INET before we changed to AF_UNIX */
 } VnpFdEntry;
 
@@ -134,7 +135,6 @@ struct VnpRegistryHeader {
 static inline void vnp_fill_abstract_sa(struct sockaddr_un *sa, const char *proxy_name,
                                          uint16_t port, uint32_t token)
 {
-	char namebuf[VNP_SOCKBUF_LEN];
 	memset(sa, 0, sizeof(*sa));
 	sa->sun_family = AF_UNIX;
 	sa->sun_path[0] = '\0';
@@ -197,7 +197,6 @@ static inline VnpFdEntry *vnp_add_fd(VnpConfig *config, pid_t pid, int fd, uint1
 	entry->fd = fd;
 	entry->pid = pid;
 	entry->virtual_port = virtual_port;
-	entry->exposed_port = 0;
 	entry->orig_domain = orig_domain;
 	config->fd_count++;
 	return entry;
@@ -227,7 +226,14 @@ static inline void vnp_remove_fd(VnpConfig *config, int fd, pid_t pid)
  */
 static inline void vnp_net_path(const char *proxy_name, char *buf, size_t bufsz)
 {
-	snprintf(buf, bufsz, "%s/%s", VNP_TMP_DIR, proxy_name);
+	const char *runtime_dir = vnp_runtime_dir();
+	if (bufsz == 0)
+		return;
+	if (runtime_dir == NULL || proxy_name == NULL) {
+		buf[0] = '\0';
+		return;
+	}
+	snprintf(buf, bufsz, "%s/proot-net/%s", runtime_dir, proxy_name);
 }
 
 #endif /* VIRTUAL_NET_INTERNAL_H */

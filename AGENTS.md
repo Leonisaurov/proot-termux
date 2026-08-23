@@ -6,6 +6,35 @@ Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker +
 
 ## Build & CI
 
+### Flujo obligatorio de trabajo
+
+1. Identifica la capa: proot, `termux-isolated`, `control-api` o harness.
+2. Elige el modo de rutas antes de escribir comandos: `--termux-paths`
+   conserva `$PREFIX` como ruta guest; el modo rootfs usa `/usr`, `/bin`,
+   `/etc` y `/home`.
+3. Separa rutas host y guest. `PROOT_TMP_DIR` y `PROOT_RUNTIME_DIR` deben ser
+   rutas host escribibles; `TMPDIR` dentro del guest puede ser otra ruta.
+4. Valida primero el caso mínimo sin protocolo, después con `control-fd`, y
+   finalmente con un harness que atienda eventos durante toda la vida del
+   proceso.
+5. Ante un fallo, reproduce el caso mínimo y localiza la capa responsable
+   antes de editar otra capa.
+6. No declares terminado mientras fallen la build o las regresiones relevantes.
+
+### Ownership y rutas
+
+| Capa | Hace | No asume |
+|---|---|---|
+| proot | Traducción, bindings explícitos, aislamiento y protocolo opt-in | Rutas Android/Termux, binds del consumidor o decisiones del harness |
+| `termux-isolated` | Lanzamiento concreto de proot en Termux | Controlar el `control-fd` o exponer almacenamiento |
+| `control-api` | Codec, launcher y contrato del control fd | Presets internos de proot |
+| harness | Lee cada evento y responde mientras proot vive | Que proot decida por él |
+
+Con `--termux-paths`, usa `$PREFIX/bin/sh` y `$PREFIX/etc`; con rootfs, usa
+`/bin/sh` y `/etc`. No mezcles ambos espacios en un mismo test. `/data` y
+`/storage` no son rutas guest genéricas; `termux-isolated` no expone
+almacenamiento.
+
 ### Comandos clave
 
 ```bash
@@ -17,8 +46,13 @@ Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker +
 ./scripts/build-native.sh -i         # compila + instala + empaqueta
 ./scripts/build-native.sh -c -i      # clean build + instala
 ./scripts/build-native.sh --skip-build   # solo empaqueta (binarios existentes)
-./scripts/build-native.sh -j4        # paralelismo (default -j2, OOM-safe; -j1 en <4GB RAM)
+./scripts/build-native.sh -j 4      # paralelismo (default 2; -j 1 en <4GB RAM)
 ```
+
+Para builds locales siempre se usa `scripts/build-native.sh`; no se ejecuta
+`make` directamente. La opción de paralelismo recibe un argumento separado:
+`-j 2` o `--jobs 2` (no existe la forma `-j2`).
+`--skip-package` todavía compila e instala; únicamente omite el paquete.
 
 Output local: `$PREFIX/bin/proot`, loaders en `$PREFIX/libexec/proot/{loader,loader32}`, script `$PREFIX/bin/termux-chroot`, paquete `proot-<ver>-<rev>-aarch64.pkg.tar.xz` en la raíz. Dependencias: `libandroid-shmem`, `libtalloc` (se construyen solas con `-I`).
 
@@ -55,16 +89,45 @@ gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Succ
 
 | Fuente | VERSION | REVISION |
 |--------|---------|----------|
-| `packages/proot/build.sh` | `5.1.107.89` | `30` |
+| `packages/proot/build.sh` | `5.1.107.89` | `46` |
 | `scripts/build-native.sh` | `5.1.107.87` | `16` |
 
 Discrepancia verificada entre ambos. NO asumas cuál es canónica ni la sincronices unilateralmente; usa la del archivo que edites.
 
 ## Critical Rules
 
+### Preflight y ejecución local obligatorios
+
+- Antes de compilar, empaquetar, instalar o ejecutar una batería de tests, analiza el objetivo, el flujo exacto, los scripts, workflows, parches, toolchain y documentación aplicables.
+- Ejecuta un preflight sin compilación: `uname -m`, API/NDK, herramientas disponibles, espacio libre, RAM, red/caché, pins de versión, `TMPDIR` y permisos de salida.
+- Cualquier build, test, empaquetado, instalación o validación que ejecute binarios debe lanzarse con `sandbox_permissions: "require_escalated"`, para ejecutarse en el entorno local de Termux y no dentro del sandbox del agente.
+- No inicies una compilación larga por intuición. Si el preflight falla, corrige o reporta la causa antes de consumir tiempo de build.
+- Tras un fallo, captura el error completo, clasifícalo como fuente, toolchain, entorno, red, memoria o CI, y determina la causa raíz antes de cambiar código o recompilar.
+- No uses ciclos apresurados de compilar–fallar–parchar. El cambio debe ser el mínimo que resuelva la causa demostrada.
+- No declares una tarea terminada mientras existan errores conocidos. Cuando una
+  validación falle, vuelve a analizar el diseño y resuelve la causa raíz antes
+  de continuar con otra iteración o presentar el trabajo como completo.
+- Distingue siempre la ruta guest de la ruta host. Con `--termux-paths` el
+  guest usa el prefijo real de Termux (`$PREFIX`, normalmente
+  `/data/data/com.termux/files/usr`); `/etc`, `/bin` y `/home` no se pueden
+  asumir como rutas guest. En una jerarquía rootfs sí deben usarse las rutas
+  Linux del rootfs. Los tests deben construir sus objetivos según el modo que
+  realmente ejecutan.
+- Conserva `target/`, cachés y `sccache` compatibles; no uses `cargo clean` ni borres cachés sin una causa comprobada.
+
+### Propósito e independencia de proot
+
+- Proot es una herramienta independiente y multipropósito para ejecutar procesos sin privilegios con traducción de filesystem, bindings, compatibilidad y aislamiento explícito.
+- Las capacidades de proot deben ser genéricas, simples y útiles sin depender de un consumidor concreto.
+- No añadas a proot presets, políticas, rutas, permisos, autorizaciones, defaults ni configuraciones específicas de `control-api` u otra aplicación.
+- `control-api` puede depender de una versión de proot compatible con su protocolo; la dependencia es de compatibilidad entre consumidor y proveedor, no una razón para que proot dependa de `control-api`.
+- La implementación del protocolo en proot debe permanecer como capacidad explícita y documentada del ejecutable, sin imponer políticas de autorización ni configuración de la integración.
+- Launchers, modalidades como `load termux`, presets y facilidades de configuración pertenecen a la integración que los ofrece. Esa integración debe pasar explícitamente sus opciones a proot y conservar la responsabilidad de sus efectos.
+- Antes de diseñar una extensión, explica qué problema general de proot resuelve, cómo funciona sin integraciones y por qué no debe vivir en un consumidor externo.
+
 ### ⚠️ SIEMPRE bump TERMUX_PKG_REVISION antes de commit
 
-Cada vez que toques `proot-source/src/` o `packages/proot/`, incrementa `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES de commit. Sin esto el CI no se dispara bien y los usuarios no reciben la actualización. Es el error más común. REVISION actual: **30**.
+Cada vez que toques `proot-source/src/` o `packages/proot/`, incrementa `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES de commit. Sin esto el CI no se dispara bien y los usuarios no reciben la actualización. Es el error más común. La revisión vigente debe leerse siempre de `packages/proot/build.sh`; no mantengas un número duplicado aquí.
 
 ### Orden de commit (secuencial, no omitir pasos)
 
@@ -86,8 +149,11 @@ Convención: `<type>(<scope>): <summary>` — types: `fix`, `enhance`, `chore`, 
 ### Gotchas del entorno (Termux)
 
 - Usa `$TMPDIR`, NUNCA `/tmp`.
-- Builds locales: OOM-safe por defecto (`-j2`); usa `-j1` en dispositivos <4GB RAM.
+- Builds locales: OOM-safe por defecto (2 jobs); usa `-j 1` en dispositivos <4GB RAM.
 - `gita` es la herramienta de monitoreo CI (ver Monitoreo CI); no uses `timeout` con ella.
+- Los tests que invoquen proot con `env -i` deben pasar explícitamente
+  `TMPDIR` y `PROOT_RUNTIME_DIR` a una ruta host escribible; no pueden depender
+  del entorno heredado ni usar `/tmp` como sustituto en Termux.
 - **proot necesita `env -i`** para ejecutar binarios en rootfs Alpine — el entorno heredado causa fallos en execve. Siempre limpiar env al invocar proot directamente.
 
 ## Security Hardening (Fases A-F)
@@ -135,7 +201,11 @@ Resultados: B=14/14 PASS, C=6/6 PASS, D4/E1/E3/E6=39/39 PASS. Reportes en `pente
 
 ### Virtual Networking (`--proxy NAME`)
 
-Red virtual con **Abstract Unix Domain Sockets** (sin TCP/IP real): `socket(AF_INET/AF_INET6)`→`AF_UNIX`, `bind/connect` traducidos a `@proot-vnet-{name}-{port}-{token}`; `getsockname/getpeername` emulan loopback (`127.0.0.1`/`::1`); `setsockopt(IPPROTO_TCP)` voided. Registry compartido para multi-instancia: `$PREFIX/usr/tmp/proot-net/{name}/registry.lock` (flock; magic `0x50524F4E` = **"PRON"**; entradas 512 × 116 B, ~59 KB). `-p HOST:VIRTUAL` lanza helper (`--vnp-helper NAME`, `virtual_net_helper.c` 422 líneas) que abre TCP real y hace bridge TCP→Unix.
+El estado temporal de estas extensiones no usa una ruta Termux compilada:
+proot usa `PROOT_RUNTIME_DIR` y, si no existe, `TMPDIR`. El consumidor debe
+proporcionar un directorio válido; proot no inventa binds ni rutas de Termux.
+
+Red virtual con **Abstract Unix Domain Sockets** (sin TCP/IP real): `socket(AF_INET/AF_INET6)`→`AF_UNIX`, `bind/connect` traducidos a `@proot-vnet-{name}-{port}-{token}`; `getsockname/getpeername` emulan loopback (`127.0.0.1`/`::1`); `setsockopt(IPPROTO_TCP)` voided. Registry compartido para multi-instancia: `<PROOT_RUNTIME_DIR o TMPDIR>/proot-net/{name}/registry.lock` (flock; magic `0x50524F4E` = **"PRON"**; entradas 512 × 116 B, ~59 KB). `-p HOST:VIRTUAL` lanza helper (`--vnp-helper NAME`, `virtual_net_helper.c` 422 líneas) que abre TCP real y hace bridge TCP→Unix.
 
 | Escenario | Resultado |
 |-----------|-----------|
@@ -144,7 +214,10 @@ Red virtual con **Abstract Unix Domain Sockets** (sin TCP/IP real): `socket(AF_I
 
 ### Supervise & Exec (`--supervise`, `--exec <PID> <cmd>`)
 
-`--supervise` cambia el event loop a `signalfd`+`poll()` y escucha en `@proot-exec-<PID>`. `--exec` (invocación proot separada) conecta y ejecuta un comando dentro del mismo contexto (rootfs, binds, proxy). Logs: `$PREFIX/usr/tmp/proot-exit-<PID>.log` (`process 'x' exited with status N / killed by signal N`). Sin `--supervise` el loop es 100% idéntico al upstream (cero overhead).
+Los logs se escriben en `PROOT_RUNTIME_DIR` o `TMPDIR`, según el entorno que
+proporcione quien lanza proot.
+
+`--supervise` cambia el event loop a `signalfd`+`poll()` y escucha en `@proot-exec-<PID>`. `--exec` (invocación proot separada) conecta y ejecuta un comando dentro del mismo contexto (rootfs, binds, proxy). Logs: `<PROOT_RUNTIME_DIR o TMPDIR>/proot-exit-<PID>.log` (`process 'x' exited with status N / killed by signal N`). Sin `--supervise` el loop es 100% idéntico al upstream (cero overhead).
 
 **Comportamiento real (verificado)**: al salir el root tracee el supervisor cierra `ctl_fd` y se apaga salvo clients `--exec` pendientes — no queda vivo en background. SIGTERM/SIGINT son SIG_IGN; solo SIGKILL o la salida natural del root tracee lo termina.
 
@@ -256,14 +329,14 @@ Port mapping (`-p host:container`, máx 64, auto-puerto libre), auto-redirect de
 
 ## How the Build Works (CI)
 
-`TERMUX_PKG_SKIP_SRC_EXTRACT=true` salta descarga → `termux_step_pre_configure()` rsync de `proot-source/` al build dir → `make` compila con todas las features built-in (sin parches) → package step crea `.pkg.tar.xz`.
+`TERMUX_PKG_SKIP_SRC_EXTRACT=true` salta descarga → `termux_step_pre_configure()` rsync de `proot-source/` al build dir → `make` compila las capacidades del fork (sin parches) → package step crea `.pkg.tar.xz`.
 
 ## Known Issues / Gotchas
 
 - **`repo.json` declara `pkg_format: debian` pero el workflow usa `--format pacman`** — inconsistencia verificada, no "arreglar" (el pipeline CI manda).
 - **`buildorder.py`**: parcheado para saltar deps ausentes (libllvm, python declaran deps removidas).
 - **`/data` mount**: no usar en CI (`-m` en run-docker.sh causa permisos en runners GHA); la caché se monta vía `TERMUX_DOCKER_RUN_EXTRA_ARGS`.
-- **Registry cleanup**: entradas stale de `registry.lock` no se limpian solas (no afectan). Limpieza manual: borrar `$PREFIX/usr/tmp/proot-net/`.
+- **Registry cleanup**: entradas stale de `registry.lock` no se limpian solas (no afectan). Limpieza manual: borrar el directorio `proot-net/` dentro de `PROOT_RUNTIME_DIR` o `TMPDIR` del proceso correspondiente.
 - **Tamaños reales** (para estimar diffs): `virtual_net.c`=1144, `virtual_net_helper.c`=422, `cli/proot.c`=1004, `cli/proot.h`=614, `cli/cli.c`=694, `GNUmakefile`=318, `tracee/event.c`=976, `tracee/tracee.h`=399.
 - **D5 hash table**: ✅ implementada. Hash estático 256 buckets + `tracee_hash_update()` para PID change en cli.c. Sin talloc lifecycle issues.
 - **D6 binding cache**: SKIP — riesgo de dangling pointers supera ganancia (3-10 bindings típicas, scan lineal es efectivamente O(1)).
@@ -286,6 +359,6 @@ pentest/test_phase_c.sh        # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fak
 pentest/test_d4_e1_e3_e6.sh   # D4 socket, E1 renameat2, E3 uname, E6 mknod (39 tests)
 ```
 
-## Agent Configuration
+## Configuración del agente
 
-Orquestador: `~/.config/opencode/agent/orquestador.md`. No cerrar la sesión tras completar tareas salvo petición explícita; mantener el estado de trabajo; ante duda preguntar "¿Algo más?" en vez de asumir finalización.
+Estas instrucciones son autosuficientes y no requieren archivos de configuración fuera del repositorio.
