@@ -28,6 +28,13 @@
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
 
+struct readlink_proc_fd_state {
+	pid_t pid;
+	int fd;
+	char *host_path;
+	bool substituted;
+};
+
 extern int get_sysarg_path(const Tracee *tracee, char path[PATH_MAX], Reg reg);
 extern int set_sysarg_path(Tracee *tracee, const char path[PATH_MAX], Reg reg);
 extern int set_sysarg_data(Tracee *tracee, const void *tracer_ptr, word_t size, Reg reg);

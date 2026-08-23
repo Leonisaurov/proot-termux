@@ -160,6 +160,11 @@ typedef enum {
 	 * proot.  data1 argument contains pointer to statx_syscall_state
 	 * struct defined in tracee/statx.h.  */
 	STATX_SYSCALL,
+
+	/* The tracee has read "/proc/<PID>/fd/<FD>" and PRoot is about to
+	 * report the host path.  link2symlink may substitute the name used
+	 * by the tracee for files hidden in its private directory. */
+	READLINK_PROC_FD,
 } ExtensionEvent;
 
 #define CLONE_RECONF ((word_t) -1)
