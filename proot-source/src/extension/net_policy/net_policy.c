@@ -32,7 +32,7 @@
 #define NET_ASK_TIMEOUT_MS 1000
 #define NET_DNS_MAX_QUERIES 64
 #define NET_DNS_MAX_LEASES 128
-#define NET_DNS_NAME_LEN 128
+#define NET_DNS_NAME_LEN 256
 
 enum {
 	NET_ASK_BIND = 1,
@@ -208,12 +208,15 @@ static int dns_read_name(const unsigned char *packet, size_t length, size_t offs
 	unsigned int jumps = 0;
 	size_t used = 0;
 	int jumped = 0;
+	int overflow = 0;
 	if (name_size == 0) return -1;
 	name[0] = '\0';
 	while (cursor < length) {
 		unsigned char label = packet[cursor++];
 		if (label == 0) {
 			if (!jumped) resume = cursor;
+			if (overflow)
+				return -1;
 			if (used == 0) name[0] = '.';
 			name[used < name_size ? used : name_size - 1] = '\0';
 			*next = resume;
@@ -231,11 +234,18 @@ static int dns_read_name(const unsigned char *packet, size_t length, size_t offs
 		}
 		if ((label & 0xc0) != 0 || label > 63 || cursor + label > length)
 			return -1;
-		if (used != 0 && used + 1 < name_size) name[used++] = '.';
+		if (used != 0) {
+			if (used + 1 < name_size)
+				name[used++] = '.';
+			else
+				overflow = 1;
+		}
 		while (label-- != 0) {
 			unsigned char c = packet[cursor++];
 			if (used + 1 < name_size)
 				name[used++] = (char)(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+			else
+				overflow = 1;
 		}
 	}
 	return -1;
@@ -1303,6 +1313,8 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 		Tracee *tracee = TRACEE(extension);
 		NetPolicyConfig *config = talloc_get_type_abort(extension->config, NetPolicyConfig);
 		int syscall = get_sysnum(tracee, CURRENT);
+		if (config->mode == NET_POLICY_OFF)
+			return 0;
 		if (syscall == PR_bind || syscall == PR_listen || syscall == PR_connect ||
 		    syscall == PR_sendto || syscall == PR_recvfrom || syscall == PR_recvmsg ||
 		    syscall == PR_ppoll || syscall == PR_read) {
@@ -1362,6 +1374,8 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 	if (event == SYSCALL_EXIT_START) {
 		Tracee *tracee = TRACEE(extension);
 		NetPolicyConfig *config = talloc_get_type_abort(extension->config, NetPolicyConfig);
+		if (config->mode == NET_POLICY_OFF)
+			return 0;
 		if (get_sysnum(tracee, ORIGINAL) == PR_recvfrom)
 			dns_observe_receive(config, tracee);
 		return 0;
