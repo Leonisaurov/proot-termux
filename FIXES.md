@@ -27,6 +27,20 @@ desvinculan antes de `bind`; los errores de reserva, cierre, `unlink`, `bind` y
 Verificación local: todos los `pentest/test_*.sh` existentes, 11/11 scripts
 con código 0; D4/E1/E3/E6 reportó 39/39, net policy 9/9 y Phase C 6/6.
 
+## H — Seguimiento de upstream (v5.1.107.92)
+
+`upstream/master` fue revisado hasta `7266fb3e85` (`v5.1.107.92`). Los cuatro
+commits posteriores a la base común son `7ff389a181`, `894e5789cd`,
+`61681c6481` y `7266fb3e85`. El fork conserva deliberadamente su árbol
+`proot-source/src/`: el upstream actualizado usa `src/` y una fusión normal
+eliminaría componentes propios del fork.
+
+La rama registra esa referencia upstream mediante una fusión de historial sin
+cambiar el árbol de trabajo. Los cambios funcionales de link2symlink y la
+corrección sysenter/sysexit para kernels Android antiguos quedan identificados
+para portarlos al árbol compilado del fork, con pruebas específicas antes de
+activarlos.
+
 ## F — Vista `/proc` guest estricta (REV 30)
 
 La implementación actual amplía `ISOLATE_PROC` a una vista procfs coherente y
