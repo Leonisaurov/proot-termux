@@ -34,6 +34,8 @@
 #include "arch.h" /* word_t, user_regs_struct, HAS_POKEDATA_WORKAROUND */
 #include "compat.h"
 
+#define MAX_PROC_SYNTH_FDS 32
+
 typedef enum {
 	CURRENT  = 0,
 	ORIGINAL = 1,
@@ -270,6 +272,14 @@ typedef struct tracee {
 	 * that don't support prctl(PR_GET_AUXV)). -1 when not active. */
 	int auxv_fd;
 	int maps_fd;
+	/* FDs for procfs files whose global contents are synthesized by the
+	 * proc isolation extension.  The offset is maintained independently
+	 * because the underlying host procfs fd must never be exposed. */
+	int proc_synth_fds[MAX_PROC_SYNTH_FDS];
+	unsigned char proc_synth_kinds[MAX_PROC_SYNTH_FDS];
+	size_t proc_synth_offsets[MAX_PROC_SYNTH_FDS];
+	int proc_synth_count;
+	int proc_synth_pending_kind;
 
 #ifdef HAS_POKEDATA_WORKAROUND
 	word_t pokedata_workaround_stub_addr;

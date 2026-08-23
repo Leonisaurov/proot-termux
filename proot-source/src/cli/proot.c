@@ -30,6 +30,7 @@
 #include <sched.h>     /* sched_setaffinity(2), CPU_*, */
 #include <sys/resource.h> /* setpriority(2), prlimit64(2), RLIMIT_*, */
 #include <sys/types.h> /* pid_t, */
+#include <arpa/inet.h> /* INET6_ADDRSTRLEN */
 
 #include "cli/cli.h"
 #include "cli/note.h"
@@ -37,6 +38,7 @@
 #include "extension/sysvipc/sysvipc.h"
 #include "extension/virtual_net/virtual_net.h"
 #include "extension/virtual_net/virtual_net_internal.h"
+#include "extension/net_policy/net_policy.h"
 #include "extension/proc_isolation/proc_isolation.h"
 #include "extension/resource_limit/resource_limit.h"
 #include "supervise/supervise.h"
@@ -452,17 +454,83 @@ static int handle_option_H(Tracee *tracee, const Cli *cli UNUSED, const char *va
 
 static int handle_option_port_mapping(Tracee *tracee, const Cli *cli UNUSED, const char *value)
 {
-	uint16_t host_port, container_port;
+	const char *first_colon;
+	const char *last_colon;
+	const char *host_text;
+	char *end;
+	unsigned long host_value, guest_value;
+	char address[INET6_ADDRSTRLEN];
+	struct sockaddr_storage host_addr;
+	struct sockaddr_storage *host_addr_ptr = NULL;
 
-	if (sscanf(value, "%hu:%hu", &host_port, &container_port) != 2) {
-		note(tracee, ERROR, USER, "invalid port mapping format: %s (expected host:container)", value);
-		return -1;
+	/* Accept host:guest and [address]:host:guest.  Explicit addresses are
+	 * carried through to the virtual-net helper; port_switch retains its
+	 * historical host:guest form. */
+	if (value == NULL || value[0] == '\0')
+		goto invalid_mapping;
+	first_colon = strchr(value, ':');
+	last_colon = strrchr(value, ':');
+	host_text = value;
+	if (value[0] == '[') {
+		const char *close = strchr(value, ']');
+		if (close == NULL || close[1] != ':' || close == value + 1)
+			goto invalid_mapping;
+		if ((size_t)(close - value - 1) >= sizeof(address))
+			goto invalid_mapping;
+		memcpy(address, value + 1, (size_t)(close - value - 1));
+		address[close - value - 1] = '\0';
+		{
+			struct in_addr v4;
+			struct in6_addr v6;
+			memset(&host_addr, 0, sizeof(host_addr));
+			if (inet_pton(AF_INET, address, &v4) == 1) {
+				struct sockaddr_in *addr = (struct sockaddr_in *)&host_addr;
+				addr->sin_family = AF_INET;
+				addr->sin_addr = v4;
+				host_addr_ptr = &host_addr;
+			} else if (inet_pton(AF_INET6, address, &v6) == 1) {
+				struct sockaddr_in6 *addr = (struct sockaddr_in6 *)&host_addr;
+				addr->sin6_family = AF_INET6;
+				addr->sin6_addr = v6;
+				host_addr_ptr = &host_addr;
+			} else
+				goto invalid_mapping;
+		}
+		first_colon = close + 1;
+		host_text = close + 2;
+		last_colon = strrchr(first_colon, ':');
+	} else if (first_colon != last_colon) {
+		goto invalid_mapping;
 	}
+	if (last_colon == NULL || last_colon == value || last_colon[1] == '\0')
+		goto invalid_mapping;
+	if (value[0] == '[' && last_colon == first_colon)
+		goto invalid_mapping;
+	host_value = strtoul(host_text, &end, 10);
+	if (end != last_colon || host_value > 65535)
+		goto invalid_mapping;
+	guest_value = strtoul(last_colon + 1, &end, 10);
+	if (*(last_colon + 1) == '\0' || *end != '\0' || guest_value > 65535)
+		goto invalid_mapping;
+	{
+		uint16_t host_port = (uint16_t)host_value;
+		uint16_t container_port = (uint16_t)guest_value;
+		if (net_policy_allow_publication(tracee, host_port, container_port) < 0) {
+			note(tracee, WARNING, USER,
+			     "network policy denied publication %u -> %u",
+			     host_port, container_port);
+			return -1;
+		}
 
 	/* If --proxy active, delegate to virtual_net */
 	Extension *vnp_ext = get_extension(tracee, vnp_callback);
 	if (vnp_ext != NULL)
-		return vnp_add_expose(tracee, host_port, container_port);
+		return vnp_add_expose(tracee, host_port, container_port, host_addr_ptr);
+	if (host_addr_ptr != NULL) {
+		note(tracee, ERROR, USER,
+		     "explicit publication addresses require --proxy");
+		return -1;
+	}
 
 	/* Otherwise use port_switch */
 	Extension *ps_ext = get_extension(tracee, port_switch_callback);
@@ -482,6 +550,13 @@ static int handle_option_port_mapping(Tracee *tracee, const Cli *cli UNUSED, con
 	config->mappings[config->count].container_port = container_port;
 	config->count++;
 	return 0;
+	}
+
+invalid_mapping:
+	note(tracee, ERROR, USER,
+	     "invalid port mapping format: %s (expected host:container or [address]:host:container)",
+	     value ?: "(null)");
+	return -1;
 }
 
 static int handle_option_p(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
@@ -512,6 +587,39 @@ static int handle_option_proxy(Tracee *tracee, const Cli *cli UNUSED, const char
         }
 
         return vnp_configure(tracee, value);
+}
+
+static int handle_option_net_policy(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	return net_policy_configure(tracee, value);
+}
+
+static int handle_option_net_allow(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	return net_policy_add_destination(tracee, value, 0);
+}
+
+static int handle_option_net_deny(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	return net_policy_add_destination(tracee, value, 1);
+}
+
+static int handle_option_net_allow_bind(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	return net_policy_add_bind(tracee, value, 0);
+}
+
+static int handle_option_net_deny_bind(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	return net_policy_add_bind(tracee, value, 1);
+}
+
+static int handle_option_net_ask(Tracee *tracee, const Cli *cli UNUSED, const char *value)
+{
+	int status = net_policy_set_ask_fd(tracee, value);
+	if (status < 0)
+		note(tracee, ERROR, USER, "invalid --net-ask FD '%s'", value ?: "(null)");
+	return status;
 }
 
 /**

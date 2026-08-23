@@ -260,14 +260,17 @@ static int vnp_ensure_directories(const char *proxy_name)
 static uint32_t vnp_cache_generation = VNP_CACHE_GENERATION_INVALID;
 static uint32_t vnp_cache_count = 0;
 static struct VnpRegistryEntry vnp_cache_entries[VNP_REG_MAX];
+static char vnp_cache_proxy[VNP_MAX_NAME];
 
 /**
  * Refresh the per-instance cache from a fully-read registry header.
  */
-static void vnp_cache_update(const struct VnpRegistryHeader *hdr)
+static void vnp_cache_update(const char *proxy, const struct VnpRegistryHeader *hdr)
 {
 	vnp_cache_generation = hdr->generation;
 	vnp_cache_count = hdr->count;
+	strncpy(vnp_cache_proxy, proxy, sizeof(vnp_cache_proxy) - 1);
+	vnp_cache_proxy[sizeof(vnp_cache_proxy) - 1] = '\0';
 	memcpy(vnp_cache_entries, hdr->entries,
 	       hdr->count * sizeof(struct VnpRegistryEntry));
 }
@@ -619,7 +622,7 @@ static int vnp_handle_bind(Tracee *tracee, VnpConfig *config)
 			vnp_registry_write(reg_fd, &hdr);
 			/* Refresh the local cache: generation just changed, so the
 			 * next connect() in this instance skips the full read. */
-			vnp_cache_update(&hdr);
+			vnp_cache_update(config->proxy_name, &hdr);
 			vnp_registry_close(reg_fd);
 		}
 	}
@@ -707,7 +710,8 @@ static bool vnp_lookup_virtual_port(VnpConfig *config, uint16_t port, char *abst
 			 * other instance can be mid-write — a matching generation
 			 * guarantees the cache mirrors the file exactly. */
 			vnp_registry_read_meta(reg_fd, &hdr);
-			if (hdr.generation == vnp_cache_generation
+			if (strcmp(vnp_cache_proxy, config->proxy_name) == 0
+			    && hdr.generation == vnp_cache_generation
 			    && hdr.count == vnp_cache_count) {
 				reg_entry = vnp_registry_find_in_entries(
 					vnp_cache_entries, hdr.count, port);
@@ -715,7 +719,7 @@ static bool vnp_lookup_virtual_port(VnpConfig *config, uint16_t port, char *abst
 				/* Registry changed (this instance or another one):
 				 * read it fully and refresh the cache. */
 				vnp_registry_read(reg_fd, &hdr);
-				vnp_cache_update(&hdr);
+				vnp_cache_update(config->proxy_name, &hdr);
 				reg_entry = vnp_registry_find(&hdr, port);
 			}
 
@@ -729,6 +733,52 @@ static bool vnp_lookup_virtual_port(VnpConfig *config, uint16_t port, char *abst
 	}
 
 	return false;
+}
+
+VnpNetworkClass vnp_classify_destination(Tracee *tracee,
+						const struct sockaddr_storage *addr,
+						uint16_t port,
+						char *proxy, size_t proxy_size)
+{
+	Extension *extension;
+	VnpConfig *config;
+	int i;
+
+	if (proxy != NULL && proxy_size != 0)
+		proxy[0] = '\0';
+	extension = get_extension(tracee, vnp_callback);
+	if (extension == NULL)
+		return VNP_NET_CLASS_EXTERNAL;
+	if (addr == NULL)
+		return VNP_NET_CLASS_UNKNOWN;
+	config = talloc_get_type_abort(extension->config, VnpConfig);
+	if (proxy != NULL && proxy_size != 0) {
+		strncpy(proxy, config->proxy_name, proxy_size - 1);
+		proxy[proxy_size - 1] = '\0';
+	}
+	if (addr->ss_family == AF_INET) {
+		uint32_t value = ntohl(((const struct sockaddr_in *)addr)->sin_addr.s_addr);
+		if ((value & 0xff000000U) != 0x7f000000U)
+			return VNP_NET_CLASS_EXTERNAL;
+	} else if (addr->ss_family == AF_INET6) {
+		if (!is_ipv6_loopback_or_unspecified(&((const struct sockaddr_in6 *)addr)->sin6_addr))
+			return VNP_NET_CLASS_EXTERNAL;
+	} else {
+		return VNP_NET_CLASS_EXTERNAL;
+	}
+	for (i = 0; i < config->expose_count; i++)
+		if (config->expose_map[i].virtual_port == port)
+			return VNP_NET_CLASS_BRIDGE;
+	for (i = 0; i < config->fd_count; i++)
+		if (config->fd_map[i].virtual_port == port)
+			return VNP_NET_CLASS_VIRTUAL;
+	/* The shared registry is intentionally not consulted here.  A policy
+	 * decision must never have filesystem/lock side effects.  A prior connect
+	 * may have refreshed the cache, however, so use that cache when available. */
+	if (strcmp(vnp_cache_proxy, config->proxy_name) == 0 &&
+	    vnp_registry_find_in_entries(vnp_cache_entries, vnp_cache_count, port) != NULL)
+		return VNP_NET_CLASS_VIRTUAL;
+	return VNP_NET_CLASS_UNKNOWN;
 }
 
 /**
@@ -827,7 +877,8 @@ static int vnp_handle_close(Tracee *tracee, VnpConfig *config)
  * =========================================================================== */
 
 static int vnp_send_expose(Tracee *tracee, VnpConfig *config,
-                            uint16_t host_port, uint16_t virtual_port)
+                            uint16_t host_port, uint16_t virtual_port,
+			    const struct sockaddr_storage *host_addr)
 {
 	struct VnpRequest req;
 	struct VnpResponse resp;
@@ -845,6 +896,13 @@ static int vnp_send_expose(Tracee *tracee, VnpConfig *config,
 	req.opcode = VNP_EXPOSE;
 	req.virtual_port = virtual_port;
 	req.host_port = host_port;
+	if (host_addr != NULL) {
+		req.host_family = host_addr->ss_family;
+		if (host_addr->ss_family == AF_INET)
+			memcpy(req.host_address, &((const struct sockaddr_in *)host_addr)->sin_addr, 4);
+		else if (host_addr->ss_family == AF_INET6)
+			memcpy(req.host_address, &((const struct sockaddr_in6 *)host_addr)->sin6_addr, 16);
+	}
 
 	if (vnp_helper_request(config, &req, &resp) < 0 || resp.result != 0) {
 		note(tracee, WARNING, INTERNAL,
@@ -1161,7 +1219,8 @@ int vnp_configure(Tracee *tracee, const char *proxy_name)
 	return 0;
 }
 
-int vnp_add_expose(Tracee *tracee, uint16_t host_port, uint16_t virtual_port)
+int vnp_add_expose(Tracee *tracee, uint16_t host_port, uint16_t virtual_port,
+			   const struct sockaddr_storage *host_addr)
 {
 	VnpConfig *config;
 	Extension *ext;
@@ -1191,7 +1250,24 @@ int vnp_add_expose(Tracee *tracee, uint16_t host_port, uint16_t virtual_port)
 
 	config->expose_map[config->expose_count].host_port = host_port;
 	config->expose_map[config->expose_count].virtual_port = virtual_port;
+	config->expose_map[config->expose_count].host_family = host_addr == NULL ?
+		AF_UNSPEC : host_addr->ss_family;
+	if (host_addr != NULL) {
+		if (host_addr->ss_family == AF_INET)
+			memcpy(config->expose_map[config->expose_count].host_address,
+			       &((const struct sockaddr_in *)host_addr)->sin_addr, 4);
+		else if (host_addr->ss_family == AF_INET6)
+			memcpy(config->expose_map[config->expose_count].host_address,
+			       &((const struct sockaddr_in6 *)host_addr)->sin6_addr, 16);
+	}
 	config->expose_count++;
-
-	return vnp_send_expose(tracee, config, host_port, virtual_port);
+	if (vnp_send_expose(tracee, config, host_port, virtual_port, host_addr) < 0) {
+		/* Do not retain a half-registered publication when the helper could
+		 * not create its real listener. */
+		config->expose_count--;
+		memset(&config->expose_map[config->expose_count], 0,
+		       sizeof(config->expose_map[config->expose_count]));
+		return -1;
+	}
+	return 0;
 }

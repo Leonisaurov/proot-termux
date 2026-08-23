@@ -44,6 +44,8 @@ struct VnpRequest {
 	uint32_t opcode;
 	uint16_t virtual_port;
 	uint16_t host_port;
+	uint16_t host_family;
+	uint8_t  host_address[16];
 } __attribute__((packed));
 
 struct VnpResponse {
@@ -70,6 +72,8 @@ typedef struct {
 typedef struct {
 	uint16_t host_port;     /* TCP port on host (0.0.0.0:host_port) */
 	uint16_t virtual_port;  /* Virtual port (abstract Unix socket) */
+	uint16_t host_family;
+	uint8_t  host_address[16];
 } VnpExposeEntry;
 
 /* ========================================================================= */

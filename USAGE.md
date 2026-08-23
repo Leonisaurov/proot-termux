@@ -46,6 +46,38 @@ proot --kill-on-exit --link2symlink -L \
 
 Esto equivale a `--proc-isolated --ptrace-isolated`. El guest solo ve sus propios procesos en `/proc`.
 
+La vista es estricta: el listado usa una whitelist y los archivos globales y
+por proceso soportados (`status`, `stat`, `limits`, `maps`, `mountinfo`,
+`attr/current`, `io`, `sched`, `pagemap`, `fdinfo`, entre otros) se sintetizan
+sin copiar estadísticas ni topología del host. También se cubren
+`/proc/self`, `/proc/thread-self`, enlaces `exe`/`cwd`, rutas no canónicas,
+`openat` relativo y el estado de FDs duplicados. Las entradas sensibles como
+`/proc/net`, `/proc/sys`, `/proc/kcore`, `/proc/keys` y `/proc/kmsg` no se
+publican.
+
+### Verificación local y rutas guest
+
+El build e instalación local deben hacerse con el script oficial:
+
+```bash
+./scripts/build-native.sh -i
+```
+
+Pruebas mínimas mediante el sandbox del repositorio:
+
+```bash
+./termux-isolated --termux-paths -- sh -c 'ls /proc; readlink /proc/self/exe'
+./termux-isolated -- sh -c 'head -3 /proc/self/mountinfo; head -3 /proc/self/maps'
+./termux-isolated --termux-paths --no-proc-isolated -- sh -c 'head -1 /proc/self/mountinfo'
+```
+
+En `--termux-paths`, `/data/data/com.termux/...` es una ruta guest válida y
+debe aparecer. Sin esa opción, el rootfs debe mostrar rutas como `/usr` y
+`/home`, nunca rutas Android del host. `--no-proc-isolated` es un opt-out
+explícito que restaura la vista procfs anterior, incluida la posibilidad de
+ver datos procfs host; se usa solo para comparar compatibilidad. El wrapper
+`./termux-isolated` activa la vista estricta por defecto.
+
 ### Nivel 3: Aislamiento granular
 
 ```bash
@@ -391,3 +423,32 @@ env -i PATH=/bin:/usr/bin \
 - **`--supervise` sin `--exec`** = el supervisor se apaga al salir el root tracee.
 - **`-q` expone todo el host** en `/host-rootfs` — solo usar con guests confiables.
 - **PID 0 en `get_tracee()`** se cambia a `getpid()` — el hash table usa `tracee_hash_update()` para re-indexar. No manually set `tracee->pid` sin actualizar el hash.
+
+## Política de red estática
+
+La red conserva su comportamiento actual por defecto. Para activar la
+mediación, usa `--net-policy deny` (bloqueo por defecto) o `--net-policy
+allow` (permitido por defecto). Las reglas deny siempre ganan. También se
+median `sendto`/`recvfrom` cuando llevan una dirección explícita:
+
+```bash
+proot --net-policy deny \
+  --net-allow 127.0.0.1:8080 \
+  --net-allow-bind 8080 /bin/sh
+
+proot --net-policy allow --net-deny 10.0.0.0/8 /bin/sh
+
+# Publicación: se valida antes de configurar port_switch o arrancar el helper
+proot --proxy demo --net-policy deny --net-allow-bind 8080 \
+  --port 127.0.0.1:8080 /bin/sh
+```
+
+Los destinos aceptan IPv4, IPv6 entre corchetes, CIDR y un puerto opcional
+(`203.0.113.0/24`, `[::1]:8080`, `127.0.0.1:8080`). `--net-policy off` es
+la ruta compatible sin mediación. Esta primera versión media `bind`,
+`listen`, `connect`, `sendto` y `recvfrom` antes de las traducciones de
+`--proxy` o `-p`; la
+resolución de dominios observada queda para una fase posterior. `--net-ask FD`
+permite un harness externo fail-closed: usa mensajes nativos de tamaño fijo,
+versión 1, request ID y timeout de 1000 ms; una respuesta incompleta, inválida,
+EOF o timeout deniega la operación.

@@ -33,4 +33,6 @@ extern bool proc_isolation_statx_is_host_proc_path(Tracee *tracee,
                                                     char *out_path,
                                                     size_t out_size);
 
+extern bool proc_isolation_is_active(Tracee *tracee);
+
 #endif /* PROC_ISOLATION_H */

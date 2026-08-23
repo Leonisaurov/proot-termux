@@ -39,6 +39,35 @@ The build process copies `proot-source/` into the build directory via `rsync` du
 
 ---
 
+## Strict guest `/proc` (`--proc-isolated`)
+
+`--proc-isolated` implements a strict procfs guest view. `/proc` lists only
+the current instance's tracees and a small whitelist (`self`, `thread-self`
+and supported synthetic files); host PIDs and sensitive entries such as
+`/proc/net`, `/proc/sys`, `/proc/kcore`, `/proc/keys` and `/proc/kmsg` are not
+exposed.
+
+Global and per-process files are generated with Linux-compatible formats.
+`status`, `stat`, `limits`, `maps`, `mountinfo`, `attr/current`, `io`,
+`sched`, `pagemap`, `fdinfo` and related files do not copy host statistics or
+mount topology. `maps`, `exe`, `cwd` and `/proc/*` symlinks preserve guest
+paths, including non-canonical and relative `openat`/`readlink` access.
+
+The mode tracks proc state by descriptor across partial reads, `dup`,
+`fcntl`, `pread` and `close`, and maps `/proc/self` and `/proc/thread-self`
+to the calling tracee. `--proc-isolated` also confines ptrace, process-vm,
+kill and pidfd access to the instance.
+
+When using `./termux-isolated --termux-paths`, paths such as
+`/data/data/com.termux/files/usr` are valid guest paths by design. With the
+default rootfs mode, paths should instead remain inside that rootfs (for
+example `/usr` or `/home`) and must not reveal Android host paths. Use
+`--no-proc-isolated` is an explicit opt-out: it restores the previous procfs
+behavior, including host procfs data, and is intended only for compatibility
+comparisons. `./termux-isolated` uses the strict view by default.
+
+---
+
 ## Virtual Networking (`--proxy`)
 
 This fork adds an **isolated virtual networking** layer to proot. Applications running inside the proot see normal TCP/IP (`AF_INET`/`AF_INET6` sockets), but traffic is transparently tunnelled over **Abstract Unix Domain Sockets**. No real network ports are consumed unless explicitly exposed.
@@ -178,11 +207,6 @@ a fake hostname inside the sandbox.
 ### `--hide-uid`
 Intercept `/proc/self/status` and `getuid`/`geteuid` syscalls to show
 fake UID/GID (complement to existing `--change-id`).
-
-### `--isolate-pid`
-Hide host processes from `/proc/` inside the sandbox (partial pid
-namespace emulation). High effort: requires intercepting `readdir`
-on `/proc` and `stat` on `/proc/[pid]/`.
 
 ### `--seccomp-filter`
 Install a seccomp-bpf filter inside the sandbox to block dangerous

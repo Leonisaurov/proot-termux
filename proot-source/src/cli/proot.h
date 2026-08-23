@@ -71,6 +71,12 @@ static int handle_option_H(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_p(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_port_mapping(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_proxy(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_net_policy(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_net_allow(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_net_deny(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_net_allow_bind(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_net_deny_bind(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_net_ask(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_mbind(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_supervise(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_exec(Tracee *tracee, const Cli *cli, const char *value);
@@ -359,6 +365,54 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
           .description = "Create isolated virtual network. Without -p, binds stay virtual "
                          "and are only visible within the same --proxy network.",
           .detail = "",
+        },
+        { .class = "Network policy options",
+          .arguments = {
+                { .name = "--net-policy", .separator = ' ', .value = "off|deny|allow" },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_net_policy,
+          .description = "Set static network policy mode (default: off).",
+          .detail = "deny blocks by default; allow permits by default. Deny rules always win.",
+        },
+        { .class = "Network policy options",
+          .arguments = {
+                { .name = "--net-allow-bind", .separator = ' ', .value = "port" },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_net_allow_bind,
+          .description = "Allow a listener port.",
+          .detail = "",
+        },
+        { .class = "Network policy options",
+          .arguments = {
+                { .name = "--net-deny-bind", .separator = ' ', .value = "port" },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_net_deny_bind,
+          .description = "Deny a listener port.",
+          .detail = "",
+        },
+        { .class = "Network policy options",
+          .arguments = {
+                { .name = "--net-allow", .separator = ' ', .value = "destination" },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_net_allow,
+          .description = "Allow a destination (IP, CIDR, or IP:port).",
+          .detail = "",
+        },
+        { .class = "Network policy options",
+          .arguments = {
+                { .name = "--net-deny", .separator = ' ', .value = "destination" },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_net_deny,
+          .description = "Deny a destination (deny rules have priority).",
+          .detail = "",
+        },
+        { .class = "Network policy options",
+          .arguments = {
+                { .name = "--net-ask", .separator = ' ', .value = "FD" },
+                { .name = NULL, .separator = '\0', .value = NULL } },
+          .handler = handle_option_net_ask,
+          .description = "Ask an external harness after static policy allows.",
+          .detail = "Native-endian fixed-size request/response; timeout is 1000 ms and failures deny.",
         },
         { .class = "Extension options",
           .arguments = {

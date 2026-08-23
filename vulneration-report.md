@@ -169,3 +169,8 @@ Las salidas completas de cada prueba se encuentran en `pentest/results/`:
 | `pentest/results/p_net_B.txt` | Pruebas de red (netlink, sockets) — escenario B |
 | `pentest/results/p_sys_A.txt` | Pruebas de syscalls varias — escenario A |
 | `pentest/results/p_sys_B.txt` | Pruebas de syscalls varias — escenario B |
+> **Nota de vigencia:** Las observaciones de este reporte son históricas y
+> corresponden a baselines anteriores a la Fase F. Para el estado actual de
+> `--proc-isolated`, incluida la vista estricta de `/proc`, `mountinfo`,
+> `maps`, enlaces y el modo `--no-proc-isolated`, consultar [`FIXES.md`](./FIXES.md)
+> y [`USAGE.md`](./USAGE.md).

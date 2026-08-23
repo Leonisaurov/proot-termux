@@ -224,6 +224,7 @@ extern int fake_id0_fake_permissions_enabled(void);
 extern void fake_id0_set_fake_permissions(int enabled);
 extern int hidden_files_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 extern int port_switch_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
+extern int net_policy_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 extern int link2symlink_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 extern int fix_symlink_size_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
 extern int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);

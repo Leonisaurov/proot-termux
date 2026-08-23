@@ -10,6 +10,42 @@
 | D — Rendimiento P0/P1 | **Completada** ✅ | `e30bdb5b43` (REV 23), `89e2598828` (REV 24), D5 hash (REV 25) | D1 BPF sorted copy, D2 ioctl dinámico FICLONE, D3 faccessat2 sin sysexit, D4 socket no-sysexit. D5 hash table O(1) get_tracee: implementada con `tracee_hash_update()` para PID change en cli.c. D6 (binding cache) y D7 (canonicalize cache) SKIP — riesgo supera ganancia. |
 | E — Resto P2/P3 | **Completada** ✅ | `89e2598828` (REV 24), REV 27 | E1 renameat2 no-sysexit, E3 uname conditional, E6 mknod phantom fix. E5 pidfd_open → ISOLATE_PROC. E7 lazy maps_fd detection. E4 doc -q host-rootfs. E2 registry fd cache. E8 fake_netlink fast-path. |
 
+## F — Vista `/proc` guest estricta (REV 30)
+
+La implementación actual amplía `ISOLATE_PROC` a una vista procfs coherente y
+aislada por tracee. El listado de `/proc` usa una whitelist y solo conserva
+PIDs vivos de la instancia, `self`, `thread-self` y archivos explícitamente
+soportados. Los archivos globales y por proceso se generan con formato Linux
+compatible, incluyendo `status`, `stat`, `limits`, `maps`, `mountinfo`,
+`attr/current`, `io`, `sched`, `pagemap`, `fdinfo` y enlaces `exe`/`cwd`.
+
+El estado se conserva por FD para aperturas normales y relativas (`openat`),
+lecturas parciales, `dup`, `dup3`, `fcntl`, `pread` y `close`. Se cubren rutas
+no canónicas y `/proc/self`/`/proc/thread-self`. `maps` y los enlaces se
+sanitizan para no revelar rutas Android, dispositivos, inodos o direcciones
+host. `mountinfo` se genera desde la vista guest y no desde la tabla de
+montajes host. Sin `ISOLATE_PROC`, estas transformaciones no se activan.
+
+La revisión 30 también elimina de `maps` las líneas del loader temporal
+`<PROOT_TMP_DIR>/prooted-<pid>-XXXXXX`, cuyo nombre podía revelar el PID del
+tracer aunque el acceso a ese PID ya estuviera bloqueado.
+
+La semántica de rutas depende del entorno: con `--termux-paths`,
+`/data/data/com.termux/...` es guest y debe conservarse; con rootfs, las rutas
+guest esperadas son `/usr`, `/home` y similares, sin rutas Android del host.
+
+Verificación local realizada:
+
+- `./scripts/build-native.sh -i` (flujo oficial de compilación e instalación).
+- `./termux-isolated --termux-paths`: rutas Termux, PID host oculto, listado y
+  `mountinfo` sintéticos.
+- `./termux-isolated --`: rootfs con rutas `/usr`/`/home`, sin rutas host en
+  `maps`, PID host oculto y `mountinfo` sintético.
+- `./termux-isolated --termux-paths --no-proc-isolated`: opt-out explícito que
+  conserva la vista procfs anterior, incluyendo datos host, para confirmar la
+  compatibilidad. `./termux-isolated` sin esa opción usa la vista estricta.
+- `bash pentest/test_phase_c.sh`: **6/6 PASS**.
+
 Documento de referencia INMUTABLE durante la implementación. Resultado de 3 auditorías profundas (rendimiento, leaks/fds, aislamiento). Cada fix especifica archivo:línea, cambio concreto, riesgo y verificación. No re-abrir ítems marcados en §0.
 
 ## 0. Estado actual (lo ya arreglado — NO re-abrir)
@@ -20,7 +56,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | Leak talloc en shutdown supervise (`free_terminated_tracees`, FU-1..FU-4, `supervise_handle_exited_tracee`, guard `ctl_fd>=0`) | ✅ fixes 5ad187e929 + 414053fc04 |
 | **FASE A COMPLETADA — A2 stat/readlink oracle + C1 kill(-1) broadcast + V4 netlink topology** | ✅ commit `573f4cb8d9` 'fix(isolation): block /proc host stat/readlink oracle, kill(-1) broadcast, netlink topology' (REVISION 19) — pentest ampliado con baselines `*_2` y verificaciones `*_3` |
 | **FASE A COMPLETADA — cierre de los 4 MINORs + hardening señales** | ✅ commit `3b98197d8a` 'fix(isolation): deliver kill broadcasts to guest tracees, block statx on SIGSYS, harden signal validation' (REVISION 20) — kill(-1) entrega real a tracees; statx cubierto en SIGSYS legacy; pentest EMULADO-OK; buffers PATH_MAX; extra kill(0)/kill(-pgid) confinados al guest (ESRCH pgid vacío, EINVAL señal inválida) |
-|| REVISION actual en `packages/proot/build.sh` | **27** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/` |
+|| REVISION actual en `packages/proot/build.sh` | **30** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/` |
 
 ## 1. Resumen ejecutivo de las 3 auditorías
 
@@ -139,7 +175,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 ## 10. Checklist de commit (reglas AGENTS.md)
 
 1. Editar código (`proot-source/src/` o `packages/proot/`).
-2. **Bump `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES del commit** (actual: 20; → 21 al cerrar Fase B).
+2. **Bump `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES del commit**. La revisión actual es 30; las referencias a revisiones anteriores en las fases históricas son deliberadas.
 3. `git add -A && git commit -m "<type>(<scope>): <summary>"`.
 4. `git push origin master` (SOLO `origin`).
 5. `gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Success)'` — exit 0=éxito, 1=falló, 2=cancelado. **NO timeout, NO streaming.**

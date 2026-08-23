@@ -47,6 +47,8 @@ static uint32_t g_instance_token;
 static int      g_listener_fds[VNP_EXPOSE_MAX];
 static uint16_t g_listener_vports[VNP_EXPOSE_MAX]; /* virtual_port for each listener */
 static uint16_t g_listener_hports[VNP_EXPOSE_MAX]; /* host_port for each listener */
+static uint16_t g_listener_families[VNP_EXPOSE_MAX];
+static uint8_t  g_listener_addresses[VNP_EXPOSE_MAX][16];
 static int      g_num_listeners = 0;
 
 /* B6: bridge children (forked in accept_and_fork) are tracked here so
@@ -168,13 +170,16 @@ static void bridge_fds(int client_fd, int unix_fd)
  * Create TCP listener
  * ================================================================ */
 
-static int create_tcp_listener(uint16_t host_port)
+static int create_tcp_listener(uint16_t host_port, uint16_t host_family,
+			       const uint8_t *host_address)
 {
 	int tcp_fd;
-	struct sockaddr_in tcp_addr;
+	struct sockaddr_storage tcp_addr;
 	int optval = 1;
+	socklen_t addrlen;
+	int family = host_family == AF_INET6 ? AF_INET6 : AF_INET;
 
-	tcp_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	tcp_fd = socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (tcp_fd < 0)
 		return -errno;
 
@@ -186,11 +191,24 @@ static int create_tcp_listener(uint16_t host_port)
 	}
 
 	memset(&tcp_addr, 0, sizeof(tcp_addr));
-	tcp_addr.sin_family = AF_INET;
-	tcp_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	tcp_addr.sin_port = htons(host_port);
+	if (family == AF_INET6) {
+		struct sockaddr_in6 *addr = (struct sockaddr_in6 *)&tcp_addr;
+		addr->sin6_family = AF_INET6;
+		memcpy(&addr->sin6_addr, host_address, 16);
+		addr->sin6_port = htons(host_port);
+		addrlen = sizeof(*addr);
+	} else {
+		struct sockaddr_in *addr = (struct sockaddr_in *)&tcp_addr;
+		addr->sin_family = AF_INET;
+		if (host_address != NULL)
+			memcpy(&addr->sin_addr, host_address, 4);
+		else
+			addr->sin_addr.s_addr = htonl(INADDR_ANY);
+		addr->sin_port = htons(host_port);
+		addrlen = sizeof(*addr);
+	}
 
-	if (bind(tcp_fd, (struct sockaddr *)&tcp_addr, sizeof(tcp_addr)) < 0) {
+	if (bind(tcp_fd, (struct sockaddr *)&tcp_addr, addrlen) < 0) {
 		int saved = errno;
 		close(tcp_fd);
 		return -saved;
@@ -278,7 +296,8 @@ static void accept_and_fork(int listener_idx)
  * Handle EXPOSE: create TCP listener, add to poll set
  * ================================================================ */
 
-static void helper_handle_expose(uint16_t host_port, uint16_t virtual_port)
+static void helper_handle_expose(uint16_t host_port, uint16_t virtual_port,
+				 uint16_t host_family, const uint8_t *host_address)
 {
 	int tcp_fd;
 
@@ -287,7 +306,7 @@ static void helper_handle_expose(uint16_t host_port, uint16_t virtual_port)
 		return;
 	}
 
-	tcp_fd = create_tcp_listener(host_port);
+	tcp_fd = create_tcp_listener(host_port, host_family, host_address);
 	if (tcp_fd < 0) {
 		helper_send_response(tcp_fd, host_port);
 		return;
@@ -296,6 +315,8 @@ static void helper_handle_expose(uint16_t host_port, uint16_t virtual_port)
 	g_listener_fds[g_num_listeners] = tcp_fd;
 	g_listener_vports[g_num_listeners] = virtual_port;
 	g_listener_hports[g_num_listeners] = host_port;
+	g_listener_families[g_num_listeners] = host_family;
+	memcpy(g_listener_addresses[g_num_listeners], host_address, 16);
 	g_num_listeners++;
 
 	helper_send_response(0, host_port);
@@ -315,6 +336,9 @@ static void helper_handle_unexpose(uint16_t host_port)
 			g_listener_fds[i] = g_listener_fds[g_num_listeners - 1];
 			g_listener_vports[i] = g_listener_vports[g_num_listeners - 1];
 			g_listener_hports[i] = g_listener_hports[g_num_listeners - 1];
+			g_listener_families[i] = g_listener_families[g_num_listeners - 1];
+			memcpy(g_listener_addresses[i],
+			       g_listener_addresses[g_num_listeners - 1], 16);
 			g_num_listeners--;
 			helper_send_response(0, host_port);
 			return;
@@ -400,7 +424,8 @@ int vnp_helper_main(int argc, char *argv[])
 
 				switch (req.opcode) {
 				case VNP_EXPOSE:
-					helper_handle_expose(req.host_port, req.virtual_port);
+					helper_handle_expose(req.host_port, req.virtual_port,
+						     req.host_family, req.host_address);
 					break;
 				case VNP_UNEXPOSE:
 					helper_handle_unexpose(req.host_port);

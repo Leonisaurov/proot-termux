@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker + CI GitHub Actions). La fuente vive en `proot-source/` — sin parches, sin downloads. Rama `master`. Security hardening: fases A-E completadas (ver FIXES.md).
+Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker + CI GitHub Actions). La fuente vive en `proot-source/` — sin parches, sin downloads. Rama `master`. Security hardening: fases A-F completadas (ver FIXES.md).
 
 ## Build & CI
 
@@ -21,6 +21,18 @@ Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker +
 ```
 
 Output local: `$PREFIX/bin/proot`, loaders en `$PREFIX/libexec/proot/{loader,loader32}`, script `$PREFIX/bin/termux-chroot`, paquete `proot-<ver>-<rev>-aarch64.pkg.tar.xz` en la raíz. Dependencias: `libandroid-shmem`, `libtalloc` (se construyen solas con `-I`).
+
+Para compilar e instalar localmente se debe usar el flujo oficial, sin
+reemplazar manualmente `$PREFIX/bin/proot`:
+
+```bash
+./scripts/build-native.sh -i
+```
+
+Las pruebas del modo aislado se ejecutan mediante `./termux-isolated`. Con
+`--termux-paths`, las rutas `/data/data/com.termux/...` son rutas guest
+intencionales; sin esa opción, un rootfs debe mostrar sus rutas guest (`/usr`,
+`/home`, etc.) y no rutas Android del host.
 
 ### Workflows GitHub Actions
 
@@ -43,7 +55,7 @@ gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Succ
 
 | Fuente | VERSION | REVISION |
 |--------|---------|----------|
-| `packages/proot/build.sh` | `5.1.107.89` | `27` |
+| `packages/proot/build.sh` | `5.1.107.89` | `30` |
 | `scripts/build-native.sh` | `5.1.107.87` | `16` |
 
 Discrepancia verificada entre ambos. NO asumas cuál es canónica ni la sincronices unilateralmente; usa la del archivo que edites.
@@ -52,7 +64,7 @@ Discrepancia verificada entre ambos. NO asumas cuál es canónica ni la sincroni
 
 ### ⚠️ SIEMPRE bump TERMUX_PKG_REVISION antes de commit
 
-Cada vez que toques `proot-source/src/` o `packages/proot/`, incrementa `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES de commit. Sin esto el CI no se dispara bien y los usuarios no reciben la actualización. Es el error más común. REVISION actual: **27**.
+Cada vez que toques `proot-source/src/` o `packages/proot/`, incrementa `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES de commit. Sin esto el CI no se dispara bien y los usuarios no reciben la actualización. Es el error más común. REVISION actual: **30**.
 
 ### Orden de commit (secuencial, no omitir pasos)
 
@@ -78,7 +90,7 @@ Convención: `<type>(<scope>): <summary>` — types: `fix`, `enhance`, `chore`, 
 - `gita` es la herramienta de monitoreo CI (ver Monitoreo CI); no uses `timeout` con ella.
 - **proot necesita `env -i`** para ejecutar binarios en rootfs Alpine — el entorno heredado causa fallos en execve. Siempre limpiar env al invocar proot directamente.
 
-## Security Hardening (Fases A-E)
+## Security Hardening (Fases A-F)
 
 Resumen en `FIXES.md`. Commits por fase:
 
@@ -89,6 +101,7 @@ Resumen en `FIXES.md`. Commits por fase:
 | C — Aislamiento P1 | ✅ | `6d3a556007`, `e141f86c56` | 22 |
 | D — Rendimiento | ✅ | `e30bdb5b43`, D5 hash | 25 |
 | E — Resto | ✅ | `89e2598828`, E2-E8 | 27 |
+| F — Vista `/proc` guest estricta | ✅ | implementación actual | 30 |
 
 ### Nuevos CLI flags (Fase C)
 
@@ -154,7 +167,30 @@ Red virtual con **Abstract Unix Domain Sockets** (sin TCP/IP real): `socket(AF_I
 
 ### proc_isolation (extensión `hpc_callback`)
 
-Filtra /proc (solo pids propios vía getdents, cpuinfo/meminfo/mountinfo/environ/version/uptime/stat/loadavg/kallsyms/slabinfo/zoneinfo/iomem/interrupts/modules/cmdline/misc→ENOENT, maps guest-pure con paths host→guest), ptrace/process_vm_readv/writev/kill a PIDs host→ESRCH, `pidfd_open` a PIDs host→ESRCH (ISOLATE_PROC), `socket(AF_NETLINK)`→AF_UNIX fake, unshare(CLONE_NEWNS)/mount→0 emulados. Lazy maps_fd detection en read handler.
+`--proc-isolated` proporciona una vista guest estricta de procfs, no solo un
+filtro de nombres:
+
+- `/proc` conserva únicamente `self`, `thread-self`, archivos globales
+  soportados y PIDs de tracees vivos; también cubre `getdents{,64}`, `dup`,
+  `fcntl`, `fdopendir`, lecturas parciales y aperturas relativas con `dirfd`.
+- Los archivos globales y por proceso soportados se sintetizan con formato
+  Linux válido. `stat`, `meminfo`, `uptime`, `mountinfo`, `status`, `limits`,
+  `maps`, `attr/current`, `io`, `sched`, `pagemap`, `fdinfo` y similares no
+  copian estadísticas ni topología del procfs host.
+- `maps`, `exe`, `cwd` y enlaces `/proc/*` se sanitizan y conservan la vista
+  guest. En modo `--termux-paths`, las rutas Termux son guest válidas; con un
+  rootfs, se conservan sus rutas (`/usr`, `/home`) y se ocultan rutas Android
+  o externas al rootfs.
+- `/proc/net`, `/proc/sys`, `/proc/kcore`, `/proc/keys`, `/proc/kmsg` y
+  equivalentes sensibles no aparecen en el listado. PIDs que no pertenecen a
+  la instancia devuelven `ENOENT`/`ESRCH` según la operación.
+- El estado sintético por FD se mantiene entre `openat`, `read`, `pread`,
+  `dup`, `fcntl` y `close`; se limpia al cerrar, hacer `execve` o terminar el
+  tracee.
+
+La extensión también confina `ptrace`, `process_vm_readv/writev`, `kill` y
+`pidfd_open` hacia PIDs host (`ESRCH`), emula la red netlink aislada y conserva
+early-returns cuando `ISOLATE_PROC` está desactivado.
 
 ### Filosofía: Emulate, Never Deny
 

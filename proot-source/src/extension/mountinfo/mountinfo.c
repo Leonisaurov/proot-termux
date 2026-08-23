@@ -1,4 +1,5 @@
 #include "extension/extension.h"
+#include "extension/proc_isolation/proc_isolation.h"
 #include "path/path.h"           /* translate_path,  */
 #include "path/binding.h"        /* Binding, bindings */
 #include "path/temp.h"           /* create_temp_file,  */
@@ -192,9 +193,14 @@ int mountinfo_callback(Extension *extension, ExtensionEvent event,
         intptr_t data1 UNUSED, intptr_t data2 UNUSED)
 {
     switch (event) {
-    case TRANSLATED_PATH:
+	case TRANSLATED_PATH:
 	{
 		Tracee *tracee = TRACEE(extension);
+		/* With strict proc isolation, mountinfo is synthesized by the
+		 * proc view.  The legacy callback reads the host mount table and
+		 * would otherwise undo that isolation by redirecting the open. */
+		if (proc_isolation_is_active(tracee))
+			return 0;
 		Sysnum num = get_sysnum(tracee, ORIGINAL);
 		if (num == PR_open || num == PR_openat) {
 			mountinfo_check_open_path(tracee, (char*) data1);

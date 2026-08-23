@@ -261,6 +261,8 @@ Tracee *new_dummy_tracee(TALLOC_CTX *context)
 	tracee->heap = talloc_zero(tracee, Heap);
 	tracee->auxv_fd = -1;
 	tracee->maps_fd = -1;
+	tracee->proc_synth_count = 0;
+	tracee->proc_synth_pending_kind = 0;
 	tracee->supervise = false;
 	tracee->exec_target = 0;
 	tracee->cwd_explicit = false;
@@ -535,6 +537,14 @@ int new_child(Tracee *parent, word_t clone_flags)
 	child->execfn_addr = parent->execfn_addr;
 	child->auxv_fd = parent->auxv_fd;
 	child->maps_fd = parent->maps_fd;
+	child->proc_synth_count = parent->proc_synth_count;
+	memcpy(child->proc_synth_fds, parent->proc_synth_fds,
+	       sizeof(child->proc_synth_fds));
+	memcpy(child->proc_synth_kinds, parent->proc_synth_kinds,
+	       sizeof(child->proc_synth_kinds));
+	memcpy(child->proc_synth_offsets, parent->proc_synth_offsets,
+	       sizeof(child->proc_synth_offsets));
+	child->proc_synth_pending_kind = parent->proc_synth_pending_kind;
 	child->no_new_privs = parent->no_new_privs;
 	child->seen_execve = parent->seen_execve;
 #ifdef HAS_POKEDATA_WORKAROUND

@@ -2,6 +2,14 @@
 #define VIRTUAL_NET_H
 
 #include "extension/extension.h"
+#include <sys/socket.h>
+
+typedef enum {
+	VNP_NET_CLASS_UNKNOWN = 0,
+	VNP_NET_CLASS_VIRTUAL = 1,
+	VNP_NET_CLASS_EXTERNAL = 2,
+	VNP_NET_CLASS_BRIDGE = 3,
+} VnpNetworkClass;
 
 /**
  * Virtual network extension callback.
@@ -22,7 +30,8 @@ extern int vnp_callback(Extension *extension, ExtensionEvent event,
  * @param virtual_port Virtual port to bridge to
  * @return 0 success, -1 error
  */
-extern int vnp_add_expose(Tracee *tracee, uint16_t host_port, uint16_t virtual_port);
+extern int vnp_add_expose(Tracee *tracee, uint16_t host_port, uint16_t virtual_port,
+			  const struct sockaddr_storage *host_addr);
 
 /**
  * Configure virtual network with the given proxy name.
@@ -32,5 +41,14 @@ extern int vnp_add_expose(Tracee *tracee, uint16_t host_port, uint16_t virtual_p
  * @return 0 success, -1 error
  */
 extern int vnp_configure(Tracee *tracee, const char *proxy_name);
+
+/* Classify an already decoded guest destination.  This is deliberately a
+ * read-only query: it consults only the active instance's fd/expose state and
+ * the registry cache populated by a real virtual-net operation.  It must not
+ * create directories, open the registry, or take a lock. */
+extern VnpNetworkClass vnp_classify_destination(Tracee *tracee,
+						const struct sockaddr_storage *addr,
+						uint16_t port,
+						char *proxy, size_t proxy_size);
 
 #endif /* VIRTUAL_NET_H */

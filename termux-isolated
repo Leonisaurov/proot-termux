@@ -14,6 +14,9 @@ uso: termux-isolated [opciones] [comando...]
   sin argumentos   shell interactivo (bash -l) aislado
   --with-sys       bind /sys:/sys (opcional)
   --with-storage   bind /storage:/storage (opcional; sin él, ~/storage queda oculto)
+  --no-proc-isolated
+                   Desactiva el aislamiento de /proc
+  --               Fin de opciones; todo lo siguiente se ejecuta como comando
   --as-root        --change-id=0:0 (simula root)
   --rw-dir <path>  Solo <path> es escribible; el resto del sandbox es de solo lectura (apt/pkg no funcionan en este modo)
   --termux-paths  Usa los paths reales de Termux (/data/data/com.termux/files/...) en vez de la jerarquía Linux (/usr, /home); misma seguridad extra
@@ -22,6 +25,7 @@ uso: termux-isolated [opciones] [comando...]
 Ejemplos:
   termux-isolated
   termux-isolated curl -s https://example.com
+  termux-isolated -- sh -c 'echo "--as-root es un argumento del comando"'
   termux-isolated --as-root apt update
 EOF
     exit 0
@@ -35,12 +39,30 @@ TERMUX_PATHS=0
 AS_USER=""
 AS_ROOT=0
 WITH_STORAGE=0
+PROC_ISOLATED=1
+COMMAND_MODE=0
 arg_count=0
 while [ "$#" -gt 0 ]; do
     arg="$1"
+
+    # Desde aquí todos los argumentos pertenecen literalmente al comando,
+    # aunque coincidan con opciones de este wrapper.
+    if [ "$COMMAND_MODE" = "1" ]; then
+        if [ "$arg_count" -eq 0 ]; then
+            cmd="$arg"
+        else
+            cmd+=" $(printf '%q' "$arg")"
+        fi
+        arg_count=$((arg_count + 1))
+        shift
+        continue
+    fi
+
     case "$arg" in
+        --)             COMMAND_MODE=1; shift ;;
         --with-sys)     extra="$extra --bind=/sys:/sys"; shift ;;
         --with-storage) WITH_STORAGE=1; extra="$extra --bind=/storage:/storage"; shift ;;
+        --no-proc-isolated) PROC_ISOLATED=0; shift ;;
         --as-root)      AS_ROOT=1; extra="$extra --change-id=0:0"; shift ;;
         --termux-paths) TERMUX_PATHS=1; shift ;;
         --as=*)
@@ -306,6 +328,11 @@ if [ -n "$AS_USER" ]; then
 fi
 
 # Ejecuta proot con aislamiento (9 flags) y binds del runtime de Termux
+proc_isolated_arg=""
+if [ "$PROC_ISOLATED" = "1" ]; then
+    proc_isolated_arg="--proc-isolated"
+fi
+
 exec env \
   -i \
   HOME=$sandbox_home \
@@ -323,7 +350,7 @@ exec env \
   "$TERMUX_PREFIX/bin/proot" \
   --kill-on-exit \
   -L \
-  --proc-isolated \
+  $proc_isolated_arg \
   --ptrace-isolated \
   --bpf-isolated \
   --perf-isolated \
