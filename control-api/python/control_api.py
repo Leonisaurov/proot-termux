@@ -164,7 +164,14 @@ class ControlChannel:
 
 @dataclass
 class ProotConfig:
-    proot_path='proot'; args:tuple=(); guest_command:tuple=(); env=None; cwd=None; timeout=1.0; keep_stdin=True; grace_period=0.5
+    proot_path: str = 'proot'
+    args: tuple[str, ...] = ()
+    guest_command: tuple[str, ...] = ()
+    env: dict[str, str] | None = None
+    cwd: str | None = None
+    timeout: float = 1.0
+    keep_stdin: bool = True
+    grace_period: float = 0.5
 class ProotProcess:
     def __init__(self,process,channel,stdout,stderr,config): self.process,self.channel,self.stdout,self.stderr,self.config=process,channel,stdout,stderr,config
     @classmethod

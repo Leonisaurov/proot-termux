@@ -24,14 +24,18 @@ and validate `HELLO` before returning a ready process. Do not put
 the launcher waits its grace period and then terminates/kills a still-running
 proot.
 
-Python:
+Python (the launcher fills in `--control-fd` and validates `HELLO` before
+returning):
 
 ```python
-from control_api import ProotConfig, ProotProcess, PathRequest
-c = ProotConfig(args=("-r", "/rootfs"), guest_command=("/bin/sh", "-c", "echo ok"))
+from control_api import Decision, NetRequest, PathRequest, ProotConfig, ProotProcess
+c = ProotConfig(
+    args=("-r", "/rootfs"),
+    guest_command=("/bin/sh", "-c", "echo ok"),
+)
 p = ProotProcess.spawn(c)
-p.channel.serve(lambda r: p.channel.allow_once(r.request_id, "approved")
-                if isinstance(r, PathRequest) else None)
+p.channel.serve(lambda r: (Decision.ALLOW, "approved")
+                if isinstance(r, (NetRequest, PathRequest)) else None)
 p.close()
 ```
 
