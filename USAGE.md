@@ -443,12 +443,18 @@ proot --proxy demo --net-policy deny --net-allow-bind 8080 \
   --port 127.0.0.1:8080 /bin/sh
 ```
 
-Los destinos aceptan IPv4, IPv6 entre corchetes, CIDR y un puerto opcional
-(`203.0.113.0/24`, `[::1]:8080`, `127.0.0.1:8080`). `--net-policy off` es
-la ruta compatible sin mediación. Esta primera versión media `bind`,
-`listen`, `connect`, `sendto` y `recvfrom` antes de las traducciones de
-`--proxy` o `-p`; la
-resolución de dominios observada queda para una fase posterior. `--net-ask FD`
+Los destinos aceptan IPv4, IPv6 entre corchetes, CIDR, dominios y un puerto
+opcional (`203.0.113.0/24`, `[::1]:8080`, `127.0.0.1:8080`,
+`google.com:443`). Los dominios se validan y resuelven con el resolver del
+tracer, antes de iniciar el guest; todas sus respuestas A y AAAA se guardan
+como IPs fijas durante toda la sesión. El DNS, `/etc/hosts` y cualquier otra
+respuesta del guest no puede ampliar ese conjunto. Si el host no puede
+resolver el dominio, el arranque falla de forma fail-closed. Un punto final
+(`example.com.`) es aceptado. `--net-policy off` no resuelve dominios y sigue
+siendo la ruta compatible sin mediación. La mediación cubre `bind`, `listen`,
+`connect`, `sendto` y `recvfrom` antes de las traducciones de `--proxy` o `-p`;
+la autorización en tiempo de conexión es únicamente por IP fijada.
+`--net-ask FD`
 permite un harness externo fail-closed: usa mensajes nativos de tamaño fijo,
 versión 1, request ID y timeout de 1000 ms; una respuesta incompleta, inválida,
 EOF o timeout deniega la operación.

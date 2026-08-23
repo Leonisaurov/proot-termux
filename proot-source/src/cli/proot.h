@@ -395,16 +395,18 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
                 { .name = "--net-allow", .separator = ' ', .value = "destination" },
                 { .name = NULL, .separator = '\0', .value = NULL } },
           .handler = handle_option_net_allow,
-          .description = "Allow a destination (IP, CIDR, or IP:port).",
-          .detail = "",
+          .description = "Allow a destination (IP, CIDR, domain, or domain:port).",
+          .detail = "\tDomains are resolved by the tracer before the guest starts; all A/AAAA\n\
+\taddresses are fixed for the whole session and the guest DNS is not trusted.",
         },
         { .class = "Network policy options",
           .arguments = {
                 { .name = "--net-deny", .separator = ' ', .value = "destination" },
                 { .name = NULL, .separator = '\0', .value = NULL } },
           .handler = handle_option_net_deny,
-          .description = "Deny a destination (deny rules have priority).",
-          .detail = "",
+          .description = "Deny a destination (IP, CIDR, domain, or domain:port).",
+          .detail = "\tDomains are resolved by the tracer before the guest starts; all A/AAAA\n\
+\taddresses are fixed for the whole session and deny rules have priority.",
         },
         { .class = "Network policy options",
           .arguments = {

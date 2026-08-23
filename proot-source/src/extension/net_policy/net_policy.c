@@ -14,6 +14,7 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/socket.h>
+#include <netdb.h>
 
 #include "attribute.h"
 #include "cli/note.h"
@@ -72,6 +73,11 @@ typedef struct __attribute__((packed)) {
 
 typedef struct {
 	char *value;
+	/* Domain rules are configuration records only.  They never participate in
+	 * destination_matches(); resolve_pending_domains() appends their fixed
+	 * numeric rules to the same list. */
+	int is_domain;
+	int resolved;
 } NetPolicyRule;
 
 typedef struct {
@@ -367,7 +373,215 @@ static int add_rule(Tracee *tracee, NetPolicyRule *rules, unsigned int *count,
 	rules[*count].value = talloc_strdup(tracee, value);
 	if (rules[*count].value == NULL)
 		return -ENOMEM;
+	rules[*count].is_domain = 0;
+	rules[*count].resolved = 0;
 	(*count)++;
+	return 0;
+}
+
+/* Return the host portion and its offsets in a destination rule.  The
+ * offsets let the resolver retain protocol and port qualifiers when it
+ * replaces a hostname with an address. */
+static int destination_host(const char *rule, const char **host, size_t *host_len,
+				    size_t *prefix_len, size_t *suffix_offset)
+{
+	const char *scheme = strstr(rule, "://");
+	const char *start = scheme == NULL ? rule : scheme + 3;
+	const char *end = NULL;
+	const char *colon;
+
+	*prefix_len = (size_t)(start - rule);
+	if (*start == '[') {
+		end = strchr(start + 1, ']');
+		if (end == NULL || (end[1] != '\0' && end[1] != ':'))
+			return -EINVAL;
+		*host = start + 1;
+		*host_len = (size_t)(end - start - 1);
+		*suffix_offset = (size_t)(end - rule + 1);
+		return 0;
+	}
+	colon = strrchr(start, ':');
+	if (colon != NULL && strchr(start, ':') == colon) {
+		end = colon;
+		*suffix_offset = (size_t)(colon - rule);
+	} else {
+		end = rule + strlen(rule);
+		*suffix_offset = (size_t)(end - rule);
+	}
+	*host = start;
+	*host_len = (size_t)(end - start);
+	return *host_len == 0 ? -EINVAL : 0;
+}
+
+static int valid_domain(const char *host, size_t length)
+{
+	size_t i, label_start = 0, label_length;
+	if (length == 0 || length > 253)
+		return 0;
+	/* A final dot is the canonical absolute-DNS spelling. */
+	if (host[length - 1] == '.')
+		length--;
+	if (length == 0)
+		return 0;
+	for (i = 0; i <= length; i++) {
+		if (i != length && host[i] != '.') {
+			if (!(host[i] == '-' || host[i] == '_' ||
+			      (host[i] >= 'a' && host[i] <= 'z') ||
+			      (host[i] >= 'A' && host[i] <= 'Z') ||
+			      (host[i] >= '0' && host[i] <= '9')))
+				return 0;
+			continue;
+		}
+		label_length = i - label_start;
+		if (label_length == 0 || label_length > 63 ||
+		    host[label_start] == '-' || host[i - 1] == '-')
+			return 0;
+		label_start = i + 1;
+	}
+	return 1;
+}
+
+static int host_is_numeric(const char *host, size_t host_len)
+{
+	char copy[NET_POLICY_RULE_LEN];
+	char *slash;
+	struct in_addr v4;
+	struct in6_addr v6;
+	if (host_len == 0 || host_len >= sizeof(copy))
+		return 0;
+	memcpy(copy, host, host_len);
+	copy[host_len] = '\0';
+	slash = strchr(copy, '/');
+	if (slash != NULL)
+		*slash = '\0';
+	return inet_pton(AF_INET, copy, &v4) == 1 ||
+	       inet_pton(AF_INET6, copy, &v6) == 1;
+}
+
+static int add_fixed_rule(Tracee *tracee, NetPolicyRule *rules, unsigned int *count,
+				  const char *original, const char *ip)
+{
+	const char *host;
+	size_t host_len, prefix_len, suffix_offset;
+	char fixed[NET_POLICY_RULE_LEN];
+	int n;
+	if (destination_host(original, &host, &host_len, &prefix_len, &suffix_offset) < 0)
+		return -EINVAL;
+	(void)host;
+	(void)host_len;
+	if (original[0] == '[' || strchr(ip, ':') != NULL)
+		n = snprintf(fixed, sizeof(fixed), "%.*s[%s]%s", (int)prefix_len,
+			     original, ip, original + suffix_offset);
+	else
+		n = snprintf(fixed, sizeof(fixed), "%.*s%s%s", (int)prefix_len,
+			     original, ip, original + suffix_offset);
+	if (n < 0 || (size_t)n >= sizeof(fixed) || *count >= NET_POLICY_MAX_RULES)
+		return -E2BIG;
+	if (add_rule(tracee, rules, count, fixed) < 0)
+		return -ENOMEM;
+	return 0;
+}
+
+static int resolve_rule(Tracee *tracee, NetPolicyRule *rules, unsigned int *count,
+				NetPolicyRule *domain_rule)
+{
+	const char *host;
+	size_t host_len, prefix_len, suffix_offset;
+	char hostname[NET_POLICY_RULE_LEN];
+	struct addrinfo hints, *answers, *it;
+	char ip[INET6_ADDRSTRLEN];
+	unsigned int answers_found = 0, added = 0;
+	int gai_error;
+
+	if (!domain_rule->is_domain || domain_rule->resolved)
+		return 0;
+	if (destination_host(domain_rule->value, &host, &host_len, &prefix_len,
+				     &suffix_offset) < 0 || host_len >= sizeof(hostname))
+		return -EINVAL;
+	(void)prefix_len;
+	(void)suffix_offset;
+	memcpy(hostname, host, host_len);
+	if (host_len != 0 && hostname[host_len - 1] == '.')
+		host_len--;
+	if (host_len == 0) {
+		note(tracee, ERROR, USER, "invalid network domain '%s'", domain_rule->value);
+		return -1;
+	}
+	hostname[host_len] = '\0';
+	if (!valid_domain(hostname, host_len))
+		return -EINVAL;
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	/* Do not use AI_ADDRCONFIG: the snapshot must include every A and AAAA
+	 * answer, even when the tracer's current interfaces lack one family. */
+	hints.ai_flags = 0;
+	gai_error = getaddrinfo(hostname, NULL, &hints, &answers);
+	if (gai_error != 0) {
+		note(tracee, ERROR, USER, "cannot resolve network domain '%s': %s",
+		     hostname, gai_strerror(gai_error));
+		return -1;
+	}
+	for (it = answers; it != NULL; it = it->ai_next) {
+		const void *address;
+		if (it->ai_family == AF_INET)
+			address = &((const struct sockaddr_in *)it->ai_addr)->sin_addr;
+		else if (it->ai_family == AF_INET6)
+			address = &((const struct sockaddr_in6 *)it->ai_addr)->sin6_addr;
+		else
+			continue;
+		if (inet_ntop(it->ai_family, address, ip, sizeof(ip)) == NULL)
+			continue;
+		answers_found++;
+		/* getaddrinfo may return the same address through several aliases. */
+		{
+			char candidate[NET_POLICY_RULE_LEN];
+			unsigned int j;
+			const char *candidate_host;
+			size_t candidate_len, candidate_prefix, candidate_suffix;
+			if (destination_host(domain_rule->value, &candidate_host, &candidate_len,
+					    &candidate_prefix, &candidate_suffix) < 0)
+				continue;
+			(void)candidate_host;
+			(void)candidate_len;
+			if (domain_rule->value[0] == '[' || strchr(ip, ':') != NULL)
+				snprintf(candidate, sizeof(candidate), "%.*s[%s]%s", (int)candidate_prefix,
+					 domain_rule->value, ip, domain_rule->value + candidate_suffix);
+			else
+				snprintf(candidate, sizeof(candidate), "%.*s%s%s", (int)candidate_prefix,
+					 domain_rule->value, ip, domain_rule->value + candidate_suffix);
+			for (j = 0; j < *count; j++)
+				if (!rules[j].is_domain && strcmp(rules[j].value, candidate) == 0)
+					break;
+			if (j != *count)
+				continue;
+			if (add_fixed_rule(tracee, rules, count, domain_rule->value, ip) < 0) {
+				freeaddrinfo(answers);
+				return -1;
+			}
+			added++;
+			VERBOSE(tracee, 1, "net_policy: fixed domain %s -> %s",
+				hostname, ip);
+		}
+	}
+	freeaddrinfo(answers);
+	if (answers_found == 0) {
+		note(tracee, ERROR, USER, "network domain '%s' has no A or AAAA answers", hostname);
+		return -1;
+	}
+	domain_rule->resolved = 1;
+	VERBOSE(tracee, 1, "net_policy: fixed domain %s (%u A/AAAA answers, %u new rules)",
+			hostname, answers_found, added);
+	return 0;
+}
+
+static int resolve_pending_domains(Tracee *tracee, NetPolicyRule *rules,
+					 unsigned int *count)
+{
+	unsigned int i, original_count = *count;
+	for (i = 0; i < original_count; i++)
+		if (resolve_rule(tracee, rules, count, &rules[i]) < 0)
+			return -1;
 	return 0;
 }
 
@@ -532,7 +746,7 @@ static int any_rule_matches(NetPolicyRule *rules, unsigned int count,
 {
 	unsigned int i;
 	for (i = 0; i < count; i++)
-		if (destination_matches(rules[i].value, addr, port, net_class))
+		if (!rules[i].is_domain && destination_matches(rules[i].value, addr, port, net_class))
 			return 1;
 	return 0;
 }
@@ -811,19 +1025,46 @@ int net_policy_configure(Tracee *tracee, const char *mode)
 		return -1;
 	config = policy_config(tracee);
 	config->mode = parsed;
+	if (parsed != NET_POLICY_OFF &&
+	    (resolve_pending_domains(tracee, config->allow, &config->allow_count) < 0 ||
+	     resolve_pending_domains(tracee, config->deny, &config->deny_count) < 0))
+		return -1;
 	return 0;
 }
 
 int net_policy_add_destination(Tracee *tracee, const char *value, int deny)
 {
 	NetPolicyConfig *config;
+	NetPolicyRule *rules;
+	unsigned int *count;
+	const char *host;
+	size_t host_len, prefix_len, suffix_offset;
 	if (ensure_extension(tracee) < 0)
 		return -1;
 	config = policy_config(tracee);
-	if (add_rule(tracee, deny ? config->deny : config->allow,
-			 deny ? &config->deny_count : &config->allow_count, value) < 0) {
+	rules = deny ? config->deny : config->allow;
+	count = deny ? &config->deny_count : &config->allow_count;
+	if (destination_host(value, &host, &host_len, &prefix_len, &suffix_offset) < 0 ||
+	    add_rule(tracee, rules, count, value) < 0) {
 		note(tracee, ERROR, USER, "invalid network destination rule '%s'", value);
 		return -1;
+	}
+	(void)prefix_len;
+	(void)suffix_offset;
+	if (!host_is_numeric(host, host_len) && !(host_len == 1 && host[0] == '*')) {
+		size_t domain_len = host_len;
+		if (domain_len >= NET_POLICY_RULE_LEN ||
+		    (domain_len != 0 && host[domain_len - 1] == '.'))
+			domain_len--;
+		if (domain_len == 0 || !valid_domain(host, domain_len)) {
+			note(tracee, ERROR, USER, "invalid network domain '%.*s'",
+			     (int)host_len, host);
+			return -1;
+		}
+		rules[*count - 1].is_domain = 1;
+		if (config->mode != NET_POLICY_OFF &&
+		    resolve_pending_domains(tracee, rules, count) < 0)
+			return -1;
 	}
 	return 0;
 }
