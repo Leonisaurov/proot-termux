@@ -51,9 +51,13 @@ class ControlChannel:
         self.sock,self.timeout=sock,float(timeout); self.state=ChannelState.CREATED; self.closed=False; self._next_id=1; self._queued=[]
         self.sock.setblocking(False)
     @classmethod
-    def from_socket(cls,sock,timeout=1.0): return cls(sock,timeout)
+    def from_socket(cls,sock,timeout=1.0):
+        """Create a channel that owns and closes ``sock``."""
+        return cls(sock,timeout)
     @classmethod
-    def from_fd(cls,fd,timeout=1.0): return cls(socket.socket(fileno=fd),timeout)
+    def from_fd(cls,fd,timeout=1.0):
+        """Create a channel that owns and closes the supplied descriptor."""
+        return cls(socket.socket(fileno=fd),timeout)
     def _fail(self, exc):
         if self.state not in (ChannelState.CLOSED,ChannelState.FAILED): self.state=ChannelState.FAILED
         raise exc
@@ -156,7 +160,9 @@ class ControlChannel:
                 if isinstance(result,tuple): self.respond(req.request_id,*result)
                 else: self.respond(req.request_id,result)
     def close(self):
-        if self.state not in (ChannelState.FAILED,ChannelState.CLOSED): self.state=ChannelState.CLOSED
+        if self.closed:
+            return
+        self.state=ChannelState.CLOSED
         self.closed=True
         try: self.sock.shutdown(socket.SHUT_RDWR)
         except OSError: pass
@@ -173,26 +179,57 @@ class ProotConfig:
     keep_stdin: bool = True
     grace_period: float = 0.5
 class ProotProcess:
-    def __init__(self,process,channel,stdout,stderr,config): self.process,self.channel,self.stdout,self.stderr,self.config=process,channel,stdout,stderr,config
+    def __init__(self,process,channel,stdout,stderr,config):
+        self.process,self.channel,self.stdout,self.stderr,self.config=process,channel,stdout,stderr,config
+        self._closed=False
     @classmethod
     def spawn(cls,config=None,**kwargs):
-        c=config or ProotConfig();
+        c=config or ProotConfig()
         for k,v in kwargs.items(): setattr(c,k,v)
-        a, b=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM); b.set_inheritable(True); fd=b.fileno()
         if any(x=='--control-fd' or x.startswith('--control-fd=') for x in c.args): raise ValueError('control-fd is managed by launcher')
-        cmd=[c.proot_path,*c.args,'--control-fd',str(fd),*c.guest_command]
-        p=subprocess.Popen(cmd,stdin=None if c.keep_stdin else subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=c.env,cwd=c.cwd,pass_fds=(fd,))
-        b.close(); ch=ControlChannel.from_socket(a,c.timeout)
-        try: ch.handshake()
-        except Exception: ch.close(); p.kill(); p.wait(); raise
+        a=b=p=ch=None
+        try:
+            a,b=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM)
+            b.set_inheritable(True); fd=b.fileno()
+            cmd=[c.proot_path,*c.args,'--control-fd',str(fd),*c.guest_command]
+            p=subprocess.Popen(cmd,stdin=None if c.keep_stdin else subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=c.env,cwd=c.cwd,pass_fds=(fd,))
+            b.close(); b=None
+            ch=ControlChannel.from_socket(a,c.timeout); a=None
+            ch.handshake()
+        except Exception:
+            if ch is not None: ch.close()
+            if a is not None: a.close()
+            if b is not None: b.close()
+            if p is not None:
+                try: p.kill()
+                except OSError: pass
+                try:
+                    p.wait()
+                finally:
+                    for stream in (p.stdout,p.stderr):
+                        if stream is not None: stream.close()
+            raise
         return cls(p,ch,p.stdout,p.stderr,c)
     @property
     def pid(self): return self.process.pid
     @property
     def returncode(self): return self.process.poll()
     def close(self):
-        self.channel.close()
-        try: self.process.wait(timeout=self.config.grace_period)
-        except subprocess.TimeoutExpired: self.process.terminate();
-        try: self.process.wait(timeout=self.config.grace_period)
-        except subprocess.TimeoutExpired: self.process.kill(); self.process.wait()
+        if self._closed:
+            return
+        self._closed=True
+        try:
+            self.channel.close()
+        finally:
+            try: self.process.wait(timeout=self.config.grace_period)
+            except subprocess.TimeoutExpired:
+                try: self.process.terminate()
+                except OSError: pass
+                try: self.process.wait(timeout=self.config.grace_period)
+                except subprocess.TimeoutExpired:
+                    try: self.process.kill()
+                    except OSError: pass
+                    self.process.wait()
+            finally:
+                for stream in (self.stdout,self.stderr):
+                    if stream is not None: stream.close()

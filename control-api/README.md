@@ -39,6 +39,19 @@ p.channel.serve(lambda r: (Decision.ALLOW, "approved")
 p.close()
 ```
 
+### Resource ownership (Python)
+
+`ControlChannel.from_fd(fd)` takes ownership of `fd`; `close()` closes it.
+`ControlChannel.from_socket(sock)` likewise takes ownership of the supplied
+socket and its `close()` is idempotent. `ProotProcess.close()` closes the
+control channel, waits for the child (terminating or killing it after the
+configured grace period), and closes `stdout` and `stderr`. If those streams
+are exposed to application code, read them before calling `close()`, or use
+`p.process.communicate()` first.
+
+If `ProotProcess.spawn()` fails, it closes both socketpair ends, and cleans up
+any created child process and its output streams before re-raising the error.
+
 Rust uses `ProotCommand::default()` with `args` and `guest_command` fields;
 Bun uses `new ProotCommand({args, guestCommand}).spawn()`. Both expose the
 channel, PID, stdout and stderr. Rust keeps guest stdin separate from the
