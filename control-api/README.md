@@ -1,0 +1,68 @@
+# PRCT control API
+
+This directory contains three small consumers for `proot --control-fd`:
+
+* `python/control_api.py` — synchronous, standard library only.
+* `rust/` — a `std`-only path dependency with no async runtime.
+* `bun/control_api.ts` — TypeScript using Bun/Node stream primitives.
+
+All three expose raw `recv_frame`/`send_frame` and a decoded `receive`/`recv`
+layer. The first frame on every normal channel must be an empty `HELLO` with
+request id zero. A harness owns policy: `serve` automatically answers only
+`NET_ACCESS_REQUEST` and `PATH_ACCESS_REQUEST`; `SHADOW_EVENT` and
+`COMMAND_RESULT` are delivered to the handler without turning its return
+value into an access decision. No implementation accepts host paths or
+attempts to decide access automatically. See [PROTOCOL.md](PROTOCOL.md) for
+exact packed layouts and [examples/](examples/) for short harnesses.
+
+## Integrated launcher
+
+The launchers create an `AF_UNIX` stream `socketpair`, pass the child end as a
+heritable descriptor, add `--control-fd` themselves, capture stdout/stderr,
+and validate `HELLO` before returning a ready process. Do not put
+`--control-fd` in the user argument list. Closing the API end is cooperative;
+the launcher waits its grace period and then terminates/kills a still-running
+proot.
+
+Python:
+
+```python
+from control_api import ProotConfig, ProotProcess, PathRequest
+c = ProotConfig(args=("-r", "/rootfs"), guest_command=("/bin/sh", "-c", "echo ok"))
+p = ProotProcess.spawn(c)
+p.channel.serve(lambda r: p.channel.allow_once(r.request_id, "approved")
+                if isinstance(r, PathRequest) else None)
+p.close()
+```
+
+Rust uses `ProotCommand::default()` with `args` and `guest_command` fields;
+Bun uses `new ProotCommand({args, guestCommand}).spawn()`. Both expose the
+channel, PID, stdout and stderr. Rust keeps guest stdin separate from the
+control descriptor. The API is only framing, validation, dispatch and process
+plumbing: it does not define permission policy or translate guest paths to
+host paths.
+
+## Embedding a reactive harness
+
+Python:
+
+```python
+from control_api import ControlChannel, Decision, NetRequest, PathRequest
+ch = ControlChannel.from_fd(3)
+ch.serve(lambda r: Decision.ALLOW
+        if isinstance(r, (NetRequest, PathRequest)) else None)
+```
+
+Rust:
+
+```rust
+let mut ch = ControlChannel::from_stream(stream, Duration::from_secs(1))?;
+ch.serve(|r| Some(if matches!(r, Request::Net(_)) { Decision::Deny } else { Decision::Allow }))?;
+```
+
+Bun/TypeScript:
+
+```ts
+const ch = ControlChannel.fromFd(3);
+await ch.serve(r => r.type === Message.NET_ACCESS_REQUEST ? Decision.DENY : Decision.ALLOW);
+```

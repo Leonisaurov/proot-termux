@@ -1,0 +1,12 @@
+[package]
+name = "prct-control-api"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal std-only PRCT control-fd harness API"
+
+[lib]
+path = "src/lib.rs"
+
+[[example]]
+name = "harness"
+path = "examples/harness.rs"
