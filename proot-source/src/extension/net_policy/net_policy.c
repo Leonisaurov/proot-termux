@@ -126,6 +126,7 @@ typedef struct {
 	NetPolicyBind binds[NET_POLICY_MAX_BINDS];
 	unsigned int bind_count;
 	int ask_fd;
+	int ask_failed;
 	uint64_t next_request_id;
 	char proxy[64];
 	NetDnsQuery dns_queries[NET_DNS_MAX_QUERIES];
@@ -1167,8 +1168,11 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 {
 	NetAskRequest request;
 	NetAskResponse response;
+	int protocol_failed;
 	if (config->ask_fd < 0)
 		return 0;
+	if (config->ask_failed)
+		return -EACCES;
 	memset(&request, 0, sizeof(request));
 	request.version = NET_ASK_VERSION;
 	request.event_type = event;
@@ -1190,13 +1194,21 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 		proxy = config->proxy;
 	if (proxy[0] != '\0')
 		memcpy(request.proxy, proxy, sizeof(request.proxy));
-	if (write_full_timeout(config->ask_fd, &request, sizeof(request)) < 0 ||
-	    read_full_timeout(config->ask_fd, &response, sizeof(response)) < 0 ||
-	    response.version != NET_ASK_VERSION ||
-	    response.request_id != request.request_id ||
-	    (response.decision != NET_DECISION_ALLOW &&
-	     response.decision != NET_DECISION_DENY))
+	protocol_failed = write_full_timeout(config->ask_fd, &request, sizeof(request)) < 0;
+	if (!protocol_failed)
+		protocol_failed = read_full_timeout(config->ask_fd, &response, sizeof(response)) < 0;
+	if (!protocol_failed)
+		protocol_failed = response.version != NET_ASK_VERSION ||
+			response.request_id != request.request_id ||
+			(response.decision != NET_DECISION_ALLOW &&
+			 response.decision != NET_DECISION_DENY);
+	if (protocol_failed) {
+		/* A partial frame makes the stream untrustworthy.  Do not reuse it for
+		 * later requests; all future decisions fail closed until the CLI
+		 * explicitly installs a new harness FD. */
+		config->ask_failed = 1;
 		return -EACCES;
+	}
 	return response.decision == NET_DECISION_ALLOW ? 0 : -EACCES;
 }
 
@@ -1514,5 +1526,6 @@ int net_policy_set_ask_fd(Tracee *tracee, const char *value)
 	 * SIGPIPE while the fixed-size request is being written. */
 	signal(SIGPIPE, SIG_IGN);
 	config->ask_fd = (int)fd;
+	config->ask_failed = 0;
 	return 0;
 }
