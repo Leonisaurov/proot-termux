@@ -828,10 +828,10 @@ void sysvipc_shm_helper_main() {
 		.sun_family = AF_UNIX
 	};
 	for (int i = 0;; i++) {
-		path = create_temp_name(NULL, "prootshm");
-		(void) mktemp(path);
+		path = create_temp_socket_name(NULL, "prootshm",
+				SYSVIPC_SHMHELPER_SOCKET_LEN);
 
-		if (strlen(path) > SYSVIPC_SHMHELPER_SOCKET_LEN) {
+		if (path == NULL) {
 			close(socket_server_fd);
 			fprintf(stderr, "proot-shm-helper: Temporary path too long\n");
 			_exit(1);
@@ -855,7 +855,9 @@ void sysvipc_shm_helper_main() {
 
 	if (listen(socket_server_fd, 1) < 0) {
 		perror("proot-shm-helper: listen");
-		unlink(path);
+		if (unlink(path) < 0)
+			perror("proot-shm-helper: unlink");
+		close(socket_server_fd);
 		_exit(0);
 	}
 
@@ -963,6 +965,8 @@ void sysvipc_shm_helper_main() {
 		}
 	}
 
-	unlink(path);
+	if (unlink(path) < 0)
+		perror("proot-shm-helper: unlink");
+	close(socket_server_fd);
 	_exit(0);
 }

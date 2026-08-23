@@ -116,13 +116,9 @@ int translate_socketcall_enter(Tracee *tracee, word_t *address, int size)
 
 		/* The translated path is too long to fit the sun_path
 		 * array, so let's bind it to a shorter path.  */
-		shorter_host_path = create_temp_name(tracee->ctx, "proot");
-		if (shorter_host_path == NULL || strlen(shorter_host_path) > sizeof_path)
-			return -EINVAL;
-
-		(void) mktemp(shorter_host_path);
-
-		if (strlen(shorter_host_path) > sizeof_path)
+		shorter_host_path = create_temp_socket_name(tracee->ctx, "proot",
+				sizeof_path);
+		if (shorter_host_path == NULL)
 			return -EINVAL;
 
 		/* Ensure the guest path of this new binding is

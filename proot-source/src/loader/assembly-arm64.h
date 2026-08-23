@@ -39,7 +39,10 @@
 		"br %1				\n"		\
 		: /* no output */				\
 		: "r" (stack_pointer), "r" (destination)	\
-		: "memory", "sp", "x0");			\
+		/* sp is deliberately changed above; this asm does not return to a */\
+		/* compiler-generated continuation, so it cannot be expressed as a */\
+		/* clobber (AArch64 reserves sp in inline-asm clobber lists). */	\
+		: "memory", "x0");			\
 	__builtin_unreachable();				\
 	} while (0)
 

@@ -6,6 +6,6 @@
  * Called from cli.c when proot is invoked with --vnp-helper NAME.
  * Runs the TCP→Unix bridge event loop for exposed ports.
  */
-extern int vnp_helper_main(int argc, char *argv[]);
+extern int vnp_helper_main(int argc, char *const argv[]);
 
 #endif /* VIRTUAL_NET_HELPER_H */

@@ -39,7 +39,10 @@
 		"bx %1					\n"	\
 		: /* no output */				\
 		: "r" (stack_pointer), "r" (destination)	\
-		: "memory", "sp", "r0", "pc");			\
+		/* sp and pc are deliberately changed above; this asm does not return */\
+		/* to a compiler-generated continuation, and both are reserved in the */\
+		/* inline-asm clobber list on modern ARM toolchains. */		\
+		: "memory", "r0");			\
 	__builtin_unreachable();				\
 	} while (0)
 
@@ -108,4 +111,3 @@
 #define EXIT	1
 #define PRCTL	172
 #define MPROTECT 125
-

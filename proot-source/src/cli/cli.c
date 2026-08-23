@@ -44,6 +44,7 @@
 #include "path/binding.h"
 #include "path/canon.h"
 #include "path/path.h"
+#include "path/temp.h"
 #include "extension/net_policy/net_policy.h"
 #include <extension/sysvipc/sysvipc.h>
 #include <extension/virtual_net/virtual_net_helper.h>
@@ -583,6 +584,7 @@ int main(int argc, char *const argv[])
 
 		/* Free tracee to avoid talloc leak report on exit */
 		TALLOC_FREE(tracee);
+		free_temp_context();
 		exit(ret);
 	}
 
@@ -607,11 +609,13 @@ int main(int argc, char *const argv[])
 	{
 		int ret = event_loop(tracee);
 		// tracee already freed by free_terminated_tracees() inside event_loop
+		free_temp_context();
 		exit(ret);
 	}
 
 error:
 	TALLOC_FREE(tracee);
+	free_temp_context();
 
 	if (exit_failure) {
 		fprintf(stderr, "fatal error: see `%s --help`.\n", basename(argv[0]));
@@ -695,11 +699,14 @@ static int indent_level = 0;
 void __cyg_profile_func_enter(void *this_function, void *call_site) DONT_INSTRUMENT;
 void __cyg_profile_func_enter(void *this_function, void *call_site)
 {
-	void *const pointers[] = { this_function, call_site };
 	char **symbols = NULL;
 
 #ifdef __GLIBC__
+	void *const pointers[] = { this_function, call_site };
 	symbols = backtrace_symbols(pointers, 2);
+#else
+	(void) this_function;
+	(void) call_site;
 #endif
 	if (symbols == NULL)
 		goto end;

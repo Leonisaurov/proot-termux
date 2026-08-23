@@ -10,6 +10,21 @@
 
 #include "cli/note.h"
 
+static TALLOC_CTX *temp_context;
+
+TALLOC_CTX *get_temp_context()
+{
+	if (temp_context == NULL)
+		temp_context = talloc_new(NULL);
+	return temp_context;
+}
+
+void free_temp_context()
+{
+	talloc_free(temp_context);
+	temp_context = NULL;
+}
+
 /**
  * Return the path to a directory where temporary files should be
  * created.
@@ -34,7 +49,7 @@ const char *get_temp_directory()
 		return temp_directory;
 	}
 
-	temp_directory = talloc_strdup(talloc_autofree_context(), tmp);
+	temp_directory = talloc_strdup(get_temp_context(), tmp);
 	if (temp_directory == NULL)
 		temp_directory = tmp;
 	else
@@ -270,7 +285,7 @@ char *create_temp_name(TALLOC_CTX *context, const char *prefix)
 	char *name;
 
 	if (context == NULL)
-		context = talloc_autofree_context();
+		context = get_temp_context();
 
 	name = talloc_asprintf(context, "%s/%s-%d-XXXXXX", temp_directory, prefix, getpid());
 	if (name == NULL) {
@@ -279,6 +294,42 @@ char *create_temp_name(TALLOC_CTX *context, const char *prefix)
 	}
 
 	return name;
+}
+
+/** Reserve a unique filesystem name, then remove the reservation so that
+ * bind(2) can create a UNIX socket at the returned path. */
+char *create_temp_socket_name(TALLOC_CTX *context, const char *prefix,
+		size_t max_length)
+{
+	char *name;
+	int fd;
+
+	if (context == NULL)
+		context = get_temp_context();
+	name = create_temp_name(context, prefix);
+	if (name == NULL || strlen(name) > max_length)
+		goto error;
+
+	fd = mkstemp(name);
+	if (fd < 0) {
+		note(NULL, ERROR, SYSTEM, "can't reserve temporary socket name");
+		goto error;
+	}
+	if (close(fd) < 0) {
+		note(NULL, ERROR, SYSTEM, "can't close temporary socket reservation");
+		(void) unlink(name);
+		goto error;
+	}
+	if (unlink(name) < 0) {
+		note(NULL, ERROR, SYSTEM, "can't remove temporary socket reservation");
+		goto error;
+	}
+	return name;
+
+error:
+	if (name != NULL)
+		talloc_free(name);
+	return NULL;
 }
 
 /**

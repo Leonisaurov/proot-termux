@@ -383,7 +383,7 @@ static void helper_handle_unexpose(uint16_t host_port)
  * Main event loop (poll-based: stdin commands + TCP listeners)
  * ================================================================ */
 
-int vnp_helper_main(int argc, char *argv[])
+int vnp_helper_main(int argc, char *const argv[])
 {
 	if (argc < 3)
 		_exit(1);

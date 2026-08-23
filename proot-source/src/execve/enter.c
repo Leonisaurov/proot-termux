@@ -537,7 +537,7 @@ static char *extract_loader(const Tracee *tracee, bool wants_32bit_version)
 		goto end;
 	}
 
-	loader_path = talloc_strdup(talloc_autofree_context(), path);
+	loader_path = talloc_strdup(get_temp_context(), path);
 	if (loader_path == NULL) {
 		note(tracee, ERROR, INTERNAL, "can't allocate memory");
 		goto end;
