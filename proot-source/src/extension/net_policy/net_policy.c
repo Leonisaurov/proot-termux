@@ -425,7 +425,7 @@ static int dns_emulate_receive(NetPolicyConfig *config, Tracee *tracee)
 	int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
 	NetDnsQuery *query = dns_pending_query(config, tracee->pid, fd);
 	word_t buf, len, addr_ptr, size_ptr;
-	size_t copied;
+	size_t copied, write_len;
 	if (query == NULL)
 		return 0;
 	buf = peek_reg(tracee, CURRENT, SYSARG_2);
@@ -433,16 +433,17 @@ static int dns_emulate_receive(NetPolicyConfig *config, Tracee *tracee)
 	addr_ptr = peek_reg(tracee, CURRENT, SYSARG_5);
 	size_ptr = peek_reg(tracee, CURRENT, SYSARG_6);
 	copied = len < query->response_len ? len : query->response_len;
-	if (copied != 0 && write_data(tracee, buf, query->response, copied) < 0)
+	write_len = query->response_len;
+	if (len >= ((write_len + sizeof(word_t) - 1) /
+					 sizeof(word_t)) * sizeof(word_t))
+		write_len = (write_len + sizeof(word_t) - 1) & ~(sizeof(word_t) - 1);
+	if (write_len != 0 && write_data(tracee, buf, query->response, write_len) < 0)
 		return 0;
-	if (addr_ptr != 0 && size_ptr != 0) {
-		word_t size = sizeof(query->server);
-		(void) read_data(tracee, &size, size_ptr, sizeof(size));
-		if (size > sizeof(query->server)) size = sizeof(query->server);
-		if (write_data(tracee, addr_ptr, &query->server, size) < 0 ||
-		    write_data(tracee, size_ptr, &size, sizeof(size)) < 0)
-			return 0;
-	}
+	/* The resolver only consumes the DNS payload.  Leaving the optional
+	 * source sockaddr untouched avoids an Android ptrace partial-word read;
+	 * it cannot affect name resolution or the later IP authorization. */
+	(void)addr_ptr;
+	(void)size_ptr;
 	query->response_ready = 0;
 	set_sysnum(tracee, PR_void);
 	poke_reg(tracee, SYSARG_RESULT, copied);
@@ -456,15 +457,19 @@ static int dns_emulate_recvmsg(NetPolicyConfig *config, Tracee *tracee)
 	struct msghdr message;
 	struct iovec vector;
 	word_t message_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
-	size_t copied;
+	size_t copied, write_len;
 	if (query == NULL || message_ptr == 0 ||
 	    read_data(tracee, &message, message_ptr, sizeof(message)) < 0 ||
 	    message.msg_iov == NULL || message.msg_iovlen == 0 ||
 	    read_data(tracee, &vector, (word_t)message.msg_iov, sizeof(vector)) < 0)
 		return 0;
 	copied = vector.iov_len < query->response_len ? vector.iov_len : query->response_len;
-	if (copied != 0 && write_data(tracee, (word_t)vector.iov_base,
-					 query->response, copied) < 0)
+	write_len = query->response_len;
+	if (vector.iov_len >= ((write_len + sizeof(word_t) - 1) /
+					 sizeof(word_t)) * sizeof(word_t))
+		write_len = (write_len + sizeof(word_t) - 1) & ~(sizeof(word_t) - 1);
+	if (write_len != 0 && write_data(tracee, (word_t)vector.iov_base,
+					 query->response, write_len) < 0)
 		return 0;
 	if (message.msg_name != NULL && message.msg_namelen != 0) {
 		socklen_t size = message.msg_namelen < sizeof(query->server) ?
@@ -512,11 +517,15 @@ static int dns_emulate_read(NetPolicyConfig *config, Tracee *tracee)
 	NetDnsQuery *query = dns_pending_query(config, tracee->pid, fd);
 	word_t buffer = peek_reg(tracee, CURRENT, SYSARG_2);
 	word_t length = peek_reg(tracee, CURRENT, SYSARG_3);
-	size_t copied;
+	size_t copied, write_len;
 	if (query == NULL || buffer == 0)
 		return 0;
 	copied = length < query->response_len ? length : query->response_len;
-	if (copied != 0 && write_data(tracee, buffer, query->response, copied) < 0)
+	write_len = query->response_len;
+	if (length >= ((write_len + sizeof(word_t) - 1) /
+					 sizeof(word_t)) * sizeof(word_t))
+		write_len = (write_len + sizeof(word_t) - 1) & ~(sizeof(word_t) - 1);
+	if (write_len != 0 && write_data(tracee, buffer, query->response, write_len) < 0)
 		return 0;
 	query->response_ready = 0;
 	set_sysnum(tracee, PR_void);
@@ -1158,8 +1167,26 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 
 static int read_sockaddr(Tracee *tracee, word_t ptr, struct sockaddr_storage *addr)
 {
+	unsigned char header[sizeof(word_t)];
+	sa_family_t family;
+	size_t length;
+
+	/* Android's ptrace fallback cannot reliably read a short, trailing
+	 * fragment.  Read only word-aligned portions of the guest sockaddr;
+	 * the first word contains the family and port for both IP families. */
+	if (ptr == 0 || read_data(tracee, header, ptr, sizeof(header)) < 0)
+		return -EFAULT;
+	memcpy(&family, header, sizeof(family));
 	memset(addr, 0, sizeof(*addr));
-	return read_data(tracee, addr, ptr, sizeof(*addr));
+	if (family == AF_INET)
+		length = sizeof(struct sockaddr_in);
+	else if (family == AF_INET6)
+		length = offsetof(struct sockaddr_in6, sin6_scope_id);
+	else
+		return 0;
+	if (read_data(tracee, addr, ptr, length) < 0)
+		return -EFAULT;
+	return 0;
 }
 
 static int check_operation(Tracee *tracee, NetPolicyConfig *config, int syscall)
@@ -1173,6 +1200,8 @@ static int check_operation(Tracee *tracee, NetPolicyConfig *config, int syscall)
 	int is_datagram = syscall == PR_sendto || syscall == PR_recvfrom;
 
 	if (config->mode == NET_POLICY_OFF)
+		return 0;
+	if (syscall == PR_recvmsg || syscall == PR_ppoll || syscall == PR_read)
 		return 0;
 	if (is_bind) {
 		if (syscall == PR_listen) {
@@ -1276,7 +1305,9 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 				return 1;
 			if (syscall == PR_sendto)
 				dns_observe_send(config, tracee);
-			int status = check_operation(tracee, config, syscall);
+			int network_syscall = syscall == PR_bind || syscall == PR_listen ||
+				syscall == PR_connect || syscall == PR_sendto || syscall == PR_recvfrom;
+			int status = network_syscall ? check_operation(tracee, config, syscall) : 0;
 			if (status < 0) {
 				set_sysnum(tracee, PR_void);
 				/* PR_void returns the raw negative errno, just like the
@@ -1285,7 +1316,7 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 				VERBOSE(tracee, 1, "net_policy: denied syscall %d", syscall);
 				return 1;
 			}
-			if (syscall != PR_listen && config->ask_fd >= 0) {
+			if (network_syscall && syscall != PR_listen && config->ask_fd >= 0) {
 				struct sockaddr_storage addr;
 				word_t ptr = (syscall == PR_sendto || syscall == PR_recvfrom) ?
 					peek_reg(tracee, CURRENT, SYSARG_5) :
