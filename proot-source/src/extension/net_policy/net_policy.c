@@ -386,6 +386,25 @@ static NetDnsQuery *dns_pending_query(NetPolicyConfig *config, pid_t pid, int fd
 	return NULL;
 }
 
+static int dns_write_response(Tracee *tracee, word_t buffer, size_t capacity,
+				      const NetDnsQuery *query, size_t *copied)
+{
+	size_t write_len;
+
+	*copied = capacity < query->response_len ? capacity : query->response_len;
+	write_len = *copied;
+	if (buffer == 0 && write_len != 0)
+		return -EFAULT;
+	/* Keep the common full-buffer path word aligned for Android's ptrace
+	 * fallback.  Never extend a write beyond the guest-provided capacity. */
+	if (write_len != 0 && write_len % sizeof(word_t) != 0 &&
+	    capacity >= write_len + sizeof(word_t) - write_len % sizeof(word_t))
+		write_len += sizeof(word_t) - write_len % sizeof(word_t);
+	if (write_len != 0 && write_data(tracee, buffer, query->response, write_len) < 0)
+		return -EFAULT;
+	return 0;
+}
+
 static int dns_server_port(const struct sockaddr_storage *addr)
 {
 	if (addr->ss_family == AF_INET)
@@ -413,7 +432,8 @@ static int dns_emulate_send(NetPolicyConfig *config, Tracee *tracee)
 	if (config->dns_query_count == old_count && old_count < NET_DNS_MAX_QUERIES)
 		return 0;
 	NetDnsQuery *query = &config->dns_queries[config->dns_query_count - 1];
-	if (query->pid != tracee->pid || query->fd != (int)peek_reg(tracee, CURRENT, SYSARG_1))
+	if (query->pid != tracee->pid || query->fd != (int)peek_reg(tracee, CURRENT, SYSARG_1) ||
+	    !query->response_ready)
 		return 0;
 	set_sysnum(tracee, PR_void);
 	poke_reg(tracee, SYSARG_RESULT, packet_len);
@@ -425,25 +445,25 @@ static int dns_emulate_receive(NetPolicyConfig *config, Tracee *tracee)
 	int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
 	NetDnsQuery *query = dns_pending_query(config, tracee->pid, fd);
 	word_t buf, len, addr_ptr, size_ptr;
-	size_t copied, write_len;
+	size_t copied;
 	if (query == NULL)
 		return 0;
 	buf = peek_reg(tracee, CURRENT, SYSARG_2);
 	len = peek_reg(tracee, CURRENT, SYSARG_3);
 	addr_ptr = peek_reg(tracee, CURRENT, SYSARG_5);
 	size_ptr = peek_reg(tracee, CURRENT, SYSARG_6);
-	copied = len < query->response_len ? len : query->response_len;
-	write_len = query->response_len;
-	if (len >= ((write_len + sizeof(word_t) - 1) /
-					 sizeof(word_t)) * sizeof(word_t))
-		write_len = (write_len + sizeof(word_t) - 1) & ~(sizeof(word_t) - 1);
-	if (write_len != 0 && write_data(tracee, buf, query->response, write_len) < 0)
+	if (dns_write_response(tracee, buf, len, query, &copied) < 0)
 		return 0;
-	/* The resolver only consumes the DNS payload.  Leaving the optional
-	 * source sockaddr untouched avoids an Android ptrace partial-word read;
-	 * it cannot affect name resolution or the later IP authorization. */
-	(void)addr_ptr;
-	(void)size_ptr;
+	if (addr_ptr != 0 && size_ptr != 0) {
+		socklen_t size;
+		if (read_data(tracee, &size, size_ptr, sizeof(size)) < 0)
+			return 0;
+		if (size > sizeof(query->server))
+			size = sizeof(query->server);
+		if (write_data(tracee, addr_ptr, &query->server, size) < 0 ||
+		    write_data(tracee, size_ptr, &size, sizeof(size)) < 0)
+			return 0;
+	}
 	query->response_ready = 0;
 	set_sysnum(tracee, PR_void);
 	poke_reg(tracee, SYSARG_RESULT, copied);
@@ -457,19 +477,14 @@ static int dns_emulate_recvmsg(NetPolicyConfig *config, Tracee *tracee)
 	struct msghdr message;
 	struct iovec vector;
 	word_t message_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
-	size_t copied, write_len;
+	size_t copied;
 	if (query == NULL || message_ptr == 0 ||
 	    read_data(tracee, &message, message_ptr, sizeof(message)) < 0 ||
 	    message.msg_iov == NULL || message.msg_iovlen == 0 ||
 	    read_data(tracee, &vector, (word_t)message.msg_iov, sizeof(vector)) < 0)
 		return 0;
-	copied = vector.iov_len < query->response_len ? vector.iov_len : query->response_len;
-	write_len = query->response_len;
-	if (vector.iov_len >= ((write_len + sizeof(word_t) - 1) /
-					 sizeof(word_t)) * sizeof(word_t))
-		write_len = (write_len + sizeof(word_t) - 1) & ~(sizeof(word_t) - 1);
-	if (write_len != 0 && write_data(tracee, (word_t)vector.iov_base,
-					 query->response, write_len) < 0)
+	if (dns_write_response(tracee, (word_t)vector.iov_base, vector.iov_len,
+				       query, &copied) < 0)
 		return 0;
 	if (message.msg_name != NULL && message.msg_namelen != 0) {
 		socklen_t size = message.msg_namelen < sizeof(query->server) ?
@@ -517,15 +532,10 @@ static int dns_emulate_read(NetPolicyConfig *config, Tracee *tracee)
 	NetDnsQuery *query = dns_pending_query(config, tracee->pid, fd);
 	word_t buffer = peek_reg(tracee, CURRENT, SYSARG_2);
 	word_t length = peek_reg(tracee, CURRENT, SYSARG_3);
-	size_t copied, write_len;
+	size_t copied;
 	if (query == NULL || buffer == 0)
 		return 0;
-	copied = length < query->response_len ? length : query->response_len;
-	write_len = query->response_len;
-	if (length >= ((write_len + sizeof(word_t) - 1) /
-					 sizeof(word_t)) * sizeof(word_t))
-		write_len = (write_len + sizeof(word_t) - 1) & ~(sizeof(word_t) - 1);
-	if (write_len != 0 && write_data(tracee, buffer, query->response, write_len) < 0)
+	if (dns_write_response(tracee, buffer, length, query, &copied) < 0)
 		return 0;
 	query->response_ready = 0;
 	set_sysnum(tracee, PR_void);
@@ -797,14 +807,13 @@ static void dns_prepare_response(NetPolicyConfig *config, NetDnsQuery *query,
 					 const unsigned char *packet, size_t length,
 					 Tracee *tracee)
 {
-	NetPolicyRule *sets[2] = { config->allow, config->deny };
-	unsigned int counts[2] = { config->allow_count, config->deny_count };
 	char wanted[NET_DNS_NAME_LEN];
 	size_t question_end;
 	unsigned int answers = 0;
 	unsigned char *out = query->response;
 
-	if (dns_skip_name(packet, length, 12, &question_end) < 0 ||
+	if (length < 12 || ((unsigned int)packet[4] << 8 | packet[5]) != 1 ||
+	    dns_skip_name(packet, length, 12, &question_end) < 0 ||
 	    question_end + 4 > length ||
 	    (query->qtype != 1 && query->qtype != 28))
 		return;
@@ -820,57 +829,66 @@ static void dns_prepare_response(NetPolicyConfig *config, NetDnsQuery *query,
 	out[6] = out[7] = 0;
 	query->response_len = question_end;
 
-	for (unsigned int set = 0; set < 2; set++) {
-		for (unsigned int i = 0; i < counts[set]; i++) {
-			const char *host;
-			size_t host_len, prefix, suffix;
-			unsigned char address[16];
-			int family;
-			if (sets[set][i].is_domain || sets[set][i].source[0] == '\0' ||
-			    !dns_names_equal(sets[set][i].source, wanted) ||
-			    destination_host(sets[set][i].value, &host, &host_len,
-						     &prefix, &suffix) < 0 ||
-			    !host_is_numeric(host, host_len) || host_len >= NET_POLICY_RULE_LEN)
-				continue;
-			(void)prefix;
-			(void)suffix;
-			char ip[NET_POLICY_RULE_LEN];
-			memcpy(ip, host, host_len);
-			ip[host_len] = '\0';
-			char *slash = strchr(ip, '/');
-			if (slash != NULL) *slash = '\0';
-			family = strchr(ip, ':') != NULL ? AF_INET6 : AF_INET;
-			if ((query->qtype == 1 && family != AF_INET) ||
-			    (query->qtype == 28 && family != AF_INET6) ||
-			    inet_pton(family, ip, address) != 1)
-				continue;
-			int duplicate = 0;
-			/* The fixed-rule list is already de-duplicated by resolve_rule;
-			 * duplicate deny/allow entries are harmless to DNS clients but
-			 * avoid emitting them when the same snapshot appears twice. */
-			for (unsigned int j = 0; j < answers; j++) {
-				size_t rr = question_end + j * (12 + (family == AF_INET ? 4 : 16));
-				if (rr + 12 + (family == AF_INET ? 4 : 16) <= query->response_len &&
-				    out[rr + 0] == 0xc0 && out[rr + 1] == 0x0c &&
-				    out[rr + 2] == 0 && out[rr + 3] == query->qtype &&
-				    memcmp(out + rr + 12, address, family == AF_INET ? 4 : 16) == 0)
-					duplicate = 1;
-			}
-			if (duplicate) continue;
-			if (query->response_len + 12 + (family == AF_INET ? 4 : 16) >
-			    sizeof(query->response) || answers == 65535)
-				continue;
-			unsigned char *rr = out + query->response_len;
-			rr[0] = 0xc0; rr[1] = 0x0c;
-		rr[2] = 0; rr[3] = query->qtype;
-		rr[4] = 0; rr[5] = 1;
-		rr[6] = 0; rr[7] = 0; rr[8] = 0; rr[9] = 60;
+	/* Only the allow snapshot is a source of synthetic answers.  A deny rule
+	 * must never re-authorize an address merely because it was resolved on
+	 * the host; deny remains higher priority at the IP decision point. */
+	for (unsigned int i = 0; i < config->allow_count; i++) {
+		const char *host;
+		size_t host_len, prefix, suffix;
+		unsigned char address[16];
+		int family;
+		if (config->allow[i].is_domain || config->allow[i].source[0] == '\0' ||
+		    !dns_names_equal(config->allow[i].source, wanted) ||
+		    destination_host(config->allow[i].value, &host, &host_len,
+				     &prefix, &suffix) < 0 ||
+		    !host_is_numeric(host, host_len) || host_len >= NET_POLICY_RULE_LEN)
+			continue;
+		(void)prefix;
+		(void)suffix;
+		char ip[NET_POLICY_RULE_LEN];
+		memcpy(ip, host, host_len);
+		ip[host_len] = '\0';
+		char *slash = strchr(ip, '/');
+		if (slash != NULL)
+			*slash = '\0';
+		family = strchr(ip, ':') != NULL ? AF_INET6 : AF_INET;
+		if ((query->qtype == 1 && family != AF_INET) ||
+		    (query->qtype == 28 && family != AF_INET6) ||
+		    inet_pton(family, ip, address) != 1)
+			continue;
+		int duplicate = 0;
+		/* The fixed-rule list is already de-duplicated by resolve_rule;
+		 * duplicate allow entries are harmless but avoid emitting them. */
+		for (unsigned int j = 0; j < answers; j++) {
+			size_t rr = question_end + j * (12 + (family == AF_INET ? 4 : 16));
+			if (rr + 12 + (family == AF_INET ? 4 : 16) <= query->response_len &&
+			    out[rr + 0] == 0xc0 && out[rr + 1] == 0x0c &&
+			    out[rr + 2] == 0 && out[rr + 3] == query->qtype &&
+			    memcmp(out + rr + 12, address, family == AF_INET ? 4 : 16) == 0)
+				duplicate = 1;
+		}
+		if (duplicate)
+			continue;
+		if (query->response_len + 12 + (family == AF_INET ? 4 : 16) >
+		    sizeof(query->response) || answers == 65535)
+			continue;
+		unsigned char *rr = out + query->response_len;
+		rr[0] = 0xc0;
+		rr[1] = 0x0c;
+		rr[2] = 0;
+		rr[3] = query->qtype;
+		rr[4] = 0;
+		rr[5] = 1;
+		rr[6] = 0;
+		rr[7] = 0;
+		rr[8] = 0;
+		rr[9] = 60;
 		uint16_t rdlen = family == AF_INET ? 4 : 16;
-		rr[10] = 0; rr[11] = (unsigned char)rdlen;
+		rr[10] = 0;
+		rr[11] = (unsigned char)rdlen;
 		memcpy(rr + 12, address, rdlen);
 		query->response_len += 12 + rdlen;
 		answers++;
-		}
 	}
 	if (answers == 0) {
 		out[3] = 0x83; /* NXDOMAIN: no guest DNS data was authorized. */
