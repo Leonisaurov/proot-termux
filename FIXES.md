@@ -10,6 +10,23 @@
 | D — Rendimiento P0/P1 | **Completada** ✅ | `e30bdb5b43` (REV 23), `89e2598828` (REV 24), D5 hash (REV 25) | D1 BPF sorted copy, D2 ioctl dinámico FICLONE, D3 faccessat2 sin sysexit, D4 socket no-sysexit. D5 hash table O(1) get_tracee: implementada con `tracee_hash_update()` para PID change en cli.c. D6 (binding cache) y D7 (canonicalize cache) SKIP — riesgo supera ganancia. |
 | E — Resto P2/P3 | **Completada** ✅ | `89e2598828` (REV 24), REV 27 | E1 renameat2 no-sysexit, E3 uname conditional, E6 mknod phantom fix. E5 pidfd_open → ISOLATE_PROC. E7 lazy maps_fd detection. E4 doc -q host-rootfs. E2 registry fd cache. E8 fake_netlink fast-path. |
 
+## G — Limpieza de warnings y temporales seguros (REV 57)
+
+Completada en `25ebffc459`. El build oficial ARM64 con `-Wall -Wextra` quedó
+sin warnings C; la validación completa de objetos con `-Werror` también pasa.
+Los loaders ARM64 y ARM32 se reconstruyen sin los avisos de clobbers
+reservados: los saltos no retornables conservan la restauración de `sp`, la
+limpieza de `x0`/`r0` y el salto al entrypoint, pero no declaran `sp`/`pc` como
+clobbers que los toolchains reservan.
+
+Los nombres de sockets temporales se reservan con `mkstemp`, se cierran y se
+desvinculan antes de `bind`; los errores de reserva, cierre, `unlink`, `bind` y
+`listen` conservan cleanup explícito. El contexto talloc de proceso reemplaza
+`talloc_autofree_context` y se libera durante las salidas normales.
+
+Verificación local: todos los `pentest/test_*.sh` existentes, 11/11 scripts
+con código 0; D4/E1/E3/E6 reportó 39/39, net policy 9/9 y Phase C 6/6.
+
 ## F — Vista `/proc` guest estricta (REV 30)
 
 La implementación actual amplía `ISOLATE_PROC` a una vista procfs coherente y
@@ -56,7 +73,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | Leak talloc en shutdown supervise (`free_terminated_tracees`, FU-1..FU-4, `supervise_handle_exited_tracee`, guard `ctl_fd>=0`) | ✅ fixes 5ad187e929 + 414053fc04 |
 | **FASE A COMPLETADA — A2 stat/readlink oracle + C1 kill(-1) broadcast + V4 netlink topology** | ✅ commit `573f4cb8d9` 'fix(isolation): block /proc host stat/readlink oracle, kill(-1) broadcast, netlink topology' (REVISION 19) — pentest ampliado con baselines `*_2` y verificaciones `*_3` |
 | **FASE A COMPLETADA — cierre de los 4 MINORs + hardening señales** | ✅ commit `3b98197d8a` 'fix(isolation): deliver kill broadcasts to guest tracees, block statx on SIGSYS, harden signal validation' (REVISION 20) — kill(-1) entrega real a tracees; statx cubierto en SIGSYS legacy; pentest EMULADO-OK; buffers PATH_MAX; extra kill(0)/kill(-pgid) confinados al guest (ESRCH pgid vacío, EINVAL señal inválida) |
-|| REVISION actual en `packages/proot/build.sh` | **30** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/` |
+|| REVISION actual en `packages/proot/build.sh` | **57** — bump SIEMPRE antes de commit si se toca `proot-source/src/` o `packages/proot/` |
 
 ## 1. Resumen ejecutivo de las 3 auditorías
 
@@ -107,7 +124,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | B7 | P3 | `supervise.c:155-161` `sig_fd` (signalfd) nunca se cierra en `supervise_fini()` (solo cierra `ctl_fd_global`) | guardarlo global + cerrarlo en fini | muy bajo | valgrind/fd count en ciclo supervise |
 | B8 | P3 | `execve/ldso.c:488` `initial_ldso_paths` `strdup()` (malloc) sin liberar, 1x por proceso | talloc o static-no-free documentado | muy bajo | valgrind |
 
-**Verificados NO-leak (NO tocar)**: BPF seccomp free en end:; `fake_netlink_reply` bajo tracee; loader/glue/temp autofree; registry stale correcto; bindings bajo ctx via talloc_reference; copy_binding+mbind_files; extensiones compartidas REMOVED sin UAF; `cwd_raw` bajo tracee.
+**Verificados NO-leak (NO tocar)**: BPF seccomp free en end:; `fake_netlink_reply` bajo tracee; loader/glue/temp bajo contexto talloc; registry stale correcto; bindings bajo ctx via talloc_reference; copy_binding+mbind_files; extensiones compartidas REMOVED sin UAF; `cwd_raw` bajo tracee.
 
 ## 5. FASE C — Aislamiento P1
 
@@ -175,7 +192,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 ## 10. Checklist de commit (reglas AGENTS.md)
 
 1. Editar código (`proot-source/src/` o `packages/proot/`).
-2. **Bump `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES del commit**. La revisión actual es 30; las referencias a revisiones anteriores en las fases históricas son deliberadas.
+2. **Bump `TERMUX_PKG_REVISION` en `packages/proot/build.sh` ANTES del commit**. La revisión actual es 57; las referencias a revisiones anteriores en las fases históricas son deliberadas.
 3. `git add -A && git commit -m "<type>(<scope>): <summary>"`.
 4. `git push origin master` (SOLO `origin`).
 5. `gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Success)'` — exit 0=éxito, 1=falló, 2=cancelado. **NO timeout, NO streaming.**
