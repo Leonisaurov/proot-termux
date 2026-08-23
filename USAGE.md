@@ -454,6 +454,11 @@ resolver el dominio, el arranque falla de forma fail-closed. Un punto final
 siendo la ruta compatible sin mediación. La mediación cubre `bind`, `listen`,
 `connect`, `sendto` y `recvfrom` antes de las traducciones de `--proxy` o `-p`;
 la autorización en tiempo de conexión es únicamente por IP fijada.
+Con una política activa, las consultas DNS UDP del guest se contestan de forma
+sintética usando únicamente ese snapshot A/AAAA; no se envían al servidor DNS
+del guest. Las consultas de dominios no fijados reciben NXDOMAIN y el resultado
+solo puede usarse si la IP también satisface las reglas numéricas. Esto evita que
+`/etc/hosts`, un DNS alternativo o una respuesta manipulada amplíen el permiso.
 `--net-ask FD`
 permite un harness externo fail-closed: usa mensajes nativos de tamaño fijo,
 versión 1, request ID y timeout de 1000 ms; una respuesta incompleta, inválida,

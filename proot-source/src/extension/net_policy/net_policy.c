@@ -14,6 +14,8 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
+#include <stddef.h>
 #include <netdb.h>
 
 #include "attribute.h"
@@ -73,6 +75,7 @@ typedef struct __attribute__((packed)) {
 
 typedef struct {
 	char *value;
+	char source[NET_DNS_NAME_LEN];
 	/* Domain rules are configuration records only.  They never participate in
 	 * destination_matches(); resolve_pending_domains() appends their fixed
 	 * numeric rules to the same list. */
@@ -90,9 +93,13 @@ typedef struct {
 	pid_t pid;
 	int fd;
 	uint16_t request_id;
+	uint16_t qtype;
 	char name[NET_DNS_NAME_LEN];
 	char cname[NET_DNS_NAME_LEN];
 	struct sockaddr_storage server;
+	unsigned char response[4096];
+	size_t response_len;
+	int response_ready;
 } NetDnsQuery;
 
 typedef struct {
@@ -133,10 +140,36 @@ static FilteredSysnum net_policy_sysnums[] = {
 	{ PR_connect, 0 },
 	{ PR_sendto, FILTER_SYSEXIT },
 	{ PR_recvfrom, FILTER_SYSEXIT },
+	{ PR_recvmsg, FILTER_SYSEXIT },
+	{ PR_ppoll, FILTER_SYSEXIT },
+	{ PR_read, FILTER_SYSEXIT },
 	FILTERED_SYSNUM_END
 };
 
 static int read_sockaddr(Tracee *tracee, word_t ptr, struct sockaddr_storage *addr);
+static void dns_prepare_response(NetPolicyConfig *config, NetDnsQuery *query,
+					 const unsigned char *packet, size_t length,
+					 Tracee *tracee);
+
+static void dns_canonical(const char *input, char *output, size_t size)
+{
+	size_t n = strlen(input);
+	if (n != 0 && input[n - 1] == '.') n--;
+	if (n >= size) n = size - 1;
+	for (size_t i = 0; i < n; i++) {
+		char c = input[i];
+		output[i] = (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+	}
+	output[n] = '\0';
+}
+
+static int dns_names_equal(const char *a, const char *b)
+{
+	char ca[NET_DNS_NAME_LEN], cb[NET_DNS_NAME_LEN];
+	dns_canonical(a, ca, sizeof(ca));
+	dns_canonical(b, cb, sizeof(cb));
+	return strcmp(ca, cb) == 0;
+}
 
 static uint64_t dns_now_ms(void)
 {
@@ -215,7 +248,8 @@ static void dns_remember_query(NetPolicyConfig *config, pid_t pid, int fd,
 	NetDnsQuery *query;
 	char name[NET_DNS_NAME_LEN];
 	size_t next;
-	if (length < 12 || (packet[2] & 0x80) || packet[4] == 0 ||
+	if (length < 12 || (packet[2] & 0x80) ||
+	    (((unsigned int)packet[4] << 8) | packet[5]) == 0 ||
 	    dns_read_name(packet, length, 12, name, sizeof(name), &next) < 0)
 		return;
 	if (config->dns_query_count == NET_DNS_MAX_QUERIES)
@@ -225,8 +259,12 @@ static void dns_remember_query(NetPolicyConfig *config, pid_t pid, int fd,
 	query->pid = pid;
 	query->fd = fd;
 	query->request_id = ((uint16_t)packet[0] << 8) | packet[1];
+	if (next + 4 > length)
+		return;
+	query->qtype = ((uint16_t)packet[next] << 8) | packet[next + 1];
 	memcpy(query->name, name, sizeof(query->name));
 	if (server != NULL) query->server = *server;
+	dns_prepare_response(config, query, packet, length, tracee);
 	VERBOSE(tracee, 3, "net_policy: DNS query id=%u name=%s", query->request_id, query->name);
 }
 
@@ -339,6 +377,153 @@ static void dns_observe_receive(NetPolicyConfig *config, Tracee *tracee)
 				      packet_len, &server, tracee);
 }
 
+static NetDnsQuery *dns_pending_query(NetPolicyConfig *config, pid_t pid, int fd)
+{
+	for (int i = (int)config->dns_query_count - 1; i >= 0; i--)
+		if (config->dns_queries[i].pid == pid && config->dns_queries[i].fd == fd &&
+		    config->dns_queries[i].response_ready)
+			return &config->dns_queries[i];
+	return NULL;
+}
+
+static int dns_server_port(const struct sockaddr_storage *addr)
+{
+	if (addr->ss_family == AF_INET)
+		return ntohs(((const struct sockaddr_in *)addr)->sin_port);
+	if (addr->ss_family == AF_INET6)
+		return ntohs(((const struct sockaddr_in6 *)addr)->sin6_port);
+	return -1;
+}
+
+static int dns_emulate_send(NetPolicyConfig *config, Tracee *tracee)
+{
+	struct sockaddr_storage server;
+	unsigned char packet[4096];
+	word_t addr_ptr = peek_reg(tracee, CURRENT, SYSARG_5);
+	word_t packet_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
+	word_t packet_len = peek_reg(tracee, CURRENT, SYSARG_3);
+	unsigned int old_count = config->dns_query_count;
+	if (addr_ptr == 0 || packet_ptr == 0 || packet_len == 0 || packet_len > sizeof(packet) ||
+	    read_sockaddr(tracee, addr_ptr, &server) < 0 || dns_server_port(&server) != 53 ||
+	    read_data(tracee, packet, packet_ptr, packet_len) < 0)
+		return 0;
+	dns_remember_query(config, tracee->pid,
+				   (int)peek_reg(tracee, CURRENT, SYSARG_1), packet,
+				   packet_len, &server, tracee);
+	if (config->dns_query_count == old_count && old_count < NET_DNS_MAX_QUERIES)
+		return 0;
+	NetDnsQuery *query = &config->dns_queries[config->dns_query_count - 1];
+	if (query->pid != tracee->pid || query->fd != (int)peek_reg(tracee, CURRENT, SYSARG_1))
+		return 0;
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, packet_len);
+	return 1;
+}
+
+static int dns_emulate_receive(NetPolicyConfig *config, Tracee *tracee)
+{
+	int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+	NetDnsQuery *query = dns_pending_query(config, tracee->pid, fd);
+	word_t buf, len, addr_ptr, size_ptr;
+	size_t copied;
+	if (query == NULL)
+		return 0;
+	buf = peek_reg(tracee, CURRENT, SYSARG_2);
+	len = peek_reg(tracee, CURRENT, SYSARG_3);
+	addr_ptr = peek_reg(tracee, CURRENT, SYSARG_5);
+	size_ptr = peek_reg(tracee, CURRENT, SYSARG_6);
+	copied = len < query->response_len ? len : query->response_len;
+	if (copied != 0 && write_data(tracee, buf, query->response, copied) < 0)
+		return 0;
+	if (addr_ptr != 0 && size_ptr != 0) {
+		word_t size = sizeof(query->server);
+		(void) read_data(tracee, &size, size_ptr, sizeof(size));
+		if (size > sizeof(query->server)) size = sizeof(query->server);
+		if (write_data(tracee, addr_ptr, &query->server, size) < 0 ||
+		    write_data(tracee, size_ptr, &size, sizeof(size)) < 0)
+			return 0;
+	}
+	query->response_ready = 0;
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, copied);
+	return 1;
+}
+
+static int dns_emulate_recvmsg(NetPolicyConfig *config, Tracee *tracee)
+{
+	int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+	NetDnsQuery *query = dns_pending_query(config, tracee->pid, fd);
+	struct msghdr message;
+	struct iovec vector;
+	word_t message_ptr = peek_reg(tracee, CURRENT, SYSARG_2);
+	size_t copied;
+	if (query == NULL || message_ptr == 0 ||
+	    read_data(tracee, &message, message_ptr, sizeof(message)) < 0 ||
+	    message.msg_iov == NULL || message.msg_iovlen == 0 ||
+	    read_data(tracee, &vector, (word_t)message.msg_iov, sizeof(vector)) < 0)
+		return 0;
+	copied = vector.iov_len < query->response_len ? vector.iov_len : query->response_len;
+	if (copied != 0 && write_data(tracee, (word_t)vector.iov_base,
+					 query->response, copied) < 0)
+		return 0;
+	if (message.msg_name != NULL && message.msg_namelen != 0) {
+		socklen_t size = message.msg_namelen < sizeof(query->server) ?
+			message.msg_namelen : sizeof(query->server);
+		if (write_data(tracee, (word_t)message.msg_name, &query->server, size) < 0 ||
+		    write_data(tracee, message_ptr + offsetof(struct msghdr, msg_namelen),
+			       &size, sizeof(size)) < 0)
+			return 0;
+	}
+	query->response_ready = 0;
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, copied);
+	return 1;
+}
+
+static int dns_emulate_ppoll(NetPolicyConfig *config, Tracee *tracee)
+{
+	word_t fds_ptr = peek_reg(tracee, CURRENT, SYSARG_1);
+	word_t nfds = peek_reg(tracee, CURRENT, SYSARG_2);
+	struct pollfd fds[64];
+	unsigned int ready = 0;
+	if (fds_ptr == 0 || nfds == 0 || nfds > 64 ||
+	    read_data(tracee, fds, fds_ptr, nfds * sizeof(fds[0])) < 0)
+		return 0;
+	for (unsigned int i = 0; i < nfds; i++) {
+		fds[i].revents = 0;
+		if ((fds[i].events & POLLIN) != 0 &&
+		    dns_pending_query(config, tracee->pid, fds[i].fd) != NULL) {
+			fds[i].revents = POLLIN;
+			ready++;
+		}
+	}
+	if (ready == 0)
+		return 0;
+	if (write_data(tracee, fds_ptr, fds, nfds * sizeof(fds[0])) < 0)
+		return 0;
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, ready);
+	return 1;
+}
+
+static int dns_emulate_read(NetPolicyConfig *config, Tracee *tracee)
+{
+	int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+	NetDnsQuery *query = dns_pending_query(config, tracee->pid, fd);
+	word_t buffer = peek_reg(tracee, CURRENT, SYSARG_2);
+	word_t length = peek_reg(tracee, CURRENT, SYSARG_3);
+	size_t copied;
+	if (query == NULL || buffer == 0)
+		return 0;
+	copied = length < query->response_len ? length : query->response_len;
+	if (copied != 0 && write_data(tracee, buffer, query->response, copied) < 0)
+		return 0;
+	query->response_ready = 0;
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, copied);
+	return 1;
+}
+
 static NetPolicyConfig *policy_config(Tracee *tracee)
 {
 	Extension *extension = get_extension(tracee, net_policy_callback);
@@ -375,6 +560,7 @@ static int add_rule(Tracee *tracee, NetPolicyRule *rules, unsigned int *count,
 		return -ENOMEM;
 	rules[*count].is_domain = 0;
 	rules[*count].resolved = 0;
+	rules[*count].source[0] = '\0';
 	(*count)++;
 	return 0;
 }
@@ -479,6 +665,19 @@ static int add_fixed_rule(Tracee *tracee, NetPolicyRule *rules, unsigned int *co
 		return -E2BIG;
 	if (add_rule(tracee, rules, count, fixed) < 0)
 		return -ENOMEM;
+	{
+		const char *source_host;
+		size_t source_len, source_prefix, source_suffix;
+		if (destination_host(original, &source_host, &source_len,
+					     &source_prefix, &source_suffix) == 0 &&
+		    source_len < NET_DNS_NAME_LEN) {
+			char source[NET_DNS_NAME_LEN];
+			memcpy(source, source_host, source_len);
+			source[source_len] = '\0';
+			dns_canonical(source, rules[*count - 1].source,
+				      sizeof(rules[*count - 1].source));
+		}
+	}
 	return 0;
 }
 
@@ -583,6 +782,95 @@ static int resolve_pending_domains(Tracee *tracee, NetPolicyRule *rules,
 		if (resolve_rule(tracee, rules, count, &rules[i]) < 0)
 			return -1;
 	return 0;
+}
+
+static void dns_prepare_response(NetPolicyConfig *config, NetDnsQuery *query,
+					 const unsigned char *packet, size_t length,
+					 Tracee *tracee)
+{
+	NetPolicyRule *sets[2] = { config->allow, config->deny };
+	unsigned int counts[2] = { config->allow_count, config->deny_count };
+	char wanted[NET_DNS_NAME_LEN];
+	size_t question_end;
+	unsigned int answers = 0;
+	unsigned char *out = query->response;
+
+	if (dns_skip_name(packet, length, 12, &question_end) < 0 ||
+	    question_end + 4 > length ||
+	    (query->qtype != 1 && query->qtype != 28))
+		return;
+	question_end += 4;
+	if (question_end > sizeof(query->response))
+		return;
+	dns_canonical(query->name, wanted, sizeof(wanted));
+	memcpy(out, packet, question_end);
+	out[2] = 0x81;
+	out[3] = 0x80;
+	out[4] = 0;
+	out[5] = 1;
+	out[6] = out[7] = 0;
+	query->response_len = question_end;
+
+	for (unsigned int set = 0; set < 2; set++) {
+		for (unsigned int i = 0; i < counts[set]; i++) {
+			const char *host;
+			size_t host_len, prefix, suffix;
+			unsigned char address[16];
+			int family;
+			if (sets[set][i].is_domain || sets[set][i].source[0] == '\0' ||
+			    !dns_names_equal(sets[set][i].source, wanted) ||
+			    destination_host(sets[set][i].value, &host, &host_len,
+						     &prefix, &suffix) < 0 ||
+			    !host_is_numeric(host, host_len) || host_len >= NET_POLICY_RULE_LEN)
+				continue;
+			(void)prefix;
+			(void)suffix;
+			char ip[NET_POLICY_RULE_LEN];
+			memcpy(ip, host, host_len);
+			ip[host_len] = '\0';
+			char *slash = strchr(ip, '/');
+			if (slash != NULL) *slash = '\0';
+			family = strchr(ip, ':') != NULL ? AF_INET6 : AF_INET;
+			if ((query->qtype == 1 && family != AF_INET) ||
+			    (query->qtype == 28 && family != AF_INET6) ||
+			    inet_pton(family, ip, address) != 1)
+				continue;
+			int duplicate = 0;
+			/* The fixed-rule list is already de-duplicated by resolve_rule;
+			 * duplicate deny/allow entries are harmless to DNS clients but
+			 * avoid emitting them when the same snapshot appears twice. */
+			for (unsigned int j = 0; j < answers; j++) {
+				size_t rr = question_end + j * (12 + (family == AF_INET ? 4 : 16));
+				if (rr + 12 + (family == AF_INET ? 4 : 16) <= query->response_len &&
+				    out[rr + 0] == 0xc0 && out[rr + 1] == 0x0c &&
+				    out[rr + 2] == 0 && out[rr + 3] == query->qtype &&
+				    memcmp(out + rr + 12, address, family == AF_INET ? 4 : 16) == 0)
+					duplicate = 1;
+			}
+			if (duplicate) continue;
+			if (query->response_len + 12 + (family == AF_INET ? 4 : 16) >
+			    sizeof(query->response) || answers == 65535)
+				continue;
+			unsigned char *rr = out + query->response_len;
+			rr[0] = 0xc0; rr[1] = 0x0c;
+		rr[2] = 0; rr[3] = query->qtype;
+		rr[4] = 0; rr[5] = 1;
+		rr[6] = 0; rr[7] = 0; rr[8] = 0; rr[9] = 60;
+		uint16_t rdlen = family == AF_INET ? 4 : 16;
+		rr[10] = 0; rr[11] = (unsigned char)rdlen;
+		memcpy(rr + 12, address, rdlen);
+		query->response_len += 12 + rdlen;
+		answers++;
+		}
+	}
+	if (answers == 0) {
+		out[3] = 0x83; /* NXDOMAIN: no guest DNS data was authorized. */
+	}
+	out[6] = (unsigned char)(answers >> 8);
+	out[7] = (unsigned char)answers;
+	query->response_ready = 1;
+	VERBOSE(tracee, 3, "net_policy: synthetic DNS response name=%s answers=%u",
+		query->name, answers);
 }
 
 static int parse_mode(const char *mode, NetPolicyMode *result)
@@ -907,6 +1195,12 @@ static int check_operation(Tracee *tracee, NetPolicyConfig *config, int syscall)
 			port = ntohs(((struct sockaddr_in6 *)&addr)->sin6_port);
 		remember_bind(config, tracee->pid,
 			(int) peek_reg(tracee, CURRENT, SYSARG_1), port);
+		/* A port-zero bind only asks the kernel for an ephemeral client
+		 * port; it does not publish a listener and must not require a
+		 * --net-allow-bind rule.  An ensuing listen() is still checked
+		 * after the kernel chooses the concrete port. */
+		if (port == 0)
+			return 0;
 		if (bind_matches(config->deny_bind, config->deny_bind_count, port))
 			return -EACCES;
 		if (config->mode == NET_POLICY_DENY &&
@@ -929,6 +1223,11 @@ static int check_operation(Tracee *tracee, NetPolicyConfig *config, int syscall)
 		port = ntohs(((struct sockaddr_in *)&addr)->sin_port);
 	else if (addr.ss_family == AF_INET6)
 		port = ntohs(((struct sockaddr_in6 *)&addr)->sin6_port);
+	/* DNS is a tracer-owned, synthetic service.  The packet itself is
+	 * validated and answered below, so this logical connect never reaches a
+	 * real DNS server. */
+	if (syscall == PR_connect && port == 53)
+		return 0;
 	net_class = vnp_classify_destination(tracee, &addr, (uint16_t)port,
 					     proxy, sizeof(proxy));
 	if (any_rule_matches(config->deny, config->deny_count, &addr, port, net_class))
@@ -958,7 +1257,23 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 		NetPolicyConfig *config = talloc_get_type_abort(extension->config, NetPolicyConfig);
 		int syscall = get_sysnum(tracee, CURRENT);
 		if (syscall == PR_bind || syscall == PR_listen || syscall == PR_connect ||
-		    syscall == PR_sendto || syscall == PR_recvfrom) {
+		    syscall == PR_sendto || syscall == PR_recvfrom || syscall == PR_recvmsg ||
+		    syscall == PR_ppoll || syscall == PR_read) {
+			if (config->mode != NET_POLICY_OFF && syscall == PR_sendto &&
+			    dns_emulate_send(config, tracee))
+				return 1;
+			if (config->mode != NET_POLICY_OFF && syscall == PR_recvfrom &&
+			    dns_emulate_receive(config, tracee))
+				return 1;
+			if (config->mode != NET_POLICY_OFF && syscall == PR_recvmsg &&
+			    dns_emulate_recvmsg(config, tracee))
+				return 1;
+			if (config->mode != NET_POLICY_OFF && syscall == PR_ppoll &&
+			    dns_emulate_ppoll(config, tracee))
+				return 1;
+			if (config->mode != NET_POLICY_OFF && syscall == PR_read &&
+			    dns_emulate_read(config, tracee))
+				return 1;
 			if (syscall == PR_sendto)
 				dns_observe_send(config, tracee);
 			int status = check_operation(tracee, config, syscall);
