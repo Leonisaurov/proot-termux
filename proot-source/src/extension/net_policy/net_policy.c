@@ -1115,10 +1115,17 @@ static unsigned int remembered_bind(NetPolicyConfig *config, pid_t pid, int fd)
 	return 0;
 }
 
-static int write_full(int fd, const void *data, size_t size)
+static int write_full_timeout(int fd, const void *data, size_t size)
 {
 	const unsigned char *ptr = data;
 	while (size != 0) {
+		struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+		int ready;
+		do {
+			ready = poll(&pfd, 1, NET_ASK_TIMEOUT_MS);
+		} while (ready < 0 && errno == EINTR);
+		if (ready <= 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
+			return -1;
 		ssize_t n = write(fd, ptr, size);
 		if (n < 0 && errno == EINTR)
 			continue;
@@ -1183,7 +1190,7 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 		proxy = config->proxy;
 	if (proxy[0] != '\0')
 		memcpy(request.proxy, proxy, sizeof(request.proxy));
-	if (write_full(config->ask_fd, &request, sizeof(request)) < 0 ||
+	if (write_full_timeout(config->ask_fd, &request, sizeof(request)) < 0 ||
 	    read_full_timeout(config->ask_fd, &response, sizeof(response)) < 0 ||
 	    response.version != NET_ASK_VERSION ||
 	    response.request_id != request.request_id ||

@@ -466,3 +466,5 @@ solo puede usarse si la IP también satisface las reglas numéricas. Esto evita 
 permite un harness externo fail-closed: usa mensajes nativos de tamaño fijo,
 versión 1, request ID y timeout de 1000 ms; una respuesta incompleta, inválida,
 EOF o timeout deniega la operación.
+La regresión local `pentest/test_net_ask.sh` ejercita el FD heredado con un
+harness `socketpair`, incluyendo respuestas allow y deny.
