@@ -87,6 +87,12 @@ with `:mask`, including access through the usual Termux storage symlinks. Pass
 `--with-storage` explicitly when a guest needs the internal storage; this
 replaces those masks with the corresponding read-write bindings.
 
+The launcher also restores Termux's official `libtermux-exec-ld-preload.so`
+inside the guest shell, with the guest `TERMUX__ROOTFS` and `TERMUX__PREFIX`
+values. This keeps normal Termux shebangs such as `#!/usr/bin/env bash` and
+`#!/bin/bash` working in both launcher modes without rewriting scripts with
+`termux-fix-shebang`.
+
 ---
 
 ## Virtual Networking (`--proxy`)

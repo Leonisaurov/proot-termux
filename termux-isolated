@@ -355,6 +355,9 @@ if [ "$TERMUX_PATHS" = "1" ]; then
     sandbox_git_exec="$TERMUX_PREFIX/libexec/git-core"
     rootfs_arg=""
     guest_bash="$TERMUX_PREFIX/bin/bash"
+    guest_termux_exec_preload="$TERMUX_PREFIX/lib/libtermux-exec-ld-preload.so"
+    guest_termux_rootfs="$TERMUX_ROOT"
+    guest_termux_prefix="$TERMUX_PREFIX"
 else
     sandbox_home="/home"
     sandbox_prefix="/usr"
@@ -365,6 +368,19 @@ else
     sandbox_git_exec="/usr/libexec/git-core"
     rootfs_arg="--rootfs=$TERMUX_ROOT"
     guest_bash="/bin/bash"
+    guest_termux_exec_preload="/usr/lib/libtermux-exec-ld-preload.so"
+    guest_termux_rootfs="/"
+    guest_termux_prefix="/usr"
+fi
+
+# Termux normally injects this through the parent shell's LD_PRELOAD.  The
+# isolated launcher intentionally starts with env -i, so restore only the
+# official termux-exec shebang interceptor inside the guest shell.  This keeps
+# /usr/bin/env bash, /bin/sh and similar Termux shebangs working without
+# inheriting arbitrary host preload libraries.
+guest_exec_prefix=""
+if [ -f "$TERMUX_PREFIX/lib/libtermux-exec-ld-preload.so" ]; then
+    guest_exec_prefix="export TERMUX__ROOTFS='$guest_termux_rootfs'; export TERMUX__PREFIX='$guest_termux_prefix'; export LD_PRELOAD='$guest_termux_exec_preload'; export TERMUX_EXEC__EXECVE_CALL__INTERCEPT=1; "
 fi
 
 # Antepone los shims --as al PATH del sandbox (bionic no lee /etc/passwd)
@@ -429,4 +445,4 @@ exec env \
   --bind=/proc:/proc \
   $extra \
   "${PROOT_ARGS[@]}" \
-  $guest_bash -c "$cmd"
+  $guest_bash -c "$guest_exec_prefix$cmd"

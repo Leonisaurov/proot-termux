@@ -201,6 +201,7 @@ pentest/test_phase_c.sh        # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fak
 pentest/test_d4_e1_e3_e6.sh   # D4 socket, E1 renameat2, E3 uname, E6 mknod (39 tests)
 pentest/test_upstream_link2symlink.sh  # regresiones portadas de upstream
 pentest/test_termux_isolated_storage.sh # storage opt-in y binds :mask
+pentest/test_termux_isolated_shebang.sh # termux-exec y shebangs en ambos modos
 ```
 
 Para una regresión nueva, crea primero el script, ejecútalo con `bash -n` y
