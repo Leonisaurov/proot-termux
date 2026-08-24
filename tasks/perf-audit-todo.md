@@ -1,0 +1,7 @@
+- [x] Preflight de arquitectura, kernel, toolchain, TMPDIR y espacio.
+- [x] Diseñar cache lazy de extensiones con invalidación en `REMOVED`.
+- [x] Incrementar `TERMUX_PKG_REVISION`.
+- [x] Compilar con `scripts/build-native.sh -j 2 --skip-package` (primera iteración).
+- [x] Recompilar tras la revisión final del lifecycle del cache.
+- [x] Ejecutar validaciones funcionales y benchmark persistente.
+- [x] Registrar resultados y revisar diff final.

@@ -170,12 +170,17 @@ typedef enum {
 #define CLONE_RECONF ((word_t) -1)
 
 struct extension;
+typedef struct extensions Extensions;
 typedef int (*extension_callback_t)(struct extension *extension, ExtensionEvent event,
 				intptr_t data1, intptr_t data2);
 
 typedef struct extension {
 	/* Function to be called when any event occured.  */
 	extension_callback_t callback;
+
+	/* Owning list head, used to invalidate the optional lookup cache during
+	 * talloc destruction. */
+	Extensions *owner;
 
 	/* A chunk of memory allocated by any talloc functions.
 	 * Mainly useful to store a configuration.  */
@@ -189,7 +194,20 @@ typedef struct extension {
 	LIST_ENTRY(extension) link;
 } Extension;
 
-typedef LIST_HEAD(extensions, extension) Extensions;
+/*
+ * The list is normally only a handful of entries, but several extensions
+ * are queried from syscall hot paths.  Keep their optional lookup cache in
+ * the lazily allocated list head instead of in Tracee: inactive capabilities
+ * therefore consume no per-tracee storage.
+ */
+struct extensions {
+	struct extension *lh_first;
+	struct extension *net_policy;
+	struct extension *proc_isolation;
+	struct extension *virtual_net;
+	struct extension *resource_limit;
+	struct extension *fake_id0;
+};
 
 extern int initialize_extension(Tracee *tracee, extension_callback_t callback, const char *cli);
 extern void inherit_extensions(Tracee *child, Tracee *parent, word_t clone_flags);

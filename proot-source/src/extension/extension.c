@@ -31,6 +31,8 @@
 
 #include "compat.h"
 
+static void rebuild_extension_cache(Extensions *extensions);
+
 /**
  * Remove an @extension from its tracee's list, then send it the
  * "REMOVED" event.
@@ -39,12 +41,57 @@
  */
 static int remove_extension(Extension *extension)
 {
+	Extensions *extensions = extension->owner;
+	/* LIST_REMOVE unlinks the node before REMOVED is delivered.  Clear the
+	 * optional cache at the same boundary so callbacks cannot observe a
+	 * dangling extension during teardown. */
+	if (extensions != NULL) {
+		if (extensions->net_policy == extension)
+			extensions->net_policy = NULL;
+		if (extensions->proc_isolation == extension)
+			extensions->proc_isolation = NULL;
+		if (extensions->virtual_net == extension)
+			extensions->virtual_net = NULL;
+		if (extensions->resource_limit == extension)
+			extensions->resource_limit = NULL;
+		if (extensions->fake_id0 == extension)
+			extensions->fake_id0 = NULL;
+	}
 	LIST_REMOVE(extension, link);
+	if (extensions != NULL)
+		rebuild_extension_cache(extensions);
 	if (extension->callback != NULL)
 		extension->callback(extension, REMOVED, 0, 0);
 
 	bzero(extension, sizeof(Extension));
 	return 0;
+}
+
+static void cache_extension(Extensions *extensions, Extension *extension)
+{
+	if (extension->callback == net_policy_callback)
+		extensions->net_policy = extension;
+	else if (extension->callback == hpc_callback)
+		extensions->proc_isolation = extension;
+	else if (extension->callback == vnp_callback)
+		extensions->virtual_net = extension;
+	else if (extension->callback == rlimit_callback)
+		extensions->resource_limit = extension;
+	else if (extension->callback == fake_id0_callback)
+		extensions->fake_id0 = extension;
+}
+
+static void rebuild_extension_cache(Extensions *extensions)
+{
+	Extension *extension;
+
+	extensions->net_policy = NULL;
+	extensions->proc_isolation = NULL;
+	extensions->virtual_net = NULL;
+	extensions->resource_limit = NULL;
+	extensions->fake_id0 = NULL;
+	LIST_FOREACH(extension, extensions, link)
+		cache_extension(extensions, extension);
 }
 
 /**
@@ -68,9 +115,11 @@ static Extension *new_extension(Tracee *tracee, extension_callback_t callback)
 	if (extension == NULL)
 		return NULL;
 	extension->callback = callback;
+	extension->owner = tracee->extensions;
 
 	/* Attach it to its tracee. */
 	LIST_INSERT_HEAD(tracee->extensions, extension, link);
+	cache_extension(tracee->extensions, extension);
 	talloc_set_destructor(extension, remove_extension);
 
 	return extension;
@@ -86,6 +135,19 @@ Extension *get_extension(Tracee *tracee, extension_callback_t callback)
 
 	if (tracee->extensions == NULL)
 		return NULL;
+
+	/* These callbacks are looked up from path/syscall handlers.  A NULL cache
+	 * is also the inactive fast path; no list walk is needed in either case. */
+	if (callback == net_policy_callback)
+		return tracee->extensions->net_policy;
+	if (callback == hpc_callback)
+		return tracee->extensions->proc_isolation;
+	if (callback == vnp_callback)
+		return tracee->extensions->virtual_net;
+	if (callback == rlimit_callback)
+		return tracee->extensions->resource_limit;
+	if (callback == fake_id0_callback)
+		return tracee->extensions->fake_id0;
 
 	LIST_FOREACH(extension, tracee->extensions, link) {
 		if (extension->callback == callback)
