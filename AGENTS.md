@@ -123,6 +123,10 @@ Discrepancia verificada entre ambos. NO asumas cuál es canónica ni la sincroni
   `--with-storage`, `--rw-dir`, etc.). Los casos que comparan vistas deben
   cubrir cada modo relevante; no se sustituye el launcher por una invocación
   directa de proot.
+- El modo interactivo sin comando debe lanzar la shell ejecutable indicada por
+  `$SHELL` dentro del prefijo Termux, traduciendo `$PREFIX/...` a `/usr/...`
+  en rootfs; bash es únicamente el fallback. Las pruebas de esta ruta deben
+  usar un pseudo-terminal, no solo stdin por pipe.
 - Conserva `target/`, cachés y `sccache` compatibles; no uses `cargo clean` ni borres cachés sin una causa comprobada.
 
 ### Propósito e independencia de proot
@@ -202,6 +206,7 @@ pentest/test_d4_e1_e3_e6.sh   # D4 socket, E1 renameat2, E3 uname, E6 mknod (39 
 pentest/test_upstream_link2symlink.sh  # regresiones portadas de upstream
 pentest/test_termux_isolated_storage.sh # storage opt-in y binds :mask
 pentest/test_termux_isolated_shebang.sh # termux-exec y shebangs en ambos modos
+pentest/test_termux_isolated_default_shell.sh # shell $SHELL en modo interactivo
 ```
 
 Para una regresión nueva, crea primero el script, ejecútalo con `bash -n` y

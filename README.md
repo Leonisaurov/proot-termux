@@ -93,6 +93,11 @@ values. This keeps normal Termux shebangs such as `#!/usr/bin/env bash` and
 `#!/bin/bash` working in both launcher modes without rewriting scripts with
 `termux-fix-shebang`.
 
+When started without a command, `termux-isolated` launches the shell selected
+by Termux through `$SHELL` (for example fish), translating the Termux prefix to
+the guest prefix in rootfs mode. If that shell is unavailable or outside the
+Termux prefix, it safely falls back to bash.
+
 ---
 
 ## Virtual Networking (`--proxy`)

@@ -49,6 +49,7 @@ AS_ROOT=0
 VERBOSE=0
 PROC_ISOLATED=1
 WITH_STORAGE=0
+CONFIGURED_SHELL="${SHELL:-$TERMUX_PREFIX/bin/bash}"
 COMMAND_MODE=0
 arg_count=0
 while [ "$#" -gt 0 ]; do
@@ -226,10 +227,10 @@ if [ -z "$cmd" ]; then
     if [ "$TERMUX_PATHS" = "1" ]; then
         # En termux-paths el cwd host real ya es un path guest válido
         cwd_arg="--cwd=$TERMUX_ROOT/home"
-        cmd="exec $TERMUX_PREFIX/bin/bash -l"
+        cmd="exec $guest_login_shell -l"
     else
         cwd_arg="--cwd=/home"
-        cmd="exec bash -l"
+        cmd="exec $guest_login_shell -l"
     fi
     if [ "$VERBOSE" = "1" ]; then
         echo "[sandbox] Termux aislado — shell interactivo (--help para opciones)" >&2
@@ -381,6 +382,37 @@ fi
 guest_exec_prefix=""
 if [ -f "$TERMUX_PREFIX/lib/libtermux-exec-ld-preload.so" ]; then
     guest_exec_prefix="export TERMUX__ROOTFS='$guest_termux_rootfs'; export TERMUX__PREFIX='$guest_termux_prefix'; export LD_PRELOAD='$guest_termux_exec_preload'; export TERMUX_EXEC__EXECVE_CALL__INTERCEPT=1; "
+fi
+
+# Preserve the shell selected by Termux for the no-command interactive mode.
+# Only shells under the Termux prefix are translated into the rootfs guest;
+# arbitrary host paths are rejected and fall back to bash.
+guest_login_shell=""
+case "$CONFIGURED_SHELL" in
+    "$TERMUX_PREFIX"/*)
+        shell_suffix="${CONFIGURED_SHELL#"$TERMUX_PREFIX"/}"
+        if [ -x "$CONFIGURED_SHELL" ]; then
+            if [ "$TERMUX_PATHS" = "1" ]; then
+                guest_login_shell="$CONFIGURED_SHELL"
+            else
+                guest_login_shell="/usr/$shell_suffix"
+            fi
+        fi
+        ;;
+    /bin/*|/usr/bin/*)
+        if [ "$TERMUX_PATHS" = "1" ] && [ -x "$TERMUX_PREFIX$CONFIGURED_SHELL" ]; then
+            guest_login_shell="$TERMUX_PREFIX$CONFIGURED_SHELL"
+        elif [ "$TERMUX_PATHS" != "1" ] && [ -x "$CONFIGURED_SHELL" ]; then
+            guest_login_shell="$CONFIGURED_SHELL"
+        fi
+        ;;
+esac
+if [ -z "$guest_login_shell" ]; then
+    if [ "$TERMUX_PATHS" = "1" ]; then
+        guest_login_shell="$TERMUX_PREFIX/bin/bash"
+    else
+        guest_login_shell="/bin/bash"
+    fi
 fi
 
 # Antepone los shims --as al PATH del sandbox (bionic no lee /etc/passwd)
