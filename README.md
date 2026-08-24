@@ -87,11 +87,12 @@ with `:mask`, including access through the usual Termux storage symlinks. Pass
 `--with-storage` explicitly when a guest needs the internal storage; this
 replaces those masks with the corresponding read-write bindings.
 
-The launcher also restores Termux's official `libtermux-exec-ld-preload.so`
-inside the guest shell, with the guest `TERMUX__ROOTFS` and `TERMUX__PREFIX`
-values. This keeps normal Termux shebangs such as `#!/usr/bin/env bash` and
-`#!/bin/bash` working in both launcher modes without rewriting scripts with
-`termux-fix-shebang`.
+The launcher keeps normal Termux shebangs such as `#!/usr/bin/env bash` and
+`#!/bin/bash` working in both launcher modes by binding the Termux executable
+directory at the conventional `/bin` and `/usr/bin` guest paths. It does not
+inherit `libtermux-exec-ld-preload.so` into every child process, avoiding the
+per-`execve` overhead of that interceptor. Scripts do not need to be rewritten
+with `termux-fix-shebang`.
 
 When started without a command, `termux-isolated` launches the shell selected
 by Termux (the persistent `~/.termux/shell` selection, with `$SHELL` as a
