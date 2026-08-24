@@ -13,6 +13,9 @@ uso: termux-isolated [opciones] [comando...]
 
   sin argumentos   shell interactivo (bash -l) aislado
   --with-sys       bind /sys:/sys (opcional)
+  --with-storage   Expone el almacenamiento interno en $HOME/storage,
+                   /storage/emulated/0 y /sdcard (opt-in; por defecto se
+                   ocultan con :mask)
   --no-proc-isolated
                    Desactiva el aislamiento de /proc
   --               Fin de opciones; todo lo siguiente se ejecuta como comando
@@ -45,6 +48,7 @@ AS_USER=""
 AS_ROOT=0
 VERBOSE=0
 PROC_ISOLATED=1
+WITH_STORAGE=0
 COMMAND_MODE=0
 arg_count=0
 while [ "$#" -gt 0 ]; do
@@ -66,6 +70,7 @@ while [ "$#" -gt 0 ]; do
     case "$arg" in
         --)             COMMAND_MODE=1; shift ;;
         --with-sys)     extra="$extra --bind=/sys:/sys"; shift ;;
+        --with-storage) WITH_STORAGE=1; shift ;;
         --no-proc-isolated) PROC_ISOLATED=0; shift ;;
         --as-root)      AS_ROOT=1; extra="$extra --change-id=0:0"; shift ;;
         --termux-paths) TERMUX_PATHS=1; shift ;;
@@ -187,6 +192,31 @@ EOF
 else
     passwd_bind=""
     as_env=""
+fi
+
+# Android internal storage is never exposed by default.  Keep the visible
+# mount points present but deny traversal/content access with :mask.  This is
+# deliberately implemented as ordinary bindings so it also covers symlink
+# based access through $HOME/storage without a consumer-side shadow table.
+STORAGE_HOME_HOST="$TERMUX_ROOT/home/storage"
+if [ "$TERMUX_PATHS" = "1" ]; then
+    STORAGE_HOME_GUEST="$TERMUX_ROOT/home/storage"
+else
+    STORAGE_HOME_GUEST="/home/storage"
+fi
+
+if [ "$WITH_STORAGE" = "1" ]; then
+    storage_binds="\
+  --bind=$STORAGE_HOME_HOST:$STORAGE_HOME_GUEST \
+  --bind=/storage/emulated/0:/storage/emulated/0 \
+  --bind=/storage/self/primary:/storage/self/primary \
+  --bind=/storage/emulated/0:/sdcard"
+else
+    storage_binds="\
+  --bind=$STORAGE_HOME_HOST:$STORAGE_HOME_GUEST:mask \
+  --bind=/storage/emulated/0:/storage/emulated/0:mask \
+  --bind=/storage/self/primary:/storage/self/primary:mask \
+  --bind=/storage/emulated/0:/sdcard:mask"
 fi
 
 # Sin comando -> shell interactivo de login; con comando -> --cwd= traducido
@@ -393,6 +423,7 @@ exec env \
   --bind=/linkerconfig/ld.config.txt:/linkerconfig/ld.config.txt:ro \
   $runtime_binds \
   $strict_binds \
+  $storage_binds \
   $passwd_bind \
   --bind=/dev:/dev \
   --bind=/proc:/proc \

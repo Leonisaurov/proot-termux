@@ -113,6 +113,16 @@ Discrepancia verificada entre ambos. NO asumas cuál es canónica ni la sincroni
   asumir como rutas guest. En una jerarquía rootfs sí deben usarse las rutas
   Linux del rootfs. Los tests deben construir sus objetivos según el modo que
   realmente ejecutan.
+- Toda regresión nueva debe convertirse primero en un archivo revisable
+  `pentest/test_*.sh` (o en el harness equivalente), con preflight, fixtures
+  temporales bajo `$TMPDIR`, separación explícita host/guest y cleanup. No se
+  valida una feature nueva improvisando comandos sueltos directamente en la
+  terminal: se revisa el script y luego se ejecuta ese archivo con escalada.
+- Si el comportamiento pertenece a `termux-isolated`, el test debe invocar
+  `./termux-isolated` y ejercer sus opciones reales (`--termux-paths`, rootfs,
+  `--with-storage`, `--rw-dir`, etc.). Los casos que comparan vistas deben
+  cubrir cada modo relevante; no se sustituye el launcher por una invocación
+  directa de proot.
 - Conserva `target/`, cachés y `sccache` compatibles; no uses `cargo clean` ni borres cachés sin una causa comprobada.
 
 ### Propósito e independencia de proot
@@ -189,7 +199,14 @@ pentest/test_b6.sh             # B6: bridge children killed on exit
 pentest/test_b8.sh             # B8: talloc leak verification
 pentest/test_phase_c.sh        # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fake-perms
 pentest/test_d4_e1_e3_e6.sh   # D4 socket, E1 renameat2, E3 uname, E6 mknod (39 tests)
+pentest/test_upstream_link2symlink.sh  # regresiones portadas de upstream
+pentest/test_termux_isolated_storage.sh # storage opt-in y binds :mask
 ```
+
+Para una regresión nueva, crea primero el script, ejecútalo con `bash -n` y
+`git diff --check`, y después lanza el archivo mediante `require_escalated`.
+La batería completa se ejecuta con `for test in pentest/test_*.sh; do bash
+"$test"; done`; no se considera suficiente una prueba manual equivalente.
 
 Resultados: B=14/14 PASS, C=6/6 PASS, D4/E1/E3/E6=39/39 PASS. Reportes en `pentest/results/`.
 

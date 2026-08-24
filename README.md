@@ -46,6 +46,12 @@ Para probar, elige primero un modo de rutas y mantenlo: con
 `/bin/sh` y `/etc`. `PROOT_TMP_DIR` y `PROOT_RUNTIME_DIR` son rutas host para
 el propio proot, no rutas guest.
 
+Las regresiones nuevas se añaden como scripts revisables en `pentest/test_*.sh`.
+Primero se valida el script (`bash -n`, `git diff --check`) y después se
+ejecuta el archivo con el flujo elevado de Termux; no se sustituyen por
+comandos improvisados en la terminal. Los tests de `termux-isolated` deben usar
+ese launcher y cubrir el modo de rutas que están verificando.
+
 ---
 
 ## Strict guest `/proc` (`--proc-isolated`)
@@ -74,6 +80,12 @@ example `/usr` or `/home`) and must not reveal Android host paths. Use
 `--no-proc-isolated` is an explicit opt-out: it restores the previous procfs
 behavior, including host procfs data, and is intended only for compatibility
 comparisons. `./termux-isolated` uses the strict view by default.
+
+Android internal storage is unavailable by default. The launcher masks
+`$HOME/storage`, `/storage/emulated/0`, `/storage/self/primary`, and `/sdcard`
+with `:mask`, including access through the usual Termux storage symlinks. Pass
+`--with-storage` explicitly when a guest needs the internal storage; this
+replaces those masks with the corresponding read-write bindings.
 
 ---
 
