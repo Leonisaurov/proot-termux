@@ -11,7 +11,7 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     cat >&2 <<'EOF'
 uso: termux-isolated [opciones] [comando...]
 
-  sin argumentos   shell interactivo (bash -l) aislado
+  sin argumentos   shell interactivo configurado en Termux aislado
   --with-sys       bind /sys:/sys (opcional)
   --with-storage   Expone el almacenamiento interno en $HOME/storage,
                    /storage/emulated/0 y /sdcard (opt-in; por defecto se
@@ -49,7 +49,15 @@ AS_ROOT=0
 VERBOSE=0
 PROC_ISOLATED=1
 WITH_STORAGE=0
-CONFIGURED_SHELL="${SHELL:-$TERMUX_PREFIX/bin/bash}"
+# Termux chsh persists the selected shell here.  Prefer that source over the
+# inherited variable: env -i and callers such as fish need not export SHELL.
+CONFIGURED_SHELL=""
+if [ -L "$TERMUX_ROOT/home/.termux/shell" ]; then
+    CONFIGURED_SHELL=$(readlink "$TERMUX_ROOT/home/.termux/shell")
+fi
+if [ -z "$CONFIGURED_SHELL" ]; then
+    CONFIGURED_SHELL="${SHELL:-$TERMUX_PREFIX/bin/bash}"
+fi
 COMMAND_MODE=0
 arg_count=0
 while [ "$#" -gt 0 ]; do
@@ -220,40 +228,6 @@ else
   --bind=/storage/emulated/0:/sdcard:mask"
 fi
 
-# Sin comando -> shell interactivo de login; con comando -> --cwd= traducido
-# host->guest (proot interpreta el cwd como path GUEST: un cwd absoluto del
-# host genera el warning "can't chdir(...) in the guest rootfs" y cae a "/").
-if [ -z "$cmd" ]; then
-    if [ "$TERMUX_PATHS" = "1" ]; then
-        # En termux-paths el cwd host real ya es un path guest válido
-        cwd_arg="--cwd=$TERMUX_ROOT/home"
-        cmd="exec $guest_login_shell -l"
-    else
-        cwd_arg="--cwd=/home"
-        cmd="exec $guest_login_shell -l"
-    fi
-    if [ "$VERBOSE" = "1" ]; then
-        echo "[sandbox] Termux aislado — shell interactivo (--help para opciones)" >&2
-    fi
-else
-    if [ -n "$CWD_OVERRIDE" ]; then
-        cwd_arg="--cwd=$CWD_OVERRIDE"
-    elif [ "$TERMUX_PATHS" = "1" ]; then
-        # termux-paths: el cwd del host es un path guest válido (binds
-        # directos host==guest) -> --cwd=. sin traducción jerárquica.
-        cwd_arg="--cwd=."
-    elif [ "$PWD" = "$TERMUX_ROOT" ]; then
-        cwd_arg="--cwd=/"
-    elif [ "${PWD#$TERMUX_ROOT/}" != "$PWD" ]; then
-        cwd_arg="--cwd=/${PWD#$TERMUX_ROOT/}"
-    else
-        cwd_arg="--cwd=/home"
-    fi
-    if [ "$VERBOSE" = "1" ]; then
-        echo "[sandbox] Termux aislado — prefijo de Termux y binds explícitos del launcher; /data y /storage no se usan; procesos host invisibles" >&2
-    fi
-fi
-
 # Modo estricto (--rw-dir): traduce el path del dir RW a su par host/guest.
 # Acepta dos formas: un path HOST (empieza con $TERMUX_ROOT, ej. $(pwd)) o
 # un path GUEST absoluto (empieza con /, ej. /tmp, /home/x). Para un path
@@ -412,6 +386,34 @@ if [ -z "$guest_login_shell" ]; then
         guest_login_shell="$TERMUX_PREFIX/bin/bash"
     else
         guest_login_shell="/bin/bash"
+    fi
+fi
+
+# Sin comando -> shell interactivo de login; con comando -> --cwd= traducido.
+if [ -z "$cmd" ]; then
+    if [ "$TERMUX_PATHS" = "1" ]; then
+        cwd_arg="--cwd=$TERMUX_ROOT/home"
+    else
+        cwd_arg="--cwd=/home"
+    fi
+    cmd="$guest_login_shell -i -l"
+    if [ "$VERBOSE" = "1" ]; then
+        echo "[sandbox] Termux aislado — shell interactivo (--help para opciones)" >&2
+    fi
+else
+    if [ -n "$CWD_OVERRIDE" ]; then
+        cwd_arg="--cwd=$CWD_OVERRIDE"
+    elif [ "$TERMUX_PATHS" = "1" ]; then
+        cwd_arg="--cwd=."
+    elif [ "$PWD" = "$TERMUX_ROOT" ]; then
+        cwd_arg="--cwd=/"
+    elif [ "${PWD#$TERMUX_ROOT/}" != "$PWD" ]; then
+        cwd_arg="--cwd=/${PWD#$TERMUX_ROOT/}"
+    else
+        cwd_arg="--cwd=/home"
+    fi
+    if [ "$VERBOSE" = "1" ]; then
+        echo "[sandbox] Termux aislado — prefijo de Termux y binds explícitos del launcher; /data y /storage no se usan; procesos host invisibles" >&2
     fi
 fi
 

@@ -94,9 +94,10 @@ values. This keeps normal Termux shebangs such as `#!/usr/bin/env bash` and
 `termux-fix-shebang`.
 
 When started without a command, `termux-isolated` launches the shell selected
-by Termux through `$SHELL` (for example fish), translating the Termux prefix to
-the guest prefix in rootfs mode. If that shell is unavailable or outside the
-Termux prefix, it safely falls back to bash.
+by Termux (the persistent `~/.termux/shell` selection, with `$SHELL` as a
+fallback; for example fish) in an explicit interactive login session. It
+translates the Termux prefix to the guest prefix in rootfs mode. If that shell
+is unavailable or outside the Termux prefix, it safely falls back to bash.
 
 ---
 
