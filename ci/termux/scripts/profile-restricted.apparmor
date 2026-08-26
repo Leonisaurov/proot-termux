@@ -55,8 +55,8 @@ profile _custom-termux-package-builder-{{CONTAINER_NAME}} flags=(attach_disconne
 
 	# Do not allow the container to modify trusted scripts
 	deny /home/builder/proot-termux/[^o]** wlk,
-	# Explicitly allow storing built debs
-	allow /home/builder/proot-termux/output/** rw,
+	# Explicitly allow storing built packages in the CI workspace.
+	allow /home/builder/proot-termux/ci/termux/output/** rw,
 
   # Do not allow the container to modify the build toolchain
 	deny /home/builder/lib/** wlk,
