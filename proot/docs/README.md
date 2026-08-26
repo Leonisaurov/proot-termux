@@ -6,7 +6,7 @@
 - [API de control PRCT](../control-api/README.md)
 - [Launcher declarativo](tools/proot-exec.md)
 - [`appimage-run`](../bin/appimage-run)
-- [`rm`](../bin/rm): wrapper que protege `$HOME`
+- El wrapper global `rm` que protege `$HOME` no forma parte de este checkout.
 - [Histórico](archive/)
 
 Los entrypoints del checkout están en `bin/`; los tests, probes y wrappers de

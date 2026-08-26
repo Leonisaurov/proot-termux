@@ -4,7 +4,7 @@ set -euo pipefail
 # === CONSTANTES ===
 SCRIPTDIR=$(cd "$(realpath "$(dirname "$0")")"; pwd)
 PROJECT_DIR=$(cd "$SCRIPTDIR/.."; pwd)
-readonly SOURCE_DIR="$PROJECT_DIR/proot-source/src"
+readonly SOURCE_DIR="$PROJECT_DIR/src"
 readonly TEMPLATE_CHROOT="$PROJECT_DIR/ci/termux/packages/proot/termux-chroot"
 
 readonly PKG_NAME="proot"

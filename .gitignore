@@ -27,15 +27,15 @@ checksum*
 # Built *.deb files.
 /debs/
 /output/
-/ci/termux/output/
-/artifacts/packages/
+/proot/ci/termux/output/
+/proot/artifacts/packages/
 /*.pkg.tar.xz
 
 # Preinstalled build tools.
 /build-tools/
 
 # Predownloaded packages sources.
-/ci/termux/packages/*/cache
+/proot/ci/termux/packages/*/cache
 /root-packages/*/cache
 /x11-packages/*/cache
 
@@ -46,7 +46,7 @@ checksum*
 scripts/apt-packages-list-*.txt
 
 # Generated on GitHub Actions CI when building kernel modules
-/ci/termux/scripts/*.ko.zst
+/proot/ci/termux/scripts/*.ko.zst
 __pycache__/
 *.py[cod]
 *.log
@@ -55,33 +55,33 @@ __pycache__/
 /cmd
 /ping-test
 /simple-harness
-/control-api/python/.pytest_cache/
-/control-api/rust/target/
-/reports/integration/runtime/
+/proot/control-api/python/.pytest_cache/
+/proot/control-api/rust/target/
+/proot/reports/integration/runtime/
 
 # PRoot build artifacts
-proot-source/src/**/*.o
-proot-source/src/**/*.d
-proot-source/src/**/*.o.tmp
-proot-source/src/proot
-proot-source/src/cmd
-proot-source/src/build.h
-proot-source/src/.check_*
-proot-source/src/loader/loader
-proot-source/src/loader/loader-m32
-proot-source/src/loader/loader-info.c
+/proot/src/**/*.o
+/proot/src/**/*.d
+/proot/src/**/*.o.tmp
+/proot/src/proot
+/proot/src/cmd
+/proot/src/build.h
+/proot/src/.check_*
+/proot/src/loader/loader
+/proot/src/loader/loader-m32
+/proot/src/loader/loader-info.c
 
 # Escape tests
 proot-escape-test*
 
 # Helpers de sandbox/pentest (no se commitearn)
-/alpine_rootfs
-/alpine_rootfs_hardened
-/wrapper_v
-/tests/proot/probes/p_*
-/tests/proot/probes/memtest
-/reports/pentest/
+/proot/tests/rootfs/alpine_rootfs
+/proot/tests/rootfs/alpine_rootfs_hardened
+/proot/tests/rootfs/wrapper_v
+/proot/tests/proot/probes/p_*
+/proot/tests/proot/probes/memtest
+/proot/reports/pentest/
 .scripts/
-alpine_rootfs_memwd
-pentest/memtest
-proot-distro-python-cmd
+/proot/tests/rootfs/alpine_rootfs_memwd
+/proot/tests/rootfs/probes/memtest
+/proot/tests/rootfs/commands/proot-distro-python-cmd

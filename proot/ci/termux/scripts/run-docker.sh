@@ -90,7 +90,7 @@ if [ "$UNAME" = Darwin ]; then
 	REPOROOT=$PWD
 	SEC_OPT=""
 else
-	REPOROOT="$(dirname $(readlink -f $0))/../../../"
+	REPOROOT="$(dirname $(readlink -f $0))/../../../../"
 	SEC_OPT=" --security-opt seccomp=$TERMUX_SCRIPTDIR/scripts/profile.json --security-opt apparmor=_custom-termux-package-builder-$CONTAINER_NAME --cap-add CAP_SYS_ADMIN --device /dev/fuse"
 fi
 

@@ -1,5 +1,5 @@
-# Source is maintained directly in proot-source/src/ (no patches)
-# To modify: edit files in proot-source/src/, then bump TERMUX_PKG_REVISION
+# Source is maintained directly in proot/src/ (no patches)
+# To modify: edit files in proot/src/, then bump TERMUX_PKG_REVISION
 TERMUX_PKG_HOMEPAGE=https://proot-me.github.io/
 TERMUX_PKG_DESCRIPTION="Emulate chroot, bind mount and binfmt_misc for non-root users"
 TERMUX_PKG_LICENSE="GPL-2.0"
@@ -16,11 +16,12 @@ TERMUX_PKG_EXTRA_MAKE_ARGS="-C src"
 export PROOT_UNBUNDLE_LOADER=$TERMUX_PREFIX/libexec/proot
 
 termux_step_pre_configure() {
-	local proot_source_dir="$TERMUX_PKG_BUILDER_DIR/../../../../proot-source"
+	local proot_source_dir="$TERMUX_PKG_BUILDER_DIR/../../../../src"
 	if [ -d "$proot_source_dir" ]; then
-		rsync -ac --exclude=.git "$proot_source_dir/" "$TERMUX_PKG_SRCDIR/"
+		mkdir -p "$TERMUX_PKG_SRCDIR/src"
+		rsync -ac --exclude=.git "$proot_source_dir/" "$TERMUX_PKG_SRCDIR/src/"
 	else
-		termux_error_exit "proot-source directory not found at $proot_source_dir"
+		termux_error_exit "proot source directory not found at $proot_source_dir"
 	fi
 	CPPFLAGS+=" -DARG_MAX=131072 -DVERSION=\\\"${TERMUX_PKG_VERSION}\\\""
 }

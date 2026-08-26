@@ -2,21 +2,21 @@
 
 ## Layout vigente
 
-La organización actual usa `bin/` para entrypoints, `tests/<tema>/` para
-regresiones y wrappers de rootfs, `reports/` para resultados y `docs/` para documentación. Ejecuta
-los launchers desde `./bin/` y la batería desde `./tests/run.sh`; cualquier
+La organización actual usa `proot/bin/` para entrypoints, `proot/tests/<tema>/` para
+regresiones y wrappers de rootfs, `proot/reports/` para resultados y `proot/docs/` para documentación. Ejecuta
+los launchers desde `./proot/bin/` y la batería desde `./proot/tests/run.sh`; cualquier
 referencia histórica a `pentest/` en las secciones de fases antiguas no es una
 ruta operativa vigente.
 
 ## Project Overview
 
-Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker + CI GitHub Actions). La fuente vive en `proot-source/src/` — sin parches, sin downloads. Rama `master`. Security hardening: fases A-F completadas (ver `docs/security/FIXES.md`).
+Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker + CI GitHub Actions). La fuente vive en `proot/src/` — sin parches, sin downloads. Rama `master`. Security hardening: fases A-F completadas (ver `proot/docs/security/FIXES.md`).
 
 ## Build & CI
 
 ### Flujo obligatorio de trabajo
 
-1. Identifica la capa: proot, `termux-isolated`, `control-api` o harness.
+1. Identifica la capa: proot, `termux-isolated`, `proot/control-api` o harness.
 2. Elige el modo de rutas antes de escribir comandos: `--termux-paths`
    conserva `$PREFIX` como ruta guest; el modo rootfs usa `/usr`, `/bin`,
    `/etc` y `/home`.
@@ -35,7 +35,7 @@ Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker +
 |---|---|---|
 | proot | Traducción, bindings explícitos, aislamiento y protocolo opt-in | Rutas Android/Termux, binds del consumidor o decisiones del harness |
 | `termux-isolated` | Lanzamiento concreto de proot en Termux | Controlar el `control-fd` o exponer almacenamiento |
-| `control-api` | Codec, launcher y contrato del control fd | Presets internos de proot |
+| `proot/control-api` | Codec, launcher y contrato del control fd | Presets internos de proot |
 | harness | Lee cada evento y responde mientras proot vive | Que proot decida por él |
 
 Con `--termux-paths`, usa `$PREFIX/bin/sh` y `$PREFIX/etc`; con rootfs, usa
@@ -47,31 +47,31 @@ almacenamiento.
 
 ```bash
 # Build CI (Docker, termux-packages pipeline)
-./ci/termux/scripts/run-docker.sh ./ci/termux/build-package.sh -I -a aarch64 --format pacman proot
+./proot/ci/termux/scripts/run-docker.sh ./proot/ci/termux/build-package.sh -I -a aarch64 --format pacman proot
 
 # Build local en Termux (clang, sin Docker)
-./scripts/build-native.sh            # compila + empaqueta
-./scripts/build-native.sh -i         # compila + instala + empaqueta
-./scripts/build-native.sh -c -i      # clean build + instala
-./scripts/build-native.sh --skip-build   # solo empaqueta (binarios existentes)
-./scripts/build-native.sh -j 4      # paralelismo (default 2; -j 1 en <4GB RAM)
+./proot/scripts/build-native.sh            # compila + empaqueta
+./proot/scripts/build-native.sh -i         # compila + instala + empaqueta
+./proot/scripts/build-native.sh -c -i      # clean build + instala
+./proot/scripts/build-native.sh --skip-build   # solo empaqueta (binarios existentes)
+./proot/scripts/build-native.sh -j 4      # paralelismo (default 2; -j 1 en <4GB RAM)
 ```
 
-Para builds locales siempre se usa `scripts/build-native.sh`; no se ejecuta
+Para builds locales siempre se usa `proot/scripts/build-native.sh`; no se ejecuta
 `make` directamente. La opción de paralelismo recibe un argumento separado:
 `-j 2` o `--jobs 2` (no existe la forma `-j2`).
 `--skip-package` todavía compila e instala; únicamente omite el paquete.
 
-Output local: `$PREFIX/bin/proot`, loaders en `$PREFIX/libexec/proot/{loader,loader32}`, script `$PREFIX/bin/termux-chroot`, paquete en `artifacts/packages/proot-<ver>-<rev>-aarch64.pkg.tar.xz`. Dependencias: `libandroid-shmem`, `libtalloc` (se construyen solas con `-I`).
+Output local: `$PREFIX/bin/proot`, loaders en `$PREFIX/libexec/proot/{loader,loader32}`, script `$PREFIX/bin/termux-chroot`, paquete en `proot/artifacts/packages/proot-<ver>-<rev>-aarch64.pkg.tar.xz`. Dependencias: `libandroid-shmem`, `libtalloc` (se construyen solas con `-I`).
 
 Para compilar e instalar localmente se debe usar el flujo oficial, sin
 reemplazar manualmente `$PREFIX/bin/proot`:
 
 ```bash
-./scripts/build-native.sh -i
+./proot/scripts/build-native.sh -i
 ```
 
-Las pruebas del modo aislado se ejecutan mediante `./bin/termux-isolated`. Con
+Las pruebas del modo aislado se ejecutan mediante `./proot/bin/termux-isolated`. Con
 `--termux-paths`, las rutas `/data/data/com.termux/...` son rutas guest
 intencionales; sin esa opción, un rootfs debe mostrar sus rutas guest (`/usr`,
 `/home`, etc.) y no rutas Android del host.
@@ -80,7 +80,7 @@ intencionales; sin esa opción, un rootfs debe mostrar sus rutas guest (`/usr`,
 
 | Workflow | Estado | Trigger |
 |----------|--------|---------|
-| `build-proot.yml` | ✅ ACTIVO | Push a `ci/termux/packages/proot/**` o `proot-source/**` + `workflow_dispatch` |
+| `build-proot.yml` | ✅ ACTIVO | Push a `proot/ci/termux/packages/proot/**` o `proot/**` + `workflow_dispatch` |
 | `docker_image.yml` | ⛔ DESHABILITADO (`if: false` en el job) | — |
 
 `build-proot.yml` steps: clone → zram → restore cache → prepare → build → collect → artifact → versioned release. Caché: `~/.termux-build` montada en Docker vía `TERMUX_DOCKER_RUN_EXTRA_ARGS` (cache key: hash de build.sh de proot/libtalloc/libandroid-shmem). Primera corrida ~5 min (seeds cache), subsecuentes ~20-30s. Los releases usan el formato `proot-<version>-<revision>`.
@@ -97,8 +97,8 @@ gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Succ
 
 | Fuente | VERSION | REVISION |
 |--------|---------|----------|
-| `ci/termux/packages/proot/build.sh` | `5.1.107.89` | `46` |
-| `scripts/build-native.sh` | `5.1.107.87` | `16` |
+| `proot/ci/termux/packages/proot/build.sh` | `5.1.107.89` | `46` |
+| `proot/scripts/build-native.sh` | `5.1.107.87` | `16` |
 
 Discrepancia verificada entre ambos. NO asumas cuál es canónica ni la sincronices unilateralmente; usa la del archivo que edites.
 
@@ -122,12 +122,12 @@ Discrepancia verificada entre ambos. NO asumas cuál es canónica ni la sincroni
   Linux del rootfs. Los tests deben construir sus objetivos según el modo que
   realmente ejecutan.
 - Toda regresión nueva debe convertirse primero en un archivo revisable
-  `tests/<tema>/test_*.sh` (o en el harness equivalente), con preflight, fixtures
+  `proot/tests/<tema>/test_*.sh` (o en el harness equivalente), con preflight, fixtures
   temporales bajo `$TMPDIR`, separación explícita host/guest y cleanup. No se
   valida una feature nueva improvisando comandos sueltos directamente en la
   terminal: se revisa el script y luego se ejecuta ese archivo con escalada.
 - Si el comportamiento pertenece a `termux-isolated`, el test debe invocar
-  `./bin/termux-isolated` y ejercer sus opciones reales (`--termux-paths`, rootfs,
+  `./proot/bin/termux-isolated` y ejercer sus opciones reales (`--termux-paths`, rootfs,
   `--with-storage`, `--rw-dir`, etc.). Los casos que comparan vistas deben
   cubrir cada modo relevante; no se sustituye el launcher por una invocación
   directa de proot.
@@ -141,20 +141,20 @@ Discrepancia verificada entre ambos. NO asumas cuál es canónica ni la sincroni
 
 - Proot es una herramienta independiente y multipropósito para ejecutar procesos sin privilegios con traducción de filesystem, bindings, compatibilidad y aislamiento explícito.
 - Las capacidades de proot deben ser genéricas, simples y útiles sin depender de un consumidor concreto.
-- No añadas a proot presets, políticas, rutas, permisos, autorizaciones, defaults ni configuraciones específicas de `control-api` u otra aplicación.
-- `control-api` puede depender de una versión de proot compatible con su protocolo; la dependencia es de compatibilidad entre consumidor y proveedor, no una razón para que proot dependa de `control-api`.
+- No añadas a proot presets, políticas, rutas, permisos, autorizaciones, defaults ni configuraciones específicas de `proot/control-api` u otra aplicación.
+- `proot/control-api` puede depender de una versión de proot compatible con su protocolo; la dependencia es de compatibilidad entre consumidor y proveedor, no una razón para que proot dependa de `proot/control-api`.
 - La implementación del protocolo en proot debe permanecer como capacidad explícita y documentada del ejecutable, sin imponer políticas de autorización ni configuración de la integración.
 - Launchers, modalidades como `load termux`, presets y facilidades de configuración pertenecen a la integración que los ofrece. Esa integración debe pasar explícitamente sus opciones a proot y conservar la responsabilidad de sus efectos.
 - Antes de diseñar una extensión, explica qué problema general de proot resuelve, cómo funciona sin integraciones y por qué no debe vivir en un consumidor externo.
 
 ### ⚠️ SIEMPRE bump TERMUX_PKG_REVISION antes de commit
 
-Cada vez que toques `proot-source/src/` o `ci/termux/packages/proot/`, incrementa `TERMUX_PKG_REVISION` en `ci/termux/packages/proot/build.sh` ANTES de commit. Sin esto el CI no se dispara bien y los usuarios no reciben la actualización. Es el error más común. La revisión vigente debe leerse siempre de `ci/termux/packages/proot/build.sh`; no mantengas un número duplicado aquí.
+Cada vez que toques `proot/src/` o `proot/ci/termux/packages/proot/`, incrementa `TERMUX_PKG_REVISION` en `proot/ci/termux/packages/proot/build.sh` ANTES de commit. Sin esto el CI no se dispara bien y los usuarios no reciben la actualización. Es el error más común. La revisión vigente debe leerse siempre de `proot/ci/termux/packages/proot/build.sh`; no mantengas un número duplicado aquí.
 
 ### Orden de commit (secuencial, no omitir pasos)
 
-1. Editas código (`proot-source/src/` o `ci/termux/packages/proot/`)
-2. Bump `TERMUX_PKG_REVISION` en `ci/termux/packages/proot/build.sh`
+1. Editas código (`proot/src/` o `proot/ci/termux/packages/proot/`)
+2. Bump `TERMUX_PKG_REVISION` en `proot/ci/termux/packages/proot/build.sh`
 3. `git add -A && git commit -m "<type>(<scope>): <summary>"`
 4. `git push origin master`
 5. `gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Success)'`
@@ -180,7 +180,7 @@ Convención: `<type>(<scope>): <summary>` — types: `fix`, `enhance`, `chore`, 
 
 ## Security Hardening (Fases A-F)
 
-Resumen en `docs/security/FIXES.md`. Commits por fase:
+Resumen en `proot/docs/security/FIXES.md`. Commits por fase:
 
 | Fase | Estado | Commits | REV |
 |------|--------|---------|-----|
@@ -204,29 +204,29 @@ Resumen en `docs/security/FIXES.md`. Commits por fase:
 
 ```bash
 # Smoke tests
-tests/proot/hardening/test_b1_b2_b7.sh      # B1/B2/B7: 20 concurrent --exec clients
-tests/proot/hardening/test_b3.sh             # B3: fd_map stale sweep
-tests/proot/hardening/test_b5.sh             # B5: SP integrity bind/connect loop
-tests/proot/hardening/test_b6.sh             # B6: bridge children killed on exit
-tests/proot/hardening/test_b8.sh             # B8: talloc leak verification
-tests/proot/hardening/test_phase_c.sh        # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fake-perms
-tests/proot/syscalls/test_d4_e1_e3_e6.sh     # D4 socket, E1 renameat2, E3 uname, E6 mknod (39 tests)
-tests/proot/syscalls/test_upstream_link2symlink.sh  # regresiones portadas de upstream
-tests/termux-isolated/storage/test_termux_isolated_storage.sh # storage opt-in y binds :mask
-tests/termux-isolated/shell/test_termux_isolated_shebang.sh # termux-exec y shebangs en ambos modos
-tests/termux-isolated/shell/test_termux_isolated_default_shell.sh # shell $SHELL en modo interactivo
+proot/tests/proot/hardening/test_b1_b2_b7.sh      # B1/B2/B7: 20 concurrent --exec clients
+proot/tests/proot/hardening/test_b3.sh             # B3: fd_map stale sweep
+proot/tests/proot/hardening/test_b5.sh             # B5: SP integrity bind/connect loop
+proot/tests/proot/hardening/test_b6.sh             # B6: bridge children killed on exit
+proot/tests/proot/hardening/test_b8.sh             # B8: talloc leak verification
+proot/tests/proot/hardening/test_phase_c.sh        # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fake-perms
+proot/tests/proot/syscalls/test_d4_e1_e3_e6.sh     # D4 socket, E1 renameat2, E3 uname, E6 mknod (39 tests)
+proot/tests/proot/syscalls/test_upstream_link2symlink.sh  # regresiones portadas de upstream
+proot/tests/termux-isolated/storage/test_termux_isolated_storage.sh # storage opt-in y binds :mask
+proot/tests/termux-isolated/shell/test_termux_isolated_shebang.sh # termux-exec y shebangs en ambos modos
+proot/tests/termux-isolated/shell/test_termux_isolated_default_shell.sh # shell $SHELL en modo interactivo
 ```
 
 Para una regresión nueva, crea primero el script, ejecútalo con `bash -n` y
 `git diff --check`, y después lanza el archivo mediante `require_escalated`.
-La batería completa se ejecuta con `./tests/run.sh all`; no se considera
+La batería completa se ejecuta con `./proot/tests/run.sh all`; no se considera
 suficiente una prueba manual equivalente.
 
-Resultados: B=14/14 PASS, C=6/6 PASS, D4/E1/E3/E6=39/39 PASS. Reportes en `reports/pentest/`.
+Resultados: B=14/14 PASS, C=6/6 PASS, D4/E1/E3/E6=39/39 PASS. Reportes en `proot/reports/pentest/`.
 
 ## Arquitectura del fork (no obvia desde los nombres de archivo)
 
-### Extensiones reales (12) en `proot-source/src/extension/`
+### Extensiones reales (12) en `proot/src/extension/`
 
 `virtual_net`, `resource_limit`, `proc_isolation`, `fake_id0`, `kompat`, `port_switch`, `sysvipc`, `link2symlink`, `hidden_files`, `mountinfo`, `fix_symlink_size`, `ashmem_memfd`.
 
@@ -360,37 +360,37 @@ Port mapping (`-p host:container`, máx 64, auto-puerto libre), auto-redirect de
 
 ## How the Build Works (CI)
 
-`TERMUX_PKG_SKIP_SRC_EXTRACT=true` salta descarga → `termux_step_pre_configure()` rsync de `proot-source/src/` al build dir → `make` compila las capacidades del fork (sin parches) → package step crea `.pkg.tar.xz`.
+`TERMUX_PKG_SKIP_SRC_EXTRACT=true` salta descarga → `termux_step_pre_configure()` rsync de `proot/src/` al build dir → `make` compila las capacidades del fork (sin parches) → package step crea `.pkg.tar.xz`.
 
 ## Known Issues / Gotchas
 
-- **`ci/termux/repo.json` declara `pkg_format: debian` pero el workflow usa `--format pacman`** — inconsistencia verificada, no "arreglar" (el pipeline CI manda).
+- **`proot/ci/termux/repo.json` declara `pkg_format: debian` pero el workflow usa `--format pacman`** — inconsistencia verificada, no "arreglar" (el pipeline CI manda).
 - **`buildorder.py`**: parcheado para saltar deps ausentes (libllvm, python declaran deps removidas).
 - **`/data` mount**: no usar en CI (`-m` en run-docker.sh causa permisos en runners GHA); la caché se monta vía `TERMUX_DOCKER_RUN_EXTRA_ARGS`.
 - **Registry cleanup**: entradas stale de `registry.lock` no se limpian solas (no afectan). Limpieza manual: borrar el directorio `proot-net/` dentro de `PROOT_RUNTIME_DIR` o `TMPDIR` del proceso correspondiente.
 - **Tamaños reales** (para estimar diffs): `virtual_net.c`=1144, `virtual_net_helper.c`=422, `cli/proot.c`=1004, `cli/proot.h`=614, `cli/cli.c`=694, `GNUmakefile`=318, `tracee/event.c`=976, `tracee/tracee.h`=399.
 - **D5 hash table**: ✅ implementada. Hash estático 256 buckets + `tracee_hash_update()` para PID change en cli.c. Sin talloc lifecycle issues.
 - **D6 binding cache**: SKIP — riesgo de dangling pointers supera ganancia (3-10 bindings típicas, scan lineal es efectivamente O(1)).
-- **E items**: E1-E8 todos RESUELTO (REV 24-27). Ver `docs/security/FIXES.md` §7 para detalles.
-- **proot necesita `env -i`** al ejecutar en rootfs Alpine — el entorno heredado causa execve failures. Los wrappers están en `tests/rootfs/`.
+- **E items**: E1-E8 todos RESUELTO (REV 24-27). Ver `proot/docs/security/FIXES.md` §7 para detalles.
+- **proot necesita `env -i`** al ejecutar en rootfs Alpine — el entorno heredado causa execve failures. Los wrappers están en `proot/tests/rootfs/`.
 
 ## Pentest / Hardening Testing
 
-`tests/proot/probes/` contiene los programas C (`p_fs`, `p_sys`, `p_proc`,
+`proot/tests/proot/probes/` contiene los programas C (`p_fs`, `p_sys`, `p_proc`,
 `p_net`, `p_kernel`, `memtest.c`); los resultados históricos viven en
-`reports/pentest/`. Los wrappers `tests/rootfs/alpine_rootfs` y
-`tests/rootfs/alpine_rootfs_hardened` son auxiliares locales.
+`proot/reports/pentest/`. Los wrappers `proot/tests/rootfs/alpine_rootfs` y
+`proot/tests/rootfs/alpine_rootfs_hardened` son auxiliares locales.
 
 ### Scripts de regresión (Fase B+C+D+E)
 
 ```bash
-tests/proot/hardening/test_b1_b2_b7.sh      # 20 clientes --exec concurrentes
-tests/proot/hardening/test_b3.sh             # fd_map stale sweep
-tests/proot/hardening/test_b5.sh             # SP integrity bind/connect loop
-tests/proot/hardening/test_b6.sh             # bridge children killed on exit
-tests/proot/hardening/test_b8.sh             # talloc leak verification
-tests/proot/hardening/test_phase_c.sh        # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fake-perms
-tests/proot/syscalls/test_d4_e1_e3_e6.sh     # D4 socket, E1 renameat2, E3 uname, E6 mknod (39 tests)
+proot/tests/proot/hardening/test_b1_b2_b7.sh      # 20 clientes --exec concurrentes
+proot/tests/proot/hardening/test_b3.sh             # fd_map stale sweep
+proot/tests/proot/hardening/test_b5.sh             # SP integrity bind/connect loop
+proot/tests/proot/hardening/test_b6.sh             # bridge children killed on exit
+proot/tests/proot/hardening/test_b8.sh             # talloc leak verification
+proot/tests/proot/hardening/test_phase_c.sh        # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fake-perms
+proot/tests/proot/syscalls/test_d4_e1_e3_e6.sh     # D4 socket, E1 renameat2, E3 uname, E6 mknod (39 tests)
 ```
 
 ## Configuración del agente

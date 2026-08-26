@@ -4,12 +4,12 @@ name: Build proot
 on:
   push:
     paths:
-      - 'ci/termux/packages/proot/**'
-      - 'ci/termux/packages/libtalloc/**'
-      - 'ci/termux/packages/libandroid-shmem/**'
-      - 'ci/termux/scripts/linux-kernel-signing-keys.gpg'
-      - 'ci/termux/scripts/profile-restricted.apparmor'
-      - 'proot-source/**'
+      - 'proot/ci/termux/packages/proot/**'
+      - 'proot/ci/termux/packages/libtalloc/**'
+      - 'proot/ci/termux/packages/libandroid-shmem/**'
+      - 'proot/ci/termux/scripts/linux-kernel-signing-keys.gpg'
+      - 'proot/ci/termux/scripts/profile-restricted.apparmor'
+      - 'proot/src/**'
       - '.github/actions/zram/action.yml'
   workflow_dispatch:
 
@@ -36,7 +36,7 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        package_file='ci/termux/packages/proot/build.sh'
+        package_file='proot/ci/termux/packages/proot/build.sh'
         version=$(sed -n 's/^TERMUX_PKG_VERSION="\([^"]*\)"$/\1/p' "$package_file")
         revision=$(sed -n 's/^TERMUX_PKG_REVISION=\([0-9][0-9]*\)$/\1/p' "$package_file")
         test -n "$version" -a -n "$revision"
@@ -62,7 +62,7 @@ jobs:
       id: build-cache
       with:
         path: ~/.termux-build
-        key: proot-${{ hashFiles('ci/termux/packages/proot/build.sh', 'ci/termux/packages/libtalloc/build.sh', 'ci/termux/packages/libandroid-shmem/build.sh') }}
+        key: proot-${{ hashFiles('proot/ci/termux/packages/proot/build.sh', 'proot/ci/termux/packages/libtalloc/build.sh', 'proot/ci/termux/packages/libandroid-shmem/build.sh') }}
         restore-keys: |
           proot-
 
@@ -73,21 +73,21 @@ jobs:
     - name: Build proot package
       env:
         TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
-      run: ./ci/termux/scripts/run-docker.sh ./ci/termux/build-package.sh -I -a aarch64 --format pacman proot
+      run: ./proot/ci/termux/scripts/run-docker.sh ./proot/ci/termux/build-package.sh -I -a aarch64 --format pacman proot
 
-    # ----- Collect and upload artifacts -----
+    # ----- Collect and upload proot/artifacts -----
     - name: Collect package files
       if: always()
       run: |
-        mkdir -p ./artifacts
-        mv ci/termux/output/*.pkg.tar.xz ./artifacts/ 2>/dev/null || true
+        mkdir -p ./proot/artifacts
+        mv proot/ci/termux/output/*.pkg.tar.xz ./proot/artifacts/ 2>/dev/null || true
 
     - name: Store package files as artifact
       if: always()
       uses: actions/upload-artifact@v6
       with:
         name: proot-aarch64-${{ github.sha }}
-        path: ./artifacts/*
+        path: ./proot/artifacts/*
         if-no-files-found: warn
 
   release:
@@ -102,14 +102,14 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: proot-aarch64-${{ github.sha }}
-        path: artifacts
+        path: proot/artifacts
 
     - name: Upload to GitHub Release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -euo pipefail
-        FILE=$(find artifacts -maxdepth 1 -type f -name '*.pkg.tar.xz' -print -quit)
+        FILE=$(find proot/artifacts -maxdepth 1 -type f -name '*.pkg.tar.xz' -print -quit)
         [ -f "$FILE" ] || { echo 'No package artifact found' >&2; exit 1; }
         TAG='${{ needs.build.outputs.release_tag }}'
         if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
