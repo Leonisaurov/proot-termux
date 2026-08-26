@@ -74,10 +74,7 @@ __pycache__/
 # Escape tests
 proot-escape-test*
 
-# Helpers de sandbox/pentest (no se commitearn)
-/proot/tests/rootfs/alpine_rootfs
-/proot/tests/rootfs/alpine_rootfs_hardened
-/proot/tests/rootfs/wrapper_v
+# Helpers de sandbox/pentest (los wrappers de rootfs forman parte del árbol de tests)
 /proot/tests/proot/probes/p_*
 /proot/tests/proot/probes/memtest
 /proot/reports/pentest/

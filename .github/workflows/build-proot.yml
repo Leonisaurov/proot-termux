@@ -10,6 +10,7 @@ on:
       - 'proot/ci/termux/scripts/linux-kernel-signing-keys.gpg'
       - 'proot/ci/termux/scripts/profile-restricted.apparmor'
       - 'proot/src/**'
+      - '.github/workflows/build-proot.yml'
       - '.github/actions/zram/action.yml'
   workflow_dispatch:
 
