@@ -19,8 +19,10 @@ The interactive application expects a compatible Textual (7.5 through 8.x) to be
 Termux/pacman Python environment. The project does not download Textual or
 terminal widgets from Git and does not alter the system package set. The
 harness owns the PRoot PTY and includes its own ANSI renderer.
-From the checkout, `./bin/sample-harness` supplies `control-api/python` on
-`PYTHONPATH` and runs `python -m control_api.proot_tui`.
+From the repository root, `./proot/bin/sample-harness` supplies
+`proot/control-api/python` on `PYTHONPATH` and runs
+`python -m control_api.proot_tui`. If the current directory is already
+`proot/`, the equivalent command is `./bin/sample-harness`.
 
 The default preset is intentionally explicit: `--termux-paths`, read-only
 Termux/home bindings plus read-only Android runtime bindings for `/system`,
@@ -84,7 +86,7 @@ integration regression covers startup negotiation, styled output, Unicode and
 Tab completion:
 
 ```bash
-PYTHONPATH=control-api/python python3 -m unittest discover -s tests/control-api/python -v
+PYTHONPATH=proot/control-api/python python3 -m unittest discover -s proot/tests/control-api/python -v
 ```
 
 Useful options include `--rootfs PATH`, `--bind HOST:GUEST[:ro|rw|mask]`,

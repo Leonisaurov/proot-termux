@@ -1,5 +1,8 @@
 # Reporte Fase B — Leaks y FDs (REV 21)
 
+> Este reporte histórico usa rutas relativas a `proot/`; por ejemplo,
+> `ci/termux/packages/proot` es el antiguo `packages/proot`.
+
 **Commit**: `ec308f5425` — `fix(isolation): complete Fase B — close fd/leak/sp issues B1-B8`
 **Fecha**: 2026-08-18
 **REVISION**: 21
@@ -44,7 +47,7 @@ Todos los archivos fuente modificados compilan limpio con clang (clang -fsyntax-
 | extension/virtual_net/virtual_net_helper.c | B6 | +24/-13 |
 | execve/ldso.c | B8 | +6/-3 |
 | FIXES.md | Status update | +16/-16 |
-| packages/proot/build.sh | REVISION 21 | +2/-1 |
+| ci/termux/packages/proot/build.sh | REVISION 21 | +2/-1 |
 | tests/proot/probes/memtest.c | Test update | +13/-0 |
 
 **Total**: 313 inserciones, 516 eliminaciones en 10 archivos.

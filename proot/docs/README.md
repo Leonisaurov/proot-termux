@@ -1,5 +1,8 @@
 # Documentación
 
+El índice navegable está en [`INDEX.md`](INDEX.md). El mapa del producto
+completo está en [`../README.md`](../README.md).
+
 - [Operación](operations/usage.md)
 - [Arquitectura](architecture/)
 - [Seguridad y hardening](security/)

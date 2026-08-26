@@ -16,10 +16,10 @@ Neither layer contains a Termux policy. Termux bindings and defaults belong to
 
 ## Installation and imports
 
-From this checkout:
+From the repository root:
 
 ```bash
-PYTHONPATH=control-api/python python3 -c \
+PYTHONPATH=proot/control-api/python python3 -c \
   'from control_api import ControlChannel, PathRequest, NetRequest'
 ```
 
@@ -383,13 +383,13 @@ configured PRoot is discoverable and that the installed Termux Textual version
 is compatible (`>=7.5,<9`). It raises `PreflightError` with a user-facing
 diagnostic; it does not install packages or mutate the system.
 
-CLI equivalent:
+CLI equivalent from the repository root:
 
 ```bash
-./bin/sample-harness
-./bin/sample-harness --shell fish -- --no-config -i
-./bin/sample-harness --rootfs "$ROOTFS" --bind "$PWD:/work:ro" --proc-isolated
-./bin/sample-harness --with-storage --rw-dir "$PWD/work"
+./proot/bin/sample-harness
+./proot/bin/sample-harness --shell fish -- --no-config -i
+./proot/bin/sample-harness --rootfs "$ROOTFS" --bind "$PWD:/work:ro" --proc-isolated
+./proot/bin/sample-harness --with-storage --rw-dir "$PWD/work"
 ```
 
 ## Complete interactive flow
@@ -433,7 +433,7 @@ The PTY reader should call `feed_bytes` on the event loop; it should not call
 module entry point is equivalent:
 
 ```bash
-PYTHONPATH=control-api/python python3 -m control_api.proot_tui
+PYTHONPATH=proot/control-api/python python3 -m control_api.proot_tui
 ```
 
 ## Errors and ownership
@@ -456,7 +456,7 @@ idempotent `close()` path.
 Run the complete local suite from the checkout:
 
 ```bash
-PYTHONPATH=control-api/python python3 -m unittest discover -s tests/control-api/python -v
+PYTHONPATH=proot/control-api/python python3 -m unittest discover -s proot/tests/control-api/python -v
 ```
 
 The integration tests cover fragmented frames, command interleaving,

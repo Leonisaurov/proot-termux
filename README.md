@@ -48,6 +48,9 @@ is at [`proot/src/`](./proot/src/); the same tree also contains control-api,
 tests, CI packaging, tools and documentation. The source is kept without
 patches or downloads. This is a modified version of upstream proot that
 includes custom features (see below).
+For a navigable map of that product tree, start with
+[`proot/README.md`](./proot/README.md) and its
+[documentation index](./proot/docs/INDEX.md).
 
 To modify proot:
 
