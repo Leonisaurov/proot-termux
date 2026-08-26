@@ -51,7 +51,7 @@ output=$(run_nested "$PREFIX/bin/proot" --bind="$ROOT" --cwd="$ROOT" \
 [[ "$output" == ABSOLUTE_BIND_OK ]]
 printf 'PASS: nested PRoot resolves absolute workspace bindings\n'
 
-if command -v pd >/dev/null 2>&1 && pd list 2>/dev/null | grep -Fq 'alpine'; then
+if command -v pd >/dev/null 2>&1 && pd list 2>&1 | grep -Fq 'alpine'; then
 	output=$("$PROOT_EXEC" --config "$CONFIG" -- \
 		pd login alpine -- /bin/true 2>&1)
 	if grep -q "can't sanitize binding" <<< "$output"; then
