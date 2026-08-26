@@ -7,11 +7,13 @@ on:
       - 'ci/termux/packages/proot/**'
       - 'ci/termux/packages/libtalloc/**'
       - 'ci/termux/packages/libandroid-shmem/**'
+      - 'ci/termux/scripts/linux-kernel-signing-keys.gpg'
       - 'proot-source/**'
+      - '.github/actions/zram/action.yml'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -27,12 +29,18 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Enable zram swap
+      id: zram
+      continue-on-error: true
       uses: ./.github/actions/zram
       with:
         algorithm: zstd
         size: 16G
         priority: 100
         device_name: /dev/zram0
+
+    - name: Report zram fallback
+      if: steps.zram.outcome == 'failure'
+      run: echo '::warning::zram could not be enabled; continuing without optional zram swap.'
 
     # ----- Cache build dependencies -----
     - name: Restore build cache
@@ -53,26 +61,12 @@ jobs:
         TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
       run: ./ci/termux/scripts/run-docker.sh ./ci/termux/build-package.sh -I -a aarch64 --format pacman proot
 
-    # ----- Collect and publish artifacts -----
+    # ----- Collect and upload artifacts -----
     - name: Collect package files
       if: always()
       run: |
         mkdir -p ./artifacts
         mv ci/termux/output/*.pkg.tar.xz ./artifacts/ 2>/dev/null || true
-
-    - name: Upload to GitHub Release
-      if: success()
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        FILE=$(ls ./artifacts/*.pkg.tar.xz 2>/dev/null | head -1)
-        [ -f "$FILE" ] || exit 0
-        gh release delete proot-latest --yes --cleanup-tag 2>/dev/null || true
-        gh release create proot-latest "$FILE" \
-          --repo "${{ github.repository }}" \
-          --title "proot-latest" \
-          --latest \
-          --notes "proot aarch64 from ${{ github.sha }}"
 
     - name: Store package files as artifact
       if: always()
@@ -80,3 +74,32 @@ jobs:
       with:
         name: proot-aarch64-${{ github.sha }}
         path: ./artifacts/*
+        if-no-files-found: warn
+
+  release:
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+    - name: Download package artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: proot-aarch64-${{ github.sha }}
+        path: artifacts
+
+    - name: Upload to GitHub Release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        FILE=$(find artifacts -maxdepth 1 -type f -name '*.pkg.tar.xz' -print -quit)
+        [ -f "$FILE" ] || { echo 'No package artifact found' >&2; exit 1; }
+        gh release delete proot-latest --yes --cleanup-tag 2>/dev/null || true
+        gh release create proot-latest "$FILE" \
+          --repo "${{ github.repository }}" \
+          --title "proot-latest" \
+          --latest \
+          --notes "proot aarch64 from ${{ github.sha }}"

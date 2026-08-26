@@ -50,9 +50,9 @@ runs:
       id: cache-zram
       uses: actions/cache/restore@v5
       with:
-        path: scripts/zram.ko.zst
+        path: ci/termux/scripts/zram.ko.zst
         # See above section where FULL_KERNEL_VERSION is declared for why we need to use full kernel version for caching the builds
-        key: ${{ steps.kernel-info.outputs.full_kernel_version }}-${{ hashFiles('scripts/linux-kernel-signing-keys.gpg') }}-${{ hashFiles('.github/actions/zram/action.yml') }}
+        key: ${{ steps.kernel-info.outputs.full_kernel_version }}-${{ hashFiles('ci/termux/scripts/linux-kernel-signing-keys.gpg') }}-${{ hashFiles('.github/actions/zram/action.yml') }}
 
     - name: Build zram kernel module
       if: steps.cache-zram.outputs.cache-hit != 'true'
@@ -64,11 +64,25 @@ runs:
         MODULES_DIR=${{ steps.kernel-info.outputs.modules_dir }}
 
         LINUX_CHECKOUT_DIR=$(mktemp -d)
+        trap 'rm -rf "$LINUX_CHECKOUT_DIR"' EXIT
         cd "$LINUX_CHECKOUT_DIR"
-        curl -OL "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%\.*}.x/linux-${TAR_KERNEL_VERSION}.tar.xz"
-        curl -OL "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%\.*}.x/linux-${TAR_KERNEL_VERSION}.tar.sign"
+        CURL_OPTS=(
+          --fail
+          --show-error
+          --location
+          --http1.1
+          --retry 5
+          --retry-all-errors
+          --retry-delay 5
+          --retry-max-time 600
+          --connect-timeout 30
+          --max-time 900
+          --remote-name
+        )
+        curl "${CURL_OPTS[@]}" "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%\.*}.x/linux-${TAR_KERNEL_VERSION}.tar.xz"
+        curl "${CURL_OPTS[@]}" "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%\.*}.x/linux-${TAR_KERNEL_VERSION}.tar.sign"
 
-        gpg --import ${{ github.workspace }}/scripts/linux-kernel-signing-keys.gpg
+        gpg --import "${{ github.workspace }}/ci/termux/scripts/linux-kernel-signing-keys.gpg"
         unxz "linux-${TAR_KERNEL_VERSION}.tar.xz"
         gpg --verify "linux-${TAR_KERNEL_VERSION}.tar.sign"
         tar --extract -f "linux-${TAR_KERNEL_VERSION}.tar"
@@ -79,17 +93,16 @@ runs:
         cd drivers/block/zram/
         make -C "${MODULES_DIR}/build/" M="$PWD" -j$(nproc)
         zstd zram.ko
-        # Copy back compiled module into scripts/ as actions/cache doesn't support absolute paths:
+        # Copy back compiled module into ci/termux/scripts/ as actions/cache doesn't support absolute paths:
         # See https://github.com/actions/cache/issues/1540
         # Additionally restoring cache in /lib/modules/ would require running actions/cache/restore as root
-        cp zram.ko.zst ${{ github.workspace }}/scripts/
-        rm -r "$LINUX_CHECKOUT_DIR"
+        cp zram.ko.zst "${{ github.workspace }}/ci/termux/scripts/"
 
     - name: Enable zram kernel module
       shell: bash
       run: |
-        set -euov pipefail
-        sudo cp scripts/zram.ko.zst ${{ steps.kernel-info.outputs.modules_dir }}/kernel/
+        set -euo pipefail
+        sudo cp ci/termux/scripts/zram.ko.zst ${{ steps.kernel-info.outputs.modules_dir }}/kernel/
         sudo depmod
         sudo modprobe zram
         set +e
@@ -104,5 +117,5 @@ runs:
       if: steps.cache-zram.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
-        path: scripts/zram.ko.zst
+        path: ci/termux/scripts/zram.ko.zst
         key: ${{ steps.cache-zram.outputs.cache-primary-key }}
