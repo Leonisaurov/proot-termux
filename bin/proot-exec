@@ -1,0 +1,4 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$SCRIPT_DIR/../scripts/tools/proot_exec.py" "$@"

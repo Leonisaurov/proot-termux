@@ -124,6 +124,28 @@ static void print_bindings(const Tracee *tracee)
 }
 
 /**
+ * Return whether an explicit read-only bind lies below .  Traversing
+ * the parent directories is required to reach that already-authorized bind.
+ */
+int binding_has_readonly_descendant(const Tracee *tracee, const char path[PATH_MAX])
+{
+	Binding *binding;
+	size_t path_length;
+
+	if (tracee == NULL || path == NULL || tracee->fs == NULL ||
+		tracee->fs->bindings.guest == NULL)
+		return 0;
+	path_length = strlen(path);
+	CIRCLEQ_FOREACH_(tracee, binding, GUEST) {
+		if (binding->access_mode == BINDING_ACCESS_RO &&
+		    compare_paths2(path, path_length, binding->guest.path,
+				binding->guest.length) == PATH1_IS_PREFIX)
+			return 1;
+	}
+	return 0;
+}
+
+/**
  * Get the binding for the given @path (relatively to the given
  * binding @side).
  */

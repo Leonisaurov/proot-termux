@@ -9,9 +9,14 @@ does not depend on these libraries, launchers, presets, or policies.
 
 This directory contains three small consumers for `proot --control-fd`:
 
-* `python/control_api.py` — synchronous, standard library only.
+* `python/control_api/` — synchronous and asynchronous Python package.
 * `rust/` — a `std`-only path dependency with no async runtime.
 * `bun/control_api.ts` — TypeScript using Bun/Node stream primitives.
+
+For the complete Python harness/API cookbook, see
+[`docs/python-api.md`](docs/python-api.md). It documents the synchronous and async
+channels, PTY lifecycle, command interleaving, session policy, presets, and a
+full event-loop integration example.
 
 All three expose raw `recv_frame`/`send_frame` and a decoded `receive`/`recv`
 layer. The first frame on every normal channel must be an empty `HELLO` with
@@ -40,10 +45,13 @@ consumer and are not built into proot.
 The control channel is fail-closed. With it enabled, PRCT still authorizes
 network destinations classified as `UNKNOWN` (the static `*`, `tcp://*`, and
 `udp://*` rules only hand such requests off), and external guest filesystem
-paths even when a read-only binding is readable. Proot has no fixed list of
-Android, Termux, or rootfs paths exempt from the protocol: the harness decides
-what to allow and answers the PRCT request. Approvals never change static
-binding permissions.
+paths unless an explicit read-only binding covers a read/metadata operation.
+Read/write binding modes are enforced before prompting: `:rw` covers both
+directions, `:ro` covers reads and metadata while mutations remain mediated,
+and `:wo` is the inverse. Proot has no implicit platform bindings or path
+list. Socket creation is also fail-closed: `socket()`/`socketpair()` emit a
+`SOCKET` network request containing the nonzero socket domain, so approving a
+Unix socket does not approve bind/connect to an Internet address.
 
 El harness debe seguir leyendo el control fd después de enviar un comando: el
 guest puede generar inmediatamente nuevas solicitudes de ruta o red. Leer

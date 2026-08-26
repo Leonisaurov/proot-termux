@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+: "${PYTHONPATH:=}"
+case ":$PYTHONPATH:" in
+  *":$repo_root/control-api/python:"*) ;;
+  *) PYTHONPATH="$repo_root/control-api/python${PYTHONPATH:+:$PYTHONPATH}" ;;
+esac
+export PYTHONPATH
+exec python3 -m control_api.proot_tui "$@"

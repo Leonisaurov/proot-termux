@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPTDIR=$(cd "$(realpath "$(dirname "$0")")"; pwd)
 PROJECT_DIR=$(cd "$SCRIPTDIR/.."; pwd)
 readonly SOURCE_DIR="$PROJECT_DIR/proot-source/src"
-readonly TEMPLATE_CHROOT="$PROJECT_DIR/packages/proot/termux-chroot"
+readonly TEMPLATE_CHROOT="$PROJECT_DIR/ci/termux/packages/proot/termux-chroot"
 
 readonly PKG_NAME="proot"
 readonly PKG_VERSION="5.1.107.87"
@@ -21,6 +21,7 @@ CLEAN="${CLEAN:-false}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
 SKIP_PACKAGE="${SKIP_PACKAGE:-false}"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_DIR/artifacts/packages}"
 
 # === FUNCIONES ===
 
@@ -36,6 +37,7 @@ Options:
   -c, --clean          Run make clean before building (default: false)
   --skip-build         Skip compilation, only create package from existing files
   --skip-package       Build and install, but don't create .pkg.tar.xz
+  -o, --output-dir DIR Write the package to DIR (default: artifacts/packages)
   -h, --help           Show this help message
 
 Environment variables:
@@ -176,7 +178,8 @@ _create_package() {
 
     local PKG_DIR
     PKG_DIR=$(mktemp -d "$TMPDIR/proot-pkg.XXXXXX")
-    local OUTPUT_FILE="$PROJECT_DIR/$PKG_FILENAME"
+    mkdir -p "$OUTPUT_DIR"
+    local OUTPUT_FILE="$OUTPUT_DIR/$PKG_FILENAME"
     local SOURCE_DATE_EPOCH
     SOURCE_DATE_EPOCH=$(date +%s)
 
@@ -305,6 +308,7 @@ while (( $# != 0 )); do
         -c|--clean) CLEAN="true"; shift 1;;
         --skip-build) SKIP_BUILD="true"; shift 1;;
         --skip-package) SKIP_PACKAGE="true"; shift 1;;
+        -o|--output-dir) OUTPUT_DIR="$2"; shift 2;;
         -*) echo "Error: Unknown option '$1'"; exit 1;;
         *) break;;
     esac
@@ -335,8 +339,8 @@ echo "  Done!"
 echo "========================================"
 echo ""
 echo "  Binary: $PREFIX/bin/proot"
-echo "  Package: $PROJECT_DIR/$PKG_FILENAME"
+echo "  Package: $OUTPUT_DIR/$PKG_FILENAME"
 echo ""
 echo "  Install the package with:"
-echo "    pacman -U $PROJECT_DIR/$PKG_FILENAME"
+echo "    pacman -U $OUTPUT_DIR/$PKG_FILENAME"
 echo ""

@@ -1,0 +1,25 @@
+#!/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
+set -m
+
+PORT=8000
+
+echo "Levantamos server bajo proxy"
+PROOT_FLAGS="--proxy web" "$ROOT/tests/rootfs/alpine_rootfs" python -m http.server "$PORT" &
+sleep 1
+
+echo "Esto no deberia alcanzar el servidor"
+curl localhost:$PORT
+
+echo "Esto deberia de alcanzar el servidor"
+PROOT_FLAGS="--proxy web" "$ROOT/tests/rootfs/alpine_rootfs" curl localhost:$PORT
+
+echo "Esto no deberia de alcanzar el servidor"
+PROOT_FLAGS="--proxy web2" "$ROOT/tests/rootfs/alpine_rootfs" curl localhost:$PORT
+
+echo "Esto no deberia de alcanzar el servidor"
+PROOT_FLAGS="" "$ROOT/tests/rootfs/alpine_rootfs" curl localhost:$PORT
+
+kill %1

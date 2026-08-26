@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prct-control-api"
+version = "0.1.0"
+description = "PRCT control-fd protocol and interactive PRoot harness"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+tui = []
+
+[tool.setuptools.packages.find]
+where = ["."]

@@ -1,0 +1,5 @@
+- [ ] Auditar y documentar ownership proot/consumer/harness
+- [ ] Quitar rutas Termux compiladas del núcleo
+- [ ] Quitar excepciones de política PRCT específicas del consumidor
+- [ ] Ajustar control-api y documentar claramente el rol del harness
+- [ ] Ejecutar preflight, sintaxis y validaciones proporcionales

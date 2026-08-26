@@ -8,35 +8,52 @@
 
 The goal is a lean, automated build pipeline that produces a ready-to-install `.pkg.tar.xz` artifact on every push. Proot remains a standalone, multipurpose tool; its capabilities are selected explicitly by the caller.
 
+## Declarative PRoot launcher
+
+Los entrypoints auxiliares están agrupados por función: `bin/appimage-run`
+ejecuta AppImages y los wrappers Alpine viven en `tests/rootfs/` para las
+pruebas de PRoot.
+
+Para describir y ejecutar una instancia completa de PRoot desde un archivo
+TOML (`rootfs`, binds, proxy, política de red, `control_fd`, entorno y
+comando), consulta [docs/tools/proot-exec.md](docs/tools/proot-exec.md) y copia
+[examples/proot-exec/proot-exec.conf.example](examples/proot-exec/proot-exec.conf.example). El ejecutable es:
+
+```bash
+./bin/proot-exec --config ./proot-exec.conf --dry-run
+./bin/proot-exec --config ./proot-exec.conf
+```
+
 ---
 
 ## Quick Build
 
 ```bash
-./scripts/run-docker.sh ./build-package.sh -I -a aarch64 --format pacman proot
+./ci/termux/scripts/run-docker.sh ./ci/termux/build-package.sh -I -a aarch64 --format pacman proot
 ```
 
 This single command:
 1. Spins up the build container (`ghcr.io/leonisaurov/package-builder:latest`)
 2. Resolves and builds dependencies (`libandroid-shmem`, `libtalloc`)
 3. Cross-compiles proot for aarch64
-4. Outputs a `.pkg.tar.xz` package in `output/`
+4. Outputs a `.pkg.tar.xz` package in `ci/termux/output/` in CI. Local builds
+   write to `artifacts/packages/` by default.
 
 ---
 
 ## Proot Source
 
-The proot source lives **directly in the repository** at [`proot-source/src/`](./proot-source/src/) — no patches, no downloads. This is a modified version of upstream proot that includes custom features (see below).
+The proot source lives **directly in the repository** at [`proot-source/src/`](./proot-source/src/) — no patches, no downloads. The `proot-source/` directory intentionally contains only the source tree; repository-facing notes and licensing are in `docs/`. This is a modified version of upstream proot that includes custom features (see below).
 
 To modify proot:
 
 1. Edit files under `proot-source/src/`
-2. Bump `TERMUX_PKG_REVISION` in [`packages/proot/build.sh`](./packages/proot/build.sh)
+2. Bump `TERMUX_PKG_REVISION` in [`ci/termux/packages/proot/build.sh`](./ci/termux/packages/proot/build.sh)
 3. Push — the [CI workflow](#cicd) triggers automatically
 
 For local Termux builds use [`scripts/build-native.sh`](./scripts/build-native.sh),
 not `make` directly. Its jobs option takes a separate argument (`-j 2` or
-`--jobs 2`; `-j2` is invalid). The CI build copies `proot-source/` into the
+`--jobs 2`; `-j2` is invalid). The CI build copies `proot-source/src/` into the
 build directory via `rsync` during `termux_step_pre_configure()`, then invokes
 the project makefile. No external source extraction is needed
 (`TERMUX_PKG_SKIP_SRC_EXTRACT=true`).
@@ -46,7 +63,7 @@ Para probar, elige primero un modo de rutas y mantenlo: con
 `/bin/sh` y `/etc`. `PROOT_TMP_DIR` y `PROOT_RUNTIME_DIR` son rutas host para
 el propio proot, no rutas guest.
 
-Las regresiones nuevas se añaden como scripts revisables en `pentest/test_*.sh`.
+Las regresiones nuevas se añaden como scripts revisables bajo `tests/<tema>/`.
 Primero se valida el script (`bash -n`, `git diff --check`) y después se
 ejecuta el archivo con el flujo elevado de Termux; no se sustituyen por
 comandos improvisados en la terminal. Los tests de `termux-isolated` deben usar
@@ -73,13 +90,13 @@ The mode tracks proc state by descriptor across partial reads, `dup`,
 to the calling tracee. `--proc-isolated` also confines ptrace, process-vm,
 kill and pidfd access to the instance.
 
-When using `./termux-isolated --termux-paths`, paths such as
+When using `./bin/termux-isolated --termux-paths`, paths such as
 `/data/data/com.termux/files/usr` are valid guest paths by design. With the
 default rootfs mode, paths should instead remain inside that rootfs (for
 example `/usr` or `/home`) and must not reveal Android host paths. Use
 `--no-proc-isolated` is an explicit opt-out: it restores the previous procfs
 behavior, including host procfs data, and is intended only for compatibility
-comparisons. `./termux-isolated` uses the strict view by default.
+comparisons. `./bin/termux-isolated` uses the strict view by default.
 
 Android internal storage is unavailable by default. The launcher masks
 `$HOME/storage`, `/storage/emulated/0`, `/storage/self/primary`, and `/sdcard`
@@ -94,7 +111,7 @@ inherit `libtermux-exec-ld-preload.so` into every child process, avoiding the
 per-`execve` overhead of that interceptor. Scripts do not need to be rewritten
 with `termux-fix-shebang`.
 
-When started without a command, `termux-isolated` launches the shell selected
+When started without a command, `bin/termux-isolated` launches the shell selected
 by Termux (the persistent `~/.termux/shell` selection, with `$SHELL` as a
 fallback; for example fish) in an explicit interactive login session. It
 translates the Termux prefix to the guest prefix in rootfs mode. If that shell
@@ -138,12 +155,19 @@ Proot depends on two libraries, both built automatically by the `-I` flag in the
 
 | Dependency | Package Definition |
 |---|---|
-| `libandroid-shmem` | [`packages/libandroid-shmem/build.sh`](./packages/libandroid-shmem/build.sh) |
-| `libtalloc` | [`packages/libtalloc/build.sh`](./packages/libtalloc/build.sh) |
+| `libandroid-shmem` | [`ci/termux/packages/libandroid-shmem/build.sh`](./ci/termux/packages/libandroid-shmem/build.sh) |
+| `libtalloc` | [`ci/termux/packages/libtalloc/build.sh`](./ci/termux/packages/libtalloc/build.sh) |
 
 ---
 
 ## CI/CD
+
+The CI/package-builder checkout is kept under [`ci/termux/`](./ci/termux/).
+It contains the package definitions, `repo.json`, Docker wrapper, and Termux
+build scripts, NDK compatibility patches, and package cleanup command
+`clean.sh`. `.github/` remains at the repository root because that is the
+path GitHub Actions requires. Local native compilation remains separate under
+[`scripts/build-native.sh`](./scripts/build-native.sh).
 
 The active GitHub Actions workflow automates the package build and release process.
 
@@ -151,10 +175,10 @@ The active GitHub Actions workflow automates the package build and release proce
 
 | Aspect | Detail |
 |---|---|
-| **Trigger** | Push to `packages/proot/**` or `proot-source/**` |
+| **Trigger** | Push to `ci/termux/packages/proot/**` or `proot-source/**` |
 | **Runner** | `ubuntu-26.04` with 16 GB zram |
 | **Cache** | `~/.termux-build` is cached with key based on `build.sh` hashes |
-| **Build** | `./scripts/run-docker.sh ./build-package.sh -I -a aarch64 --format pacman proot` |
+| **Build** | `./ci/termux/scripts/run-docker.sh ./ci/termux/build-package.sh -I -a aarch64 --format pacman proot` |
 | **Release** | Creates/updates a `proot-latest` GitHub Release with the `.pkg.tar.xz` artifact |
 | **Artifact** | Also uploaded as a workflow artifact (`proot-aarch64-<sha>`) |
 
@@ -178,7 +202,7 @@ All issues, releases, and CI runs are managed there. This is a standalone fork �
 ## Development
 
 1. Edit source files under `proot-source/src/`
-2. Bump `TERMUX_PKG_REVISION` in `packages/proot/build.sh`
+2. Bump `TERMUX_PKG_REVISION` in `ci/termux/packages/proot/build.sh`
 3. Commit and push — the workflow builds and releases automatically
 
 ### Commit Format

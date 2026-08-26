@@ -1,0 +1,31 @@
+#!/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+cmd=$@
+exec env \
+  -i \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  TERM=tmux-256color \
+  COLORTERM=truecolor \
+  PROOT_L2S_DIR=/data/data/com.termux/files/usr/var/lib/proot-distro/containers/alpine/rootfs/.l2s \
+  /data/data/com.termux/files/usr/bin/proot \
+  --kill-on-exit \
+  --link2symlink \
+  -L \
+  --change-id=0:0 \
+  --rootfs=/data/data/com.termux/files/usr/var/lib/proot-distro/containers/alpine/rootfs \
+  --cwd=/root \
+  --bind=/dev \
+  --bind=/proc \
+  --bind=/sys \
+  --proc-isolation \
+  --bpf-isolated \
+  --perf-isolated \
+  --handle-isolated \
+  --reboot-isolated \
+  --swap-isolated \
+  --kexec-isolated \
+  --ioport-isolated \
+  --bind="$REPO_ROOT/tests/proot/probes:/pentest" \
+  /bin/bash -c "$cmd"

@@ -35,6 +35,11 @@
 #define CONTROL_MAX_FRAME 4096U
 #define CONTROL_PATH_LEN 1024U
 #define CONTROL_TIMEOUT_MS 1000
+/* Human decisions may legitimately take longer than one second.  A decision
+ * read remains bounded by the lifetime of the socket: EOF/error still fails
+ * closed, while the controller is allowed to keep the tracee suspended until
+ * an explicit response arrives. */
+#define CONTROL_DECISION_TIMEOUT_MS (-1)
 #define NET_DNS_MAX_QUERIES 64
 #define NET_DNS_MAX_LEASES 128
 #define NET_DNS_NAME_LEN 256
@@ -61,6 +66,7 @@ enum {
 	CONTROL_NET_CONNECT = 2,
 	CONTROL_NET_PUBLICATION = 3,
 	CONTROL_NET_DNS = 4,
+	CONTROL_NET_SOCKET = 5,
 };
 
 enum {
@@ -241,6 +247,8 @@ typedef struct {
 } NetPolicyConfig;
 
 static FilteredSysnum net_policy_sysnums[] = {
+	{ PR_socket, 0 },
+	{ PR_socketpair, 0 },
 	{ PR_bind, 0 },
 	{ PR_listen, 0 },
 	{ PR_connect, 0 },
@@ -257,6 +265,8 @@ static FilteredSysnum net_policy_sysnums[] = {
 static int read_sockaddr(Tracee *tracee, word_t ptr, struct sockaddr_storage *addr);
 static int control_filter_getdents(NetPolicyConfig *config, Tracee *tracee);
 static int control_drain_commands(NetPolicyConfig *config);
+static size_t net_family_address_size(uint16_t family);
+static int net_operation_family_valid(uint32_t operation, uint16_t family);
 
 static void dns_prepare_response(NetPolicyConfig *config, NetDnsQuery *query,
 					 const unsigned char *packet, size_t length,
@@ -1256,14 +1266,14 @@ static int write_full_timeout(int fd, const void *data, size_t size)
 	return 0;
 }
 
-static int read_full_timeout(int fd, void *data, size_t size)
+static int read_full_timeout_ms(int fd, void *data, size_t size, int timeout_ms)
 {
 	unsigned char *ptr = data;
 	while (size != 0) {
 		struct pollfd pfd = { .fd = fd, .events = POLLIN };
 		int ready;
 		do {
-			ready = poll(&pfd, 1, CONTROL_TIMEOUT_MS);
+			ready = poll(&pfd, 1, timeout_ms);
 		} while (ready < 0 && errno == EINTR);
 		if (ready <= 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
 			return -1;
@@ -1276,6 +1286,16 @@ static int read_full_timeout(int fd, void *data, size_t size)
 		size -= (size_t)n;
 	}
 	return 0;
+}
+
+static int read_full_timeout(int fd, void *data, size_t size)
+{
+	return read_full_timeout_ms(fd, data, size, CONTROL_TIMEOUT_MS);
+}
+
+static int read_full_decision(int fd, void *data, size_t size)
+{
+	return read_full_timeout_ms(fd, data, size, CONTROL_DECISION_TIMEOUT_MS);
 }
 
 static int control_type_is_command(uint16_t type)
@@ -1309,16 +1329,27 @@ static void control_remove_path_rule(NetPolicyConfig *config,
 	}
 }
 
+static int net_operation_family_valid(uint32_t operation, uint16_t family)
+{
+	if (operation == CONTROL_NET_SOCKET)
+		return family != AF_UNSPEC;
+	if (operation == CONTROL_NET_PUBLICATION)
+		return family == AF_UNSPEC;
+	return (operation == CONTROL_NET_BIND || operation == CONTROL_NET_CONNECT) &&
+		(family == AF_INET || family == AF_INET6);
+}
+
 static int control_net_command(NetPolicyConfig *config, uint16_t type,
 				       const unsigned char *payload, size_t size)
 {
 	const ControlNetCommand *command = (const ControlNetCommand *)payload;
 	unsigned int i;
 	if (size != sizeof(*command) ||
-	    (command->operation != CONTROL_NET_BIND &&
+	    (command->operation != CONTROL_NET_SOCKET &&
+	     command->operation != CONTROL_NET_BIND &&
 	     command->operation != CONTROL_NET_CONNECT &&
 	     command->operation != CONTROL_NET_PUBLICATION) ||
-	    (command->family != AF_INET && command->family != AF_INET6) ||
+	    !net_operation_family_valid(command->operation, command->family) ||
 	    (command->decision != NET_DECISION_ALLOW &&
 	     command->decision != NET_DECISION_DENY))
 		return -EINVAL;
@@ -1329,7 +1360,7 @@ static int control_net_command(NetPolicyConfig *config, uint16_t type,
 			    rule->family == command->family &&
 			    rule->port == command->port &&
 			    memcmp(rule->address, command->address,
-				   command->family == AF_INET ? 4 : 16) == 0) {
+				   net_family_address_size(command->family)) == 0) {
 				memset(rule, 0, sizeof(*rule));
 				return 0;
 			}
@@ -1347,7 +1378,7 @@ static int control_net_command(NetPolicyConfig *config, uint16_t type,
 	config->dynamic_rules[i].family = command->family;
 	config->dynamic_rules[i].port = command->port;
 	memcpy(config->dynamic_rules[i].address,
-	       command->address, command->family == AF_INET ? 4 : 16);
+	       command->address, net_family_address_size(command->family));
 	config->dynamic_rules[i].decision = command->decision;
 	config->dynamic_rules[i].persistent =
 		type == CONTROL_ALLOW_ALWAYS || type == CONTROL_DENY_ALWAYS;
@@ -1502,9 +1533,14 @@ static int control_drain_commands(NetPolicyConfig *config)
 	return 0;
 }
 
+static size_t net_family_address_size(uint16_t family)
+{
+	return family == AF_INET ? 4 : family == AF_INET6 ? 16 : 0;
+}
+
 static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 			       uint32_t event, const struct sockaddr_storage *addr,
-			       uint16_t guest_port, uint16_t host_port,
+			       uint16_t guest_port, uint16_t host_port, uint16_t protocol,
 			       uint8_t real_exposure, VnpNetworkClass net_class,
 			       const char *proxy)
 {
@@ -1519,16 +1555,19 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 	if (config->ask_failed)
 		return -EACCES;
 	if (addr != NULL) {
+		size_t address_size = net_family_address_size(addr->ss_family);
 		unsigned int i;
 		for (i = 0; i < config->dynamic_rule_count; i++) {
 			ControlNetRule *rule = &config->dynamic_rules[i];
 			const void *ip = addr->ss_family == AF_INET
 				? (const void *)&((const struct sockaddr_in *)addr)->sin_addr
-				: (const void *)&((const struct sockaddr_in6 *)addr)->sin6_addr;
+				: addr->ss_family == AF_INET6
+				? (const void *)&((const struct sockaddr_in6 *)addr)->sin6_addr
+				: (const void *)addr;
 			if (rule->active && rule->operation == event &&
 			    rule->family == addr->ss_family &&
 			    rule->port == guest_port &&
-			    memcmp(rule->address, ip, addr->ss_family == AF_INET ? 4 : 16) == 0) {
+			    memcmp(rule->address, ip, address_size) == 0) {
 				int decision = rule->decision;
 				if (!rule->persistent)
 					memset(rule, 0, sizeof(*rule));
@@ -1548,6 +1587,7 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 	request.host_pid = (int32_t)getpid();
 	request.guest_port = guest_port;
 	request.host_port = host_port;
+	request.protocol = protocol;
 	request.virtual_class = (uint8_t)net_class;
 	request.real_exposure = real_exposure;
 	if (addr != NULL) {
@@ -1568,12 +1608,12 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 	else {
 		unsigned int unsolicited = 0;
 		while (unsolicited++ < 32) {
-			if (read_full_timeout(config->ask_fd, &response_header,
+			if (read_full_decision(config->ask_fd, &response_header,
 					     sizeof(response_header)) < 0 ||
 			    response_header.magic != CONTROL_MAGIC ||
 			    response_header.version != CONTROL_VERSION ||
 			    response_header.size > CONTROL_MAX_FRAME ||
-			    read_full_timeout(config->ask_fd, payload,
+				    read_full_decision(config->ask_fd, payload,
 					     response_header.size) < 0) {
 				protocol_failed = 1;
 				break;
@@ -1614,13 +1654,16 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 				if (slot == config->dynamic_rule_count)
 					config->dynamic_rule_count++;
 				ControlNetRule *rule = &config->dynamic_rules[slot];
+				size_t address_size = net_family_address_size(addr->ss_family);
 				const void *ip = addr->ss_family == AF_INET
 					? (const void *)&((const struct sockaddr_in *)addr)->sin_addr
-					: (const void *)&((const struct sockaddr_in6 *)addr)->sin6_addr;
+					: addr->ss_family == AF_INET6
+					? (const void *)&((const struct sockaddr_in6 *)addr)->sin6_addr
+					: (const void *)addr;
 				rule->operation = event;
 				rule->family = addr->ss_family;
 				rule->port = guest_port;
-				memcpy(rule->address, ip, addr->ss_family == AF_INET ? 4 : 16);
+				memcpy(rule->address, ip, address_size);
 				rule->decision = response_header.type == CONTROL_ALLOW_ALWAYS
 					? NET_DECISION_ALLOW : NET_DECISION_DENY;
 				rule->persistent = 1;
@@ -1687,12 +1730,12 @@ static int control_path_access(NetPolicyConfig *config, Tracee *tracee,
 		protocol_failed = 1;
 	}
 	while (!protocol_failed && unsolicited++ < 32) {
-		if (read_full_timeout(config->ask_fd, &response_header,
+		if (read_full_decision(config->ask_fd, &response_header,
 					     sizeof(response_header)) < 0 ||
 		    response_header.magic != CONTROL_MAGIC ||
 		    response_header.version != CONTROL_VERSION ||
 		    response_header.size > CONTROL_MAX_FRAME ||
-		    read_full_timeout(config->ask_fd, payload, response_header.size) < 0) {
+		    read_full_decision(config->ask_fd, payload, response_header.size) < 0) {
 			protocol_failed = 1;
 			break;
 		}
@@ -1957,6 +2000,26 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 			return 1;
 		}
 	}
+		if (config->ask_fd >= 0 && config->control_ready &&
+		    (syscall == PR_socket || syscall == PR_socketpair)) {
+			word_t domain = peek_reg(tracee, CURRENT, SYSARG_1);
+			word_t protocol = peek_reg(tracee, CURRENT, SYSARG_3);
+			struct sockaddr_storage addr;
+			int status;
+			memset(&addr, 0, sizeof(addr));
+			addr.ss_family = (sa_family_t)domain;
+			if (domain > UINT16_MAX || !net_operation_family_valid(CONTROL_NET_SOCKET, (uint16_t)domain))
+				status = -EAFNOSUPPORT;
+			else
+				status = ask_harness(config, tracee, CONTROL_NET_SOCKET, &addr,
+						0, 0, (uint16_t)protocol, 0,
+						VNP_NET_CLASS_UNKNOWN, config->proxy);
+			if (status < 0) {
+				set_sysnum(tracee, PR_void);
+				poke_reg(tracee, SYSARG_RESULT, status);
+				return 1;
+			}
+		}
 		if (syscall == PR_bind || syscall == PR_listen || syscall == PR_connect ||
 		    syscall == PR_sendto || syscall == PR_recvfrom || syscall == PR_recvmsg ||
 		    syscall == PR_ppoll || syscall == PR_read) {
@@ -1994,13 +2057,19 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 				word_t ptr = (syscall == PR_sendto || syscall == PR_recvfrom) ?
 					peek_reg(tracee, CURRENT, SYSARG_5) :
 					peek_reg(tracee, CURRENT, SYSARG_2);
-				if (ptr != 0 && read_sockaddr(tracee, ptr, &addr) == 0) {
+				if (ptr != 0 && read_sockaddr(tracee, ptr, &addr) == 0 &&
+				    (addr.ss_family == AF_INET || addr.ss_family == AF_INET6)) {
+					/* read_sockaddr() deliberately treats unsupported sockaddr
+					 * families as non-network addresses.  Keep that invariant in
+					 * the control-fd handoff too: AF_UNIX/AF_NETLINK/AF_UNSPEC in address-bearing calls
+					 * must never become a malformed NET_ACCESS_REQUEST with a
+					 * guessed IPv6 port.  Socket creation is authorized separately through CONTROL_NET_SOCKET. */
 					unsigned int port = addr.ss_family == AF_INET ?
 						ntohs(((struct sockaddr_in *)&addr)->sin_port) :
 						ntohs(((struct sockaddr_in6 *)&addr)->sin6_port);
 					status = ask_harness(config, tracee,
 						syscall == PR_bind ? CONTROL_NET_BIND : CONTROL_NET_CONNECT,
-						&addr, (uint16_t)port, (uint16_t)port, 0,
+						&addr, (uint16_t)port, (uint16_t)port, 0, 0,
 						vnp_classify_destination(tracee, &addr, (uint16_t)port,
 									 config->proxy, sizeof(config->proxy)),
 						config->proxy);
@@ -2348,10 +2417,30 @@ static int control_path_is_exempt(Tracee *tracee, const char *path,
 				  NetControlPathOperation operation)
 {
 	char cwd[PATH_MAX];
-	(void)operation;
+	const Binding *binding;
 
 	if (tracee == NULL || path == NULL)
 		return 0;
+	/* Static binding permissions are already the authorization for matching
+	 * accesses. Only a RO mutation or a WO read needs the controller; RW
+	 * bindings must not turn every editor write into a PRCT prompt. */
+	binding = get_binding(tracee, GUEST, path);
+	if (binding != NULL) {
+		if (binding->access_mode == BINDING_ACCESS_RW)
+			return 1;
+		if (binding->access_mode == BINDING_ACCESS_RO &&
+		    (operation == NET_CONTROL_PATH_READ ||
+		     operation == NET_CONTROL_PATH_METADATA))
+			return 1;
+		if (binding->access_mode == BINDING_ACCESS_WO &&
+		    operation != NET_CONTROL_PATH_READ &&
+		    operation != NET_CONTROL_PATH_METADATA)
+			return 1;
+	}
+	if ((operation == NET_CONTROL_PATH_READ ||
+	     operation == NET_CONTROL_PATH_METADATA) &&
+	    binding_has_readonly_descendant(tracee, path))
+		return 1;
 	if (getcwd2(tracee, cwd) == 0 && control_path_is_under(path, cwd))
 		return 1;
 	/* Opening a device such as /dev/tty with O_RDWR is not a filesystem
@@ -2484,7 +2573,7 @@ int net_policy_allow_publication(Tracee *tracee, uint16_t host_port,
 	    !bind_matches(config->allow_bind, config->allow_bind_count, guest_port))
 		return -EACCES;
 	return ask_harness(config, tracee, CONTROL_NET_PUBLICATION, NULL,
-			   guest_port, host_port, 1, VNP_NET_CLASS_BRIDGE,
+			   guest_port, host_port, 0, 1, VNP_NET_CLASS_BRIDGE,
 			   config->proxy);
 }
 

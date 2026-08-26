@@ -16,7 +16,10 @@ aarch64 build; implementations reject big-endian hosts. Every frame has this
 | 8 | u32 | payload size, at most 4096 |
 | 12 | u64 | request id |
 
-Payloads are packed C layouts. `NET_ACCESS_REQUEST` is 230 bytes:
+Payloads are packed C layouts. `NET_ACCESS_REQUEST` is 230 bytes. For
+BIND/CONNECT, family is AF_INET (2) or AF_INET6 (10); PUBLICATION uses family
+0; SOCKET uses the requested nonzero socket domain and carries zero
+address/ports:
 `u32 operation, i32 guest_pid, i32 host_pid, u16 family, u16 protocol,
 u16 guest_port, u16 host_port, u8 address[16], u8 virtual_class,
 u8 real_exposure, char proxy[64], char domain[128]`.
@@ -35,7 +38,7 @@ Message values are: HELLO 1, NET_ACCESS_REQUEST 2, PATH_ACCESS_REQUEST 3,
 SHADOW_EVENT 4, COMMAND_RESULT 5; ALLOW_ONCE 16, ALLOW_ALWAYS 17,
 DENY_ONCE 18, DENY_ALWAYS 19, FORGET 20, SET_RULE 21, REVEAL_SHADOW 22,
 RESTORE_SHADOW 23, GET_STATE 24. Network operations are BIND 1, CONNECT 2,
-PUBLICATION 3, DNS 4. Path operations are READ 1, WRITE 2, CREATE 3,
+PUBLICATION 3, DNS 4, SOCKET 5. SOCKET requests authorize creation of a non-unspecified socket family; their address and ports are zero. Path operations are READ 1, WRITE 2, CREATE 3,
 DELETE 4, RENAME 5, METADATA 6. Shadow scopes are NODE 1 and RECURSIVE 2.
 
 Implementations read incrementally, apply a default 1000 ms timeout, and use
@@ -47,13 +50,13 @@ host paths are never accepted or exposed.
 When `--control-fd` is active, an `UNKNOWN` network destination is not a
 virtual-network classification and is never implicitly allowed. The static
 network policy may use only `*`, `tcp://*`, or `udp://*` to hand it to PRCT;
-the harness must still return an allow decision. External guest paths likewise
-produce `PATH_ACCESS_REQUEST` even when a readable binding would pass the
-static check. The current working directory and its descendants may be
-handled by core path semantics, but proot has no fixed Android, Termux, or
-rootfs exemptions. The harness must explicitly allow any infrastructure paths
-it needs. Mutating operations remain subject to PRCT and static binding
-permissions.
+the harness must still return an allow decision. External guest paths produce
+`PATH_ACCESS_REQUEST` unless an explicit read-only binding covers a read or
+metadata operation. Writes against a read-only binding, and reads against a
+write-only binding, remain denied or mediated. The current working directory
+and its descendants may be handled by core path semantics, but proot has no
+implicit Android, Termux, or rootfs bindings. Mutating operations remain
+subject to PRCT and static binding permissions.
 
 ## Channel lifecycle
 

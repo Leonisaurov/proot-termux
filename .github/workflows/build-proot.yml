@@ -4,7 +4,9 @@ name: Build proot
 on:
   push:
     paths:
-      - 'packages/proot/**'
+      - 'ci/termux/packages/proot/**'
+      - 'ci/termux/packages/libtalloc/**'
+      - 'ci/termux/packages/libandroid-shmem/**'
       - 'proot-source/**'
   workflow_dispatch:
 
@@ -38,7 +40,7 @@ jobs:
       id: build-cache
       with:
         path: ~/.termux-build
-        key: proot-${{ hashFiles('packages/proot/build.sh', 'packages/libtalloc/build.sh', 'packages/libandroid-shmem/build.sh') }}
+        key: proot-${{ hashFiles('ci/termux/packages/proot/build.sh', 'ci/termux/packages/libtalloc/build.sh', 'ci/termux/packages/libandroid-shmem/build.sh') }}
         restore-keys: |
           proot-
 
@@ -49,14 +51,14 @@ jobs:
     - name: Build proot package
       env:
         TERMUX_DOCKER_RUN_EXTRA_ARGS: --volume /home/runner/.termux-build:/home/builder/.termux-build
-      run: ./scripts/run-docker.sh ./build-package.sh -I -a aarch64 --format pacman proot
+      run: ./ci/termux/scripts/run-docker.sh ./ci/termux/build-package.sh -I -a aarch64 --format pacman proot
 
     # ----- Collect and publish artifacts -----
     - name: Collect package files
       if: always()
       run: |
         mkdir -p ./artifacts
-        mv output/*.pkg.tar.xz ./artifacts/ 2>/dev/null || true
+        mv ci/termux/output/*.pkg.tar.xz ./artifacts/ 2>/dev/null || true
 
     - name: Upload to GitHub Release
       if: success()

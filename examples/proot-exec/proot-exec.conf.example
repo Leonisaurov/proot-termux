@@ -1,0 +1,29 @@
+# proot-exec.conf — TOML configuration consumed by ./proot-exec
+#
+# Paths on the host (executable, rootfs, bind.host, launcher_cwd) may use
+# $NAME/${NAME} variables. Guest paths (cwd and bind.guest) are absolute.
+
+[proot]
+executable = "${PREFIX}/bin/proot"
+# rootfs = "${HOME}/rootfs/alpine"
+cwd = "/"
+# proxy = "devnet"
+net_policy = "deny"
+net_allow = ["*"]
+control_fd = "none"
+inherit_environment = true
+launcher_cwd = "${PWD}"
+flags = ["--kill-on-exit"]
+extra_args = []
+command = ["/bin/sh", "-i"]
+
+[[binds]]
+host = "${HOME}"
+guest = "/home/user"
+mode = "ro"
+
+# Para un bind escribible usa mode = "rw" en [[binds]].
+
+[env]
+TERM = "${TERM}"
+COLORTERM = "${COLORTERM}"

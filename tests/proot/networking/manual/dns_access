@@ -1,0 +1,20 @@
+#!/bin/env bash
+set -euo pipefail
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
+set -m
+
+echo "Levantando server, deberia de poder hacer curl a google.com"
+PROOT_FLAGS='--proxy web' "$ROOT/tests/rootfs/alpine_rootfs" "curl google.com && python -m http.server 8080" &
+sleep 3
+
+echo "Deberia de poder acceder"
+PROOT_FLAGS='--proxy web' "$ROOT/tests/rootfs/alpine_rootfs" "curl localhost:8080"
+
+echo "Deberia de poder acceder"
+PROOT_FLAGS='--proxy web' "$ROOT/tests/rootfs/alpine_rootfs" "curl localhost:8080"
+
+echo "No deberia de poder acceder"
+PROOT_FLAGS='--proxy web2' "$ROOT/tests/rootfs/alpine_rootfs" "curl localhost:8080"
+
+kill %1

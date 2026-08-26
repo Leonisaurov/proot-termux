@@ -423,7 +423,7 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
                 { .name = NULL, .separator = '\0', .value = NULL } },
           .handler = handle_option_control_fd,
           .description = "Use a bidirectional control harness for policy decisions.",
-          .detail = "Versioned full-duplex stream frames for network/path decisions and shadows; requests, malformed frames, EOF, and timeouts fail closed. External guest paths require PRCT even when a binding is readable. Proot has no platform-specific path exemptions; the control owner decides which requests to allow. Commands include ALLOW_ONCE, ALLOW_ALWAYS, DENY_ONCE, DENY_ALWAYS, FORGET, SET_RULE, REVEAL_SHADOW, RESTORE_SHADOW, and GET_STATE.",
+          .detail = "Versioned full-duplex stream frames for network/path decisions and shadows; requests, malformed frames, EOF, and timeouts fail closed. Explicit read-only bindings authorize read and metadata operations before PRCT; writes remain mediated. Proot has no implicit platform bindings. Commands include ALLOW_ONCE, ALLOW_ALWAYS, DENY_ONCE, DENY_ALWAYS, FORGET, SET_RULE, REVEAL_SHADOW, RESTORE_SHADOW, and GET_STATE.",
         },
         { .class = "Extension options",
           .arguments = {

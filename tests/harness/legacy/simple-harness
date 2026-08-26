@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+set -eu
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+: "${PYTHONPATH:=}"
+case ":$PYTHONPATH:" in
+  *":$script_dir/control-api/python:"*) ;;
+  *) PYTHONPATH="$script_dir/control-api/python${PYTHONPATH:+:$PYTHONPATH}" ;;
+esac
+export PYTHONPATH
+exec python3 -m proot_tui "$@"
