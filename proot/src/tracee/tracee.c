@@ -74,6 +74,20 @@ static void tracee_hash_insert(Tracee *tracee)
 	tracee_hash[h] = tracee;
 }
 
+/* Side-effect-free membership query for extensions that only need to know
+ * whether a PID belongs to this PRoot instance.  Unlike get_tracee(), this
+ * does not reset the tracee's talloc context or create an entry. */
+bool tracee_is_tracked(pid_t pid)
+{
+	Tracee *tracee = tracee_hash[tracee_hash_fn(pid)];
+	while (tracee != NULL) {
+		if (tracee->pid == pid)
+			return true;
+		tracee = tracee->hash_next;
+	}
+	return false;
+}
+
 /**
  * D5: Update hash entry when a tracee's PID changes.
  * Removes the old entry and inserts with the new PID.

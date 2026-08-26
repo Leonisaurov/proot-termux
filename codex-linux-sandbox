@@ -1,0 +1,387 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# codex-linux-sandbox — sandbox de OpenAI Codex CLI para Termux/Android vía proot (sin root).
+#
+# Codex invoca su sandbox con (landlock.rs / linux_run_main.rs):
+#   codex-linux-sandbox --sandbox-policy-cwd <cwd> --command-cwd <cwd> \
+#     --permission-profile <json> [--use-legacy-landlock] [--allow-network-for-proxy] \
+#     -- <comando...>
+#
+# En Android no hay bubblewrap ni Landlock/seccomp utilizables (patches 19/20 del port
+# activan la ruta LinuxSeccomp y resuelven este exe desde $CODEX_LINUX_SANDBOX_EXE o PATH).
+# Este wrapper ejecuta el comando bajo proot con aislamiento de filesystem:
+#   - Todo el árbol es de SOLO LECTURA salvo el workspace y $TMPDIR (las tools necesitan
+#     temporales; limitación documentada).
+#   - $HOME se bindea RO pero con CARVEOUTS: los dirs sensibles (~/.ssh, ~/.codex,
+#     ~/.aws, ~/.netrc, ~/.config/gh) se tapan con binds vacíos añadidos DESPUÉS del
+#     bind de $HOME (en proot, el último bind de un guest path gana).
+#   - El aislamiento de red NO es posible sin root (proot no tiene netns): se deja la red
+#     real y se emite un aviso a stderr (no se aborta). Aislamiento de conveniencia, no
+#     una frontera de seguridad (ver el warn de cabecera).
+#
+# Modelo de binds (decidido en sesión): raíz guest = $PREFIX (:ro) + self-binds derivados
+# para que los paths absolutos del env de Termux (PATH/HOME/TMPDIR/$PREFIX) sigan
+# resolviendo en el guest. El workspace y los paths `access=write` del profile se
+# bindean :rw. Las rutas guest conservan el prefijo real de Termux.
+set -euo pipefail
+
+# ── Configuración ────────────────────────────────────────────────────────────────────────
+TERMUX_ROOT="/data/data/com.termux/files"
+TERMUX_PREFIX="${PREFIX:-$TERMUX_ROOT/usr}"
+TERMUX_HOME="${HOME:-$TERMUX_ROOT/home}"
+PROOT_BIN="${CODEX_SANDBOX_PROOT:-$TERMUX_PREFIX/bin/proot}"
+# Codex corre dentro del mismo layout que Termux; se conservan sus rutas reales.
+
+# Termux inyecta libtermux-exec mediante LD_PRELOAD. Esa librería no existe en
+# el guest del proot y rompe incluso la ejecución de /bin/sh; se elimina solo
+# al lanzar proot (el resto del entorno del agente se conserva).
+: "${TMPDIR:=/data/data/com.termux/files/usr/tmp}"
+export TMPDIR
+mkdir -p "$TMPDIR"
+test -d "$TMPDIR" && test -w "$TMPDIR" || {
+    echo "codex-linux-sandbox: error: TMPDIR no existe o no es escribible: $TMPDIR" >&2
+    exit 1
+}
+
+# Carveouts de $HOME: directorios/archivos sensibles del host que se TAPAN con
+# binds vacíos (el guest ve un dir/archivo vacío, no las credenciales del host).
+# El bind del vacío se añade SIEMPRE DESPUÉS del bind de $HOME (último gana).
+# ~/.gitconfig NO se tapa a propósito: git (invocado por las tools dentro del
+# sandbox) necesita user.name/user.email para commitear y ese archivo no suele
+# contener secretos (las credenciales viven en ~/.netrc / ~/.git-credentials /
+# ~/.config/gh / ~/.ssh).
+SBX_HIDDEN_DIR="${CODEX_SANDBOX_HIDDEN_DIR:-}"
+SBX_HIDDEN_DIR_OWNED=0
+if [ -z "$SBX_HIDDEN_DIR" ]; then
+    SBX_HIDDEN_DIR="${TMPDIR:-/data/data/com.termux/files/usr/tmp}/codex-sbx-hidden-$$"
+    SBX_HIDDEN_DIR_OWNED=1
+fi
+SBX_CARVEOUT_DIRS=(.ssh .codex .aws .config/gh)
+SBX_CARVEOUT_FILES=(.netrc)
+
+cleanup_hidden_dir() {
+    if [ "$SBX_HIDDEN_DIR_OWNED" = "1" ]; then
+        rm -rf -- "$SBX_HIDDEN_DIR"
+    fi
+}
+trap cleanup_hidden_dir EXIT HUP INT TERM
+
+# ── Utilidades ───────────────────────────────────────────────────────────────────────────
+die() { echo "codex-linux-sandbox: error: $*" >&2; exit 1; }
+warn() { echo "codex-linux-sandbox: aviso: $*" >&2; }
+debug_log="${CODEX_SANDBOX_DEBUG_LOG:-}"
+debug() {
+    [ -n "$debug_log" ] || return 0
+    {
+        printf 'pid=%s phase=%s prefix=%s proot=%s model=%s cwd=%s workspace=%s\n' \
+            "$$" "$1" "$TERMUX_PREFIX" "$PROOT_BIN" "$BIND_MODEL" \
+            "${cwd:-}" "${workspace:-}"
+    } >> "$debug_log" 2>/dev/null || true
+}
+
+if [ "$#" -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    cat >&2 <<'EOF'
+uso: codex-linux-sandbox --sandbox-policy-cwd <cwd> [opciones] -- <comando...>
+
+Ejecuta <comando> bajo proot con aislamiento de filesystem (todo read-only salvo
+el workspace y $TMPDIR). Interfaz compatible con el argv que codex pasa a su
+sandbox Linux.
+
+opciones (compatibilidad con el sandbox real de codex):
+  --sandbox-policy-cwd <path>   workspace base (también la raíz RW por defecto)
+  --command-cwd <path>          cwd lógico del comando (default: policy cwd)
+  --permission-profile <json>   profile del sandbox: los paths `access=write`
+                                se bindean :rw; el resto queda read-only
+  --use-legacy-landlock         aceptado (sin efecto: no hay Landlock en Android)
+  --allow-network-for-proxy     aceptado; sin netns sin root → warning, red real
+  --apply-seccomp-then-exec     aceptado (sin efecto: no hay seccomp en Android)
+  --proxy-route-spec <spec>     aceptado (sin efecto)
+  --no-proc                     aceptado; /proc se bindea igual (necesario en Termux)
+  --                            separador: lo que sigue es el comando a ejecutar
+
+entorno:
+  CODEX_SANDBOX_PROOT  ruta del binario proot (default: $PREFIX/bin/proot)
+  Los comandos se resuelven con el PATH de Termux; para una ruta absoluta usa
+  /data/data/com.termux/files/usr/bin/bash o /data/data/com.termux/files/usr/bin/sh.
+EOF
+    exit 0
+fi
+
+# ── Parseo del argv de codex ─────────────────────────────────────────────────────────────
+sandbox_policy_cwd=""
+command_cwd=""
+permission_profile=""
+use_legacy_landlock=0
+allow_network_for_proxy=0
+apply_seccomp_then_exec=0
+proxy_route_spec=""
+no_proc=0
+cmd=()
+seen_separator=0
+
+take_value() { # $1 = flag, consume $1 del argv y devuelve su valor
+    if [ "$#" -lt 2 ]; then
+        die "el flag $1 requiere un valor"
+    fi
+    shift
+    printf '%s' "$1"
+}
+
+while [ "$#" -gt 0 ]; do
+    arg="$1"
+    if [ "$seen_separator" = "1" ]; then
+        cmd+=("$arg")
+        shift
+        continue
+    fi
+    case "$arg" in
+        --) seen_separator=1; shift ;;
+        --sandbox-policy-cwd=*) sandbox_policy_cwd="${arg#*=}"; shift ;;
+        --sandbox-policy-cwd) sandbox_policy_cwd="$(take_value "$@")"; shift 2 ;;
+        --command-cwd=*) command_cwd="${arg#*=}"; shift ;;
+        --command-cwd) command_cwd="$(take_value "$@")"; shift 2 ;;
+        --permission-profile=*) permission_profile="${arg#*=}"; shift ;;
+        --permission-profile) permission_profile="$(take_value "$@")"; shift 2 ;;
+        --use-legacy-landlock) use_legacy_landlock=1; shift ;;
+        --allow-network-for-proxy) allow_network_for_proxy=1; shift ;;
+        --apply-seccomp-then-exec) apply_seccomp_then_exec=1; shift ;;
+        --no-proc) no_proc=1; shift ;;
+        --proxy-route-spec=*) proxy_route_spec="${arg#*=}"; shift ;;
+        --proxy-route-spec) proxy_route_spec="$(take_value "$@")"; shift 2 ;;
+        --*) die "argumento desconocido: $arg" ;;
+        *) die "argumento inesperado: $arg (el comando debe ir después de '--')" ;;
+    esac
+done
+
+if [ "${#cmd[@]}" -eq 0 ]; then
+    die "no hay comando a ejecutar (falta '-- <comando>')"
+fi
+if [ ! -x "$PROOT_BIN" ]; then
+    die "no se encontró el proot de github.com/Leonisaurov/proot-termux en $PROOT_BIN (define CODEX_SANDBOX_PROOT si está en otra ruta)"
+fi
+
+# ── Derivar cwd y workspace ──────────────────────────────────────────────────────────────
+cwd="${command_cwd:-${sandbox_policy_cwd:-$PWD}}"
+workspace="${sandbox_policy_cwd:-$PWD}"
+debug before-proot
+[ -n "$cwd" ] || die "no se pudo derivar el cwd"
+[ -n "$workspace" ] || die "no se pudo derivar el workspace"
+[ -d "$workspace" ] || warn "el workspace no existe o no es un directorio: $workspace"
+[ -d "$cwd" ] || warn "el cwd no existe o no es un directorio: $cwd (proot caerá a /)"
+
+# ── Parsear el permission-profile (paths write + modo de red) ────────────────────────────
+# JSON (permissions.rs): {"type":"managed","file_system":{"type":"restricted","entries":[
+#   {"path":{"type":"path","path":"/abs"},"access":"read"|"write"|"deny"},
+#   {"path":{"type":"special","value":{"kind":"root"}},"access":"read"}],"network":"restricted"|"enabled"}
+write_paths=()
+special_write=()
+network_mode=""
+if command -v python3 >/dev/null 2>&1 && [ -n "$permission_profile" ]; then
+    parsed="$(printf '%s' "$permission_profile" | python3 -c '
+import json, sys
+paths = []
+special = []
+network = ""
+try:
+    prof = json.loads(sys.stdin.read())
+    fs = prof.get("file_system", {})
+    for e in fs.get("entries") or []:
+        if not isinstance(e, dict):
+            continue
+        if e.get("access") == "write":
+            p = e.get("path") or {}
+            if isinstance(p, dict) and p.get("type") == "path" and isinstance(p.get("path"), str):
+                paths.append(p["path"])
+            elif isinstance(p, dict) and p.get("type") == "special" and isinstance(p.get("value"), dict):
+                kind = p["value"].get("kind")
+                if isinstance(kind, str):
+                    special.append(kind)
+    net = prof.get("network")
+    if isinstance(net, str):
+        network = net
+except Exception:
+    pass
+for x in paths:
+    print(x)
+for s in special:
+    print("SPECIAL:" + s)
+print("NETWORK:" + network)
+' 2>/dev/null || true)"
+    write_paths=()
+    special_write=()
+    while IFS= read -r line; do
+        case "$line" in
+            NETWORK:*) network_mode="${line#NETWORK:}" ;;
+            SPECIAL:*) special_write+=("${line#SPECIAL:}") ;;
+            *) [ -n "$line" ] && write_paths+=("$line") ;;
+        esac
+    done <<< "$parsed"
+    if [ "${#write_paths[@]}" -gt 0 ]; then
+        echo "codex-linux-sandbox: paths write del profile: ${write_paths[*]}" >&2
+    fi
+else
+    [ -n "$permission_profile" ] && warn "python3 no disponible o profile inválido; solo workspace RW"
+fi
+
+# ── Aislamiento de red: sin netns sin root ───────────────────────────────────────────────
+# Aviso de cabecera (siempre, no solo en modo red): el sandbox es aislamiento de
+# CONVENIENCIA, no una frontera de seguridad contra exfiltración. proot no aísla la
+# red (sin netns no hay red propia) y el guest hereda el env completo del host; los
+# dirs sensibles quedan ocultos con binds vacíos, pero un proceso con red real puede
+# exfiltrar lo que alcance (incluido el propio env).
+warn "el sandbox es aislamiento de CONVENIENCIA, no una frontera de seguridad"
+warn "  contra exfiltración: el guest hereda el env del host y la red real."
+warn "  ~/.ssh, ~/.codex, ~/.aws, ~/.netrc y ~/.config/gh están ocultos con"
+warn "  binds vacíos, pero NO confíes secretos de producción en el sandbox."
+if [ "$allow_network_for_proxy" = "1" ] || [ "$network_mode" = "restricted" ]; then
+    warn "el aislamiento de red no está disponible sin root (sin netns); se deja la red real"
+fi
+if [ -n "$proxy_route_spec" ]; then
+    warn "--proxy-route-spec ignorado (modo proxy no soportado en Android)"
+fi
+
+# ── Construir los binds de aislamiento ───────────────────────────────────────────────────
+BINDS=()
+add_bind() { BINDS+=("$1"); }
+
+# $HOME RO + carveouts: tapa los dirs sensibles con vacíos (binds posteriores a
+# los del $HOME). Solo aplica si el dir homólogo existe en el host.
+add_home_with_carveouts() {
+    local d f src snapshots skills
+    mkdir -p "$SBX_HIDDEN_DIR"
+    for d in "${SBX_CARVEOUT_DIRS[@]}"; do
+        [ -e "$TERMUX_HOME/$d" ] || continue
+        src="$SBX_HIDDEN_DIR/$d"
+        mkdir -p "$src"
+        add_bind "--bind=$src:$TERMUX_HOME/$d:ro"
+    done
+    for f in "${SBX_CARVEOUT_FILES[@]}"; do
+        [ -e "$TERMUX_HOME/$f" ] || continue
+        src="$SBX_HIDDEN_DIR/$f"
+        : > "$src"
+        add_bind "--bind=$src:$TERMUX_HOME/$f:ro"
+    done
+    # Codex genera aquí el snapshot del shell que ejecutará la herramienta.
+    # Exponemos únicamente ese subdirectorio en RO; el resto de ~/.codex
+    # (reglas, tokens y configuración) permanece oculto.
+    snapshots="$TERMUX_HOME/.codex/shell_snapshots"
+    if [ -d "$snapshots" ]; then
+        add_bind "--bind=$snapshots:$snapshots:ro"
+    fi
+    # Skills are instructions only; expose this subtree read-only while keeping
+    # ~/.codex/auth.json, rules, and configuration hidden.
+    skills="$TERMUX_HOME/.codex/skills"
+    if [ -d "$skills" ]; then
+        add_bind "--bind=$skills:$skills:ro"
+    fi
+}
+
+# Sistema Android (RO): linkerconfig es necesario para que bionic resuelva las libs.
+add_bind "--bind=/system:/system:ro"
+add_bind "--bind=/vendor:/vendor:ro"
+add_bind "--bind=/apex:/apex:ro"
+add_bind "--bind=/linkerconfig/ld.config.txt:/linkerconfig/ld.config.txt:ro"
+
+ # Las rutas guest conservan el prefijo real de Termux. Todo lo no bindeado
+ # queda fuera de la vista del proceso.
+add_bind "--bind=$TERMUX_PREFIX:$TERMUX_PREFIX:ro"
+if [ -d "$TERMUX_HOME" ]; then
+    add_bind "--bind=$TERMUX_HOME:$TERMUX_HOME:ro"
+    add_home_with_carveouts
+fi
+
+# Workspace RW (siempre).
+add_bind "--bind=$workspace:$workspace:rw"
+
+# Paths access=write del profile → RW. Se filtran los que no existen o no son
+# directorios: bindear un path inexistente como :rw haría que proot fallara o
+# creara un archivo vacío en el guest (degradación silenciosa del aislamiento).
+for p in "${write_paths[@]}"; do
+    [ -n "$p" ] || continue
+    if [ -d "$p" ]; then
+        add_bind "--bind=$p:$p:rw"
+    else
+        warn "path write del profile no existe o no es un dir; bind RW ignorado: $p"
+    fi
+done
+
+# Special paths con access=write del profile (permissions.rs Path::Special).
+# Proot NO puede otorgar ninguno de forma real; se traduce a lo más cercano:
+for kind in "${special_write[@]}"; do
+    case "$kind" in
+        root)
+            # DangerFullAccess / full access: imposible de conceder sin root real.
+            # NO se aborta: la tool sigue con el aislamiento RO fuera del workspace,
+            # pero el usuario debe saber que pidió (y no obtuvo) acceso total.
+            warn "el profile pide acceso total (root write / DangerFullAccess);"
+            warn "  el sandbox proot NO puede otorgarlo; se mantiene el aislamiento"
+            warn "  RO fuera del workspace (la tool seguirá con lo que permita el sandbox)"
+            ;;
+        project_roots)
+            # El workspace ya se bindea :rw arriba (--bind=$workspace:$workspace:rw);
+            # project_roots write queda satisfecho por ese bind.
+            echo "codex-linux-sandbox: special write 'project_roots' → cubierto por el workspace RW ($workspace)" >&2
+            ;;
+        tmpdir)
+            # $TMPDIR se bindea :rw justo debajo (si existe); nada que añadir aquí.
+            echo "codex-linux-sandbox: special write 'tmpdir' → \$TMPDIR queda RW" >&2
+            ;;
+        slash_tmp)
+            # Se bindea $TMPDIR como /tmp RW para que las tools que usan /tmp
+            # (y no $TMPDIR) puedan escribir.
+            if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then
+                add_bind "--bind=$TMPDIR:/tmp:rw"
+                echo "codex-linux-sandbox: special write 'slash_tmp' → bind $TMPDIR:/tmp:rw" >&2
+            else
+                warn "special write 'slash_tmp' pero \$TMPDIR no está disponible; /tmp queda RO"
+            fi
+            ;;
+        *)
+            warn "special write desconocido en el profile: $kind (ignorado)"
+            ;;
+    esac
+done
+
+# $TMPDIR RW: las tools del sandbox (git, compiladores, ...) necesitan temporales.
+if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then
+    add_bind "--bind=$TMPDIR:$TMPDIR:rw"
+fi
+
+# /dev y /proc: binds directos (más específicos que la raíz RO).
+add_bind "--bind=/dev:/dev"
+add_bind "--bind=/proc:/proc"
+
+# ── Ejecutar bajo proot ──────────────────────────────────────────────────────────────────
+# Nota: --no-proc se acepta pero /proc se bindea igual (casi ninguna tool de Termux
+# funciona sin /proc); --use-legacy-landlock/--apply-seccomp-then-exec no aplican en
+# Android (no hay Landlock/seccomp para procesos no-root).
+#
+# -0 / --change-id=0:0: el guest corre como root falso (UID/GID 0), consistente con
+#   termux-isolated --as-root. Sin ella, las tools que comprueban el propietario de
+#   los paths (u0_aXXX) fallarían al operar sobre el workspace RW.
+# -L / --link2symlink: corrige el tamaño reportado de los symlinks (st_size = longitud
+#   real del target). Necesario para que los binarios de Termux que resuelven symlinks
+#   (la mayoría, vía $PREFIX/bin → $PREFIX/libexec/...) funcionen dentro del guest.
+set +e
+env -u LD_PRELOAD -u LD_LIBRARY_PATH "$PROOT_BIN" \
+    --kill-on-exit \
+    -0 \
+    -L \
+    --proc-isolated \
+    --ptrace-isolated \
+    --bpf-isolated \
+    --perf-isolated \
+    --handle-isolated \
+    --reboot-isolated \
+    --swap-isolated \
+    --kexec-isolated \
+    --ioport-isolated \
+    "${BINDS[@]}" \
+    --cwd="$cwd" \
+    "${cmd[@]}"
+rc=$?
+set -e
+debug "after-proot-rc-$rc"
+if [ "$rc" -ne 0 ]; then
+    warn "proot terminó con código $rc"
+fi
+exit "$rc"

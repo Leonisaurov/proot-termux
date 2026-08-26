@@ -795,10 +795,34 @@ Binding *new_binding(Tracee *tracee, const char *host, const char *guest, bool m
 	} else {
 		status = realpath2(tracee->reconf.tracee, binding->host.path, host, true);
 		if (status < 0) {
-			if (must_exist && getenv("PROOT_IGNORE_MISSING_BINDINGS") == NULL)
-				note(tracee, WARNING, INTERNAL, "can't sanitize binding \"%s\": %s",
-					host, strerror(-status));
-			goto error;
+			/* realpath2() normally canonicalizes through the active
+			 * PRoot namespace.  During nested startup, however, the
+			 * parent may provide a synthetic /proc view: the kernel can
+			 * fstat the guest path while canonicalization of the same
+			 * path ends in ENOENT.  Keep the guest spelling in that case
+			 * and let the parent translate it when the binding is used.
+			 * fstatat() remains the normal existence check, so missing
+			 * bindings are not silently accepted. */
+			struct stat binding_stat;
+			if (strnlen(host, PATH_MAX) < PATH_MAX) {
+				if (host[0] == '/')
+					strcpy(binding->host.path, host);
+				else if (getcwd2(NULL, base) == 0 &&
+					 join_paths(2, binding->host.path, base, host) == 0)
+					;
+				else
+					binding->host.path[0] = '\0';
+				if (binding->host.path[0] != '\0' &&
+				    fstatat(AT_FDCWD, binding->host.path,
+					    &binding_stat, 0) == 0)
+					status = 0;
+			}
+			if (status < 0) {
+				if (must_exist && getenv("PROOT_IGNORE_MISSING_BINDINGS") == NULL)
+					note(tracee, WARNING, INTERNAL, "can't sanitize binding \"%s\": %s",
+						host, strerror(-status));
+				goto error;
+			}
 		}
 	}
 	binding->host.length = strlen(binding->host.path);

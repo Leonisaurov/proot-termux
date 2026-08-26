@@ -174,3 +174,33 @@ La prueba local mediante `./bin/termux-isolated --termux-paths` confirmó:
 - `bash tests/proot/hardening/test_phase_c.sh`: **PASS=6 FAIL=0**.
 - `--no-proc-isolated` es un opt-out explícito (`mountinfo` host visible);
   `./bin/termux-isolated` sin esa opción usa la vista estricta.
+
+## Compatibilidad con runtimes Go/cgo
+
+La vista aislada de `/proc/*/maps` conserva los rangos de direcciones virtuales
+y las etiquetas de pseudo-mapeos (`[stack]`, `[heap]`, `[vdso]`, etc.) de los
+procesos pertenecientes a la instancia. Para `/proc/self/maps` se conserva el
+registro completo, incluidos los mapas equivalentes bajo
+`/proc/self/task/<tid>/maps`: Android bionic y runtimes como Go/cgo necesitan
+sus campos de formato originales para calcular los límites del stack. En mapas
+de otros tracees guest se siguen sanitizando offset, dispositivo, inode y rutas
+host; los mapas de PIDs host continúan bloqueados.
+
+La regresión `tests/termux-isolated/compat/test_termux_isolated_go_runtime.sh`
+verifica tanto rangos válidos en `/proc/self/maps` como la ejecución de `gh`
+con `--proc-isolated`.
+
+## Nesting transparente
+
+El tracer de PRoot es una implementación interna invisible para el guest. Una
+instancia anidada conserva los paths guest que recibe al inicializar bindings:
+si la canonicalización completa falla a través del `/proc` sintético del padre,
+solo se difiere la traducción después de que `fstatat()` haya confirmado que la
+ruta existe. Así se mantienen la validación normal de bindings y la traducción
+posterior del PRoot externo, sin marcadores de entorno privados.
+
+La vista de `/proc/self/fd`, `/proc/self/cwd` y `/proc/self/exe` devuelve rutas
+guest coherentes (y formas sintéticas para pipes y sockets, sin inodes host).
+`TracerPid` permanece oculto como detalle del tracer, mientras que `ptrace`,
+`wait`, `fork`, `clone` y `execve` conservan su semántica funcional para los
+procesos de la instancia; `--ptrace-isolated` solo rechaza PIDs ajenos.

@@ -27,7 +27,9 @@
 #include <fcntl.h>
 #include <talloc.h>
 #include <linux/limits.h>
+#include <limits.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <sys/socket.h>
 #include <linux/netlink.h>
 #include <stdio.h>
@@ -201,16 +203,7 @@ static bool hpc_open_proc_path(Tracee *tracee, Sysnum num, char *out,
 
 static bool hpc_is_proot_pid(pid_t pid)
 {
-    Tracees *list = get_tracees_list_head();
-    if (list == NULL)
-        return false;
-
-    Tracee *t;
-    LIST_FOREACH(t, list, link) {
-        if (t->pid == pid)
-            return true;
-    }
-    return false;
+	return tracee_is_tracked(pid);
 }
 
 /* ================================================================
@@ -219,12 +212,11 @@ static bool hpc_is_proot_pid(pid_t pid)
  * "/proc/net/tcp" reads host data unconditionally, without ever
  * listing the directory.
  *
- * KNOWN LIMITATION (pre-existing, shared with the 4-path filter):
- * these checks run on the RAW path string before proot canonicalizes
- * it, so non-canonical spellings ("/proc//net/tcp", relative lookups
- * via openat() with a dirfd on /proc, or "/proc/<pid>/../net/tcp")
- * can bypass them.  Closing that would require canonicalizing the
- * path or tracking /proc fds — out of scope here.
+ * Paths are normalized lexically before these checks, including repeated
+ * separators and dot components.  Relative paths are resolved against a
+ * tracked /proc dirfd when the syscall supplies one; unresolved relative
+ * paths are left to the normal kernel/PRoot path handling and are never
+ * classified as safe proc paths here.
  * ================================================================ */
 
 /* Extract the numeric pid from a "/proc/<pid>[/...]" path.  Returns
@@ -332,9 +324,39 @@ static bool hpc_sensitive_android_prefix(const char *path)
 #define PROC_SYNTH_NONE 0
 static int hpc_proc_synth_kind(const char *path);
 
+static bool hpc_is_task_maps_suffix(const char *path)
+{
+	const char *slash;
+	char tid[24];
+	size_t len;
+
+	if (path == NULL || strncmp(path, "task/", 5) != 0)
+		return false;
+	path += 5;
+	slash = strchr(path, '/');
+	if (slash == NULL || strcmp(slash, "/maps") != 0)
+		return false;
+	len = (size_t)(slash - path);
+	if (len == 0 || len >= sizeof(tid))
+		return false;
+	memcpy(tid, path, len);
+	tid[len] = '\0';
+	return hpc_is_numeric(tid);
+}
+
+static bool hpc_is_self_task_maps_path(const char *path)
+{
+	return path != NULL &&
+	       ((strncmp(path, "/proc/self/", 11) == 0 &&
+	         hpc_is_task_maps_suffix(path + 11)) ||
+	        (strncmp(path, "/proc/thread-self/", 18) == 0 &&
+	         hpc_is_task_maps_suffix(path + 18)));
+}
+
 static bool hpc_is_guest_proc_path(const char *path)
 {
 	const char *p;
+	const char *task;
 	if (strcmp(path, "/proc") == 0 || strcmp(path, "/proc/") == 0)
 		return true;
 	if (strncmp(path, "/proc/", 6) != 0)
@@ -344,6 +366,15 @@ static bool hpc_is_guest_proc_path(const char *path)
 		return true;
 	if (hpc_is_allowed_proc_root_name(p))
 		return true;
+	/* Thread runtimes commonly inspect /proc/self/task/<tid>/maps rather
+	 * than /proc/self/maps.  The tid is still inside the current guest
+	 * process, so allow this maps view while keeping all other task files
+	 * subject to the normal synthetic/blocking rules. */
+	if (strncmp(p, "self/task/", 10) == 0 ||
+	    strncmp(p, "thread-self/task/", 17) == 0) {
+		task = p + (p[0] == 's' ? 5 : 12);
+		return hpc_is_task_maps_suffix(task);
+	}
 	{
 		const char *slash = strchr(p, '/');
 		char pidbuf[24];
@@ -355,6 +386,7 @@ static bool hpc_is_guest_proc_path(const char *path)
 				const char *file = slash + 1;
 				return hpc_proc_synth_kind(path) != PROC_SYNTH_NONE
 					|| strcmp(file, "maps") == 0
+					|| hpc_is_task_maps_suffix(file)
 					|| strcmp(file, "fd") == 0
 					|| strcmp(file, "task") == 0;
 			}
@@ -364,6 +396,7 @@ static bool hpc_is_guest_proc_path(const char *path)
 		const char *file = strchr(p, '/') + 1;
 		return hpc_proc_synth_kind(path) != PROC_SYNTH_NONE
 			|| strcmp(file, "maps") == 0
+			|| strcmp(file, "exe") == 0
 			|| strcmp(file, "fd") == 0 || strcmp(file, "task") == 0;
 	}
 	if (hpc_is_numeric(p))
@@ -549,9 +582,16 @@ static size_t hpc_proc_synth_text(Tracee *tracee, int kind, char *out, size_t si
 			(int)tracee->pid, tracee->parent ? (int)tracee->parent->pid : 0,
 			(int)tracee->pid);
 	case PROC_SYNTH_STAT_ONE:
+		/* bionic pthread_getattr_np() reads field 28 (startstack) and
+		 * locates that address in /proc/self/maps.  The current tracee SP
+		 * is inside its real main-thread stack and is safe in its own
+		 * synthetic stat record. */
 		return (size_t)snprintf(out, size,
-			"%d (proot-guest) R %d 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-			(int)tracee->pid, tracee->parent ? (int)tracee->parent->pid : 0);
+			"%d (proot-guest) R %d "
+			"0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+			"%" PRIuPTR "\n",
+			(int)tracee->pid, tracee->parent ? (int)tracee->parent->pid : 0,
+			(uintptr_t)peek_reg(tracee, CURRENT, STACK_POINTER));
 	case PROC_SYNTH_STATM:
 		return (size_t)snprintf(out, size, "0 0 0 0 0 0 0\n");
 	case PROC_SYNTH_CMDLINE: {
@@ -816,7 +856,27 @@ static int hpc_handle_proc_readlink_enter(Tracee *tracee, Sysnum num)
 			target[sizeof(target) - 1] = '\0';
 		}
 		else if (strncmp(suffix, "/fd/", 4) == 0) {
-			strcpy(target, "/dev/null");
+			char *end;
+			long fd;
+			errno = 0;
+			fd = strtol(suffix + 4, &end, 10);
+			if (errno != 0 || end == suffix + 4 || *end != '\0' ||
+			    fd < 0 || fd > INT_MAX ||
+			    readlink_proc_pid_fd(pid, (int)fd, target) < 0) {
+				set_sysnum(tracee, PR_void);
+				poke_reg(tracee, SYSARG_RESULT, -ENOENT);
+				return 1;
+			}
+			/* Preserve the guest meaning of filesystem descriptors;
+			 * anonymous descriptors retain only their type and do not
+			 * expose a host inode number. */
+			if (target[0] == '/') {
+				(void)detranslate_path(target_tracee, target, NULL);
+			} else if (strncmp(target, "pipe:[", 6) == 0) {
+				strcpy(target, "pipe:[0]");
+			} else if (strncmp(target, "socket:[", 8) == 0) {
+				strcpy(target, "socket:[0]");
+			}
 		}
 		else {
 			set_sysnum(tracee, PR_void);
@@ -1195,6 +1255,12 @@ static int hpc_handle_getdents_exit(Tracee *tracee, Sysnum num)
 static bool hpc_maps_host_path(Tracee *tracee, const char *path, size_t len)
 {
 	(void)len;
+	/* Kernel pseudo-mappings ([stack], [heap], [vdso], [vvar], ...)
+	 * describe the current process and are not host filesystem paths.  Keep
+	 * their labels: runtimes such as Go/cgo use [stack] to locate the thread
+	 * stack in /proc/self/maps. */
+	if (path != NULL && path[0] == '[')
+		return false;
 	return hpc_sensitive_android_prefix(path) ||
 		!belongs_to_guestfs(tracee, path);
 }
@@ -1222,8 +1288,16 @@ static bool hpc_is_prooted_loader_path(const char *path)
 		strchr(base, '/') == NULL;
 }
 
-/* Remove host ASLR and filesystem metadata from one maps record while
- * preserving its field shape for procps-compatible consumers. */
+/* Remove filesystem metadata from one maps record while preserving the
+ * virtual-address range and field shape for procps/runtime consumers.
+ *
+ * The address range is process-local information and is required by runtimes
+ * such as Go/cgo to identify their own stack.  Zeroing it makes a valid maps
+ * record look like 0000000000-0000000000; Go then computes an underflowed
+ * stack bound and aborts with "bad stack bounds".  Host process maps are
+ * blocked before reaching this function, so retaining guest ranges does not
+ * expose a host process address space.
+ */
 static void hpc_sanitize_maps_metadata(char *line, size_t len)
 {
 	char *p = line;
@@ -1232,7 +1306,7 @@ static void hpc_sanitize_maps_metadata(char *line, size_t len)
 	while (p < end && field < 5) {
 		char *start = p;
 		while (p < end && *p != ' ') p++;
-		if (field == 0 || field == 2 || field == 3 || field == 4) {
+		if (field == 2 || field == 3 || field == 4) {
 			for (char *q = start; q < p; q++)
 				if ((*q >= '0' && *q <= '9') ||
 				    (*q >= 'a' && *q <= 'f') ||
@@ -1257,6 +1331,8 @@ static int hpc_handle_maps_read_exit(Tracee *tracee)
 {
     int fd = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
     char proc_path[PATH_MAX];
+    char self_maps_path[PATH_MAX];
+    bool self_maps;
     int status;
 
     /* E7: lazy detection — if maps_fd not yet registered, check if
@@ -1265,6 +1341,14 @@ static int hpc_handle_maps_read_exit(Tracee *tracee)
     if (status < 0 || strstr(proc_path, "/maps") == NULL)
         return 0;
     tracee->maps_fd = fd;
+    snprintf(self_maps_path, sizeof(self_maps_path), "/proc/%d/maps",
+             (int)tracee->pid);
+    self_maps = strcmp(proc_path, "/proc/self/maps") == 0 ||
+                strcmp(proc_path, self_maps_path) == 0 ||
+                (strncmp(proc_path, self_maps_path,
+                         strlen(self_maps_path) - strlen("maps")) == 0 &&
+                 strstr(proc_path, "/task/") != NULL &&
+                 strstr(proc_path, "/maps") != NULL);
 
     {
         word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
@@ -1340,7 +1424,13 @@ static int hpc_handle_maps_read_exit(Tracee *tracee)
             }
 
             if (keep) {
-			hpc_sanitize_maps_metadata(p, line_len);
+			/* Keep the current process's maps byte-compatible with the
+			 * kernel.  Android bionic's pthread_getattr_np() parses the
+			 * complete record while Go/cgo discovers its stack.  The own
+			 * address space is not a host-process leak; host PID maps are
+			 * blocked before reaching this path. */
+			if (!self_maps)
+				hpc_sanitize_maps_metadata(p, line_len);
                 size_t copy_len = line_len + (nl != NULL ? 1 : 0);
 
                 /* Android kernels right-align the pathname column: the
@@ -1563,10 +1653,23 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
              * the buffer read cross an unmapped page.  The defensive
              * terminator stays: read_string only NUL-terminates when
              * it finds the NUL within max_size. */
-	    if (path_addr != 0 && hpc_open_proc_path(tracee, num,
+		    if (path_addr != 0 && hpc_open_proc_path(tracee, num,
 								 path, sizeof(path))
 			    && (strcmp(path, "/proc") == 0
 				|| strncmp(path, "/proc/", 6) == 0)) {
+			/* PRoot translates /proc/self to the host tracee PID before
+			 * the kernel opens the path.  A self/task path can therefore
+			 * combine the current tracee PID with a guest-visible TID that
+			 * does not exist in the host task directory.  Resolve it to the
+			 * current process's maps, preserving Linux self semantics for
+			 * Go/cgo and other thread runtimes. */
+			if (hpc_is_self_task_maps_path(path)) {
+				const char self_maps[] = "/proc/self/maps";
+				write_data(tracee, path_addr, self_maps,
+					   sizeof(self_maps));
+				strcpy(path, self_maps);
+			}
+
                 /* Some Android procfs global files are not readable by an
                  * unprivileged tracee even though meminfo is.  Open the
                  * readable file and replace its contents at read exit;
