@@ -5,7 +5,7 @@ Las pruebas están separadas por la capa que ejercitan:
 | Área | Directorio | Qué valida |
 |---|---|---|
 | PRoot | [`proot/`](proot/) | syscalls, aislamiento, red y hardening |
-| `termux-isolated` | [`termux-isolated/`](termux-isolated/) | cwd, shell, storage, PTY y políticas |
+| `termux-isolated` | [`termux-isolated/`](termux-isolated/) | cwd, shell, storage, PTY, proc y políticas |
 | control-api | [`control-api/`](control-api/) | protocolo PRCT, launcher y harness |
 | harness | [`harness/`](harness/) | integración PTY/PRCT y `proot-exec` |
 | rootfs | [`rootfs/`](rootfs/) | wrappers y fixtures Alpine |

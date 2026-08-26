@@ -35,12 +35,18 @@ done
 check_exposed() {
 	local mode=$1
 	shift
-	"$TERMUX_ISOLATED" "$@" -- sh -c '
-set -eu
-for path in "$HOME/storage" /storage/emulated/0 /sdcard; do
-    test -r "$path"
-done
-'
+	if [[ ! -d "$PREFIX/../home/storage" && ! -d /storage/emulated/0 ]]; then
+		echo "SKIP: internal storage is unavailable on this device ($mode)"
+		return 0
+	fi
+	local guest_check=''
+	if [[ -d "$PREFIX/../home/storage" ]]; then
+		guest_check+='test -r "$HOME/storage"; '
+	fi
+	if [[ -d /storage/emulated/0 ]]; then
+		guest_check+='test -r /storage/emulated/0; test -r /sdcard; '
+	fi
+	"$TERMUX_ISOLATED" "$@" -- sh -c "set -eu; $guest_check"
 	echo "PASS: --with-storage exposes internal storage ($mode)"
 }
 

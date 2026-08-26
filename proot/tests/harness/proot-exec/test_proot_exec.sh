@@ -29,6 +29,7 @@ grep -F -- '--proxy proot-exec-test' <<< "$printed" >/dev/null
 grep -F -- '/proot-exec-test-tmp:ro' <<< "$printed" >/dev/null
 grep -F -- 'PROOT_EXEC_TEST=configured' <<< "$printed" >/dev/null
 grep -F -- 'PROOT_EXEC_CONFIG_OK' <<< "$printed" >/dev/null
+grep -F -- 'environment_removed: LD_PRELOAD LD_LIBRARY_PATH' <<< "$printed" >/dev/null
 echo "PASS: --print exposes generated argv"
 
 output=$("$PROOT_EXEC" --config "$CONFIG" -- \
@@ -36,9 +37,34 @@ output=$("$PROOT_EXEC" --config "$CONFIG" -- \
 test "$output" = PROOT_EXEC_OVERRIDE_OK
 echo "PASS: command override after --"
 
+python3 - "$ROOT/scripts/tools/proot_exec.py" "$CONFIG" <<'PY'
+import importlib.util
+import os
+import sys
+
+module_path, config_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("proot_exec_under_test", module_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+os.environ["LD_PRELOAD"] = "proot-exec-sentinel"
+os.environ["LD_LIBRARY_PATH"] = "proot-exec-sentinel"
+env = module.ExecConfig.from_file(config_path).environment_for_exec()
+assert "LD_PRELOAD" not in env, env
+assert "LD_LIBRARY_PATH" not in env, env
+PY
+echo "PASS: host preload variables are removed before PRoot"
+
 default_output=$(CDPATH= cd -- "$DEFAULT_DIR" && "$PROOT_EXEC")
 test "$default_output" = PROOT_EXEC_DEFAULT_OK
 echo "PASS: proot-exec.conf is the default without --config"
+
+main_config="$ROOT/../proot-exec.conf"
+main_output=$("$PROOT_EXEC" --config "$main_config" -- \
+    "$PREFIX/bin/sh" -c 'printf PROOT_EXEC_MAIN_PROFILE_OK')
+test "$main_output" = PROOT_EXEC_MAIN_PROFILE_OK
+echo "PASS: repository Codex-compatible profile executes"
 
 alias_output=$("$PROOT_EXEC" --config "$SCRIPT_DIR/../fixtures/proot-exec-command-alias.conf")
 test "$alias_output" = PROOT_EXEC_CMD_OK
@@ -86,4 +112,4 @@ finally:
 print("PASS: control_fd is inherited and PRoot HELLO reaches its peer")
 PY
 
-echo "=== SUMMARY: proot-exec PASS=7 FAIL=0 ==="
+echo "=== SUMMARY: proot-exec PASS=9 FAIL=0 ==="

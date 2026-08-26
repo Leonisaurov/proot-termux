@@ -422,6 +422,8 @@ typedef struct tracee {
 
 /* D5: hash table update when tracee PID changes */
 extern void tracee_hash_update(Tracee *tracee, pid_t old_pid);
+/* D5: side-effect-free O(1) PID membership query */
+extern bool tracee_is_tracked(pid_t pid);
 
 #define HOST_ROOTFS "/host-rootfs"
 

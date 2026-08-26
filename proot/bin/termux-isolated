@@ -253,18 +253,26 @@ else
     STORAGE_HOME_GUEST="/home/storage"
 fi
 
+storage_binds=""
+add_storage_bind() {
+    local host=$1 guest=$2 mode=${3:-}
+    if [ -e "$host" ]; then
+        storage_binds="$storage_binds --bind=$host:$guest${mode:+:$mode}"
+    elif [ "$WITH_STORAGE" = "1" ]; then
+        echo "warning: storage path unavailable, bind skipped: $host" >&2
+    fi
+}
+
 if [ "$WITH_STORAGE" = "1" ]; then
-    storage_binds="\
-  --bind=$STORAGE_HOME_HOST:$STORAGE_HOME_GUEST \
-  --bind=/storage/emulated/0:/storage/emulated/0 \
-  --bind=/storage/self/primary:/storage/self/primary \
-  --bind=/storage/emulated/0:/sdcard"
+    add_storage_bind "$STORAGE_HOME_HOST" "$STORAGE_HOME_GUEST"
+    add_storage_bind /storage/emulated/0 /storage/emulated/0
+    add_storage_bind /storage/self/primary /storage/self/primary
+    add_storage_bind /storage/emulated/0 /sdcard
 else
-    storage_binds="\
-  --bind=$STORAGE_HOME_HOST:$STORAGE_HOME_GUEST:mask \
-  --bind=/storage/emulated/0:/storage/emulated/0:mask \
-  --bind=/storage/self/primary:/storage/self/primary:mask \
-  --bind=/storage/emulated/0:/sdcard:mask"
+    add_storage_bind "$STORAGE_HOME_HOST" "$STORAGE_HOME_GUEST" mask
+    add_storage_bind /storage/emulated/0 /storage/emulated/0 mask
+    add_storage_bind /storage/self/primary /storage/self/primary mask
+    add_storage_bind /storage/emulated/0 /sdcard mask
 fi
 
 # Modo estricto (--rw-dir): traduce el path del dir RW a su par host/guest.

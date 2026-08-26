@@ -28,6 +28,10 @@ class ConfigError(ValueError):
 
 _VAR = re.compile(r"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))")
 _MODES = {"ro", "rw", "wo", "mask"}
+# termux-exec's preload belongs to the host shell namespace.  It must not leak
+# into the PRoot guest, where its path translation can target files that do not
+# exist in the configured guest view.
+_PROOT_UNSET_ENV = ("LD_PRELOAD", "LD_LIBRARY_PATH")
 
 
 def _string(value: Any, name: str) -> str:
@@ -237,6 +241,8 @@ class ExecConfig:
     def environment_for_exec(self) -> dict[str, str]:
         env = dict(os.environ) if self.inherit_environment else {}
         env.update(self.environment)
+        for name in _PROOT_UNSET_ENV:
+            env.pop(name, None)
         return env
 
     def validate_runtime(self) -> None:
@@ -275,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             print("argv:", shlex.join(args))
             print("launcher_cwd:", config.launcher_cwd or os.getcwd())
             print("inherit_environment:", config.inherit_environment)
+            print("environment_removed:", " ".join(_PROOT_UNSET_ENV))
             print("environment_overrides:", shlex.join(
                 f"{k}={v}" for k, v in sorted(config.environment.items())))
         if ns.dry_run:

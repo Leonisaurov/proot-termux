@@ -44,6 +44,14 @@ const char *get_temp_directory()
 
 	tmp = realpath(temp_directory, NULL);
 	if (tmp == NULL) {
+		/* A parent PRoot may make realpath(3) fail while the
+		 * directory itself remains visible and usable in the guest.
+		 * Keep the configured spelling only after checking it is a
+		 * directory; this mirrors binding startup and avoids turning
+		 * a valid nested temp root into a noisy warning. */
+		struct stat st;
+		if (stat(temp_directory, &st) == 0 && S_ISDIR(st.st_mode))
+			return temp_directory;
 		note(NULL, WARNING, SYSTEM,
 			"can't canonicalize %s", temp_directory);
 		return temp_directory;

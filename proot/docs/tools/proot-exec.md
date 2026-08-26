@@ -19,6 +19,11 @@ La opción `--` permite reemplazar `proot.command` para una ejecución puntual.
 `--dry-run` además
 valida el rootfs, `launcher_cwd` y el `control_fd`, pero no ejecuta PRoot.
 
+Antes de ejecutar PRoot, `proot-exec` elimina siempre `LD_PRELOAD` y
+`LD_LIBRARY_PATH` del entorno heredado. Esto evita que `termux-exec` aplique su
+traducción del shell host dentro de la vista guest. `--print` declara esta
+limpieza mediante `environment_removed`.
+
 ## Formato
 
 El archivo usa TOML y contiene una tabla `[proot]`, una tabla `[env]` y cero o
@@ -36,7 +41,7 @@ control_fd = 3
 inherit_environment = true
 launcher_cwd = "${PWD}"
 flags = ["--kill-on-exit", "--proc-isolated"]
-extra_args = ["--change-id", "0:0"]
+extra_args = ["--change-id=0:0"]
 command = ["/bin/sh", "-i"]
 
 [[binds]]
