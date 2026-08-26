@@ -2,7 +2,7 @@
 
 [![GitHub repo size](https://img.shields.io/github/repo-size/Leonisaurov/proot-termux)](https://github.com/Leonisaurov/proot-termux)
 [![Build proot](https://github.com/Leonisaurov/proot-termux/actions/workflows/build-proot.yml/badge.svg)](https://github.com/Leonisaurov/proot-termux/actions/workflows/build-proot.yml)
-[![proot-latest](https://img.shields.io/github/v/release/Leonisaurov/proot-termux?include_prereleases&label=proot-latest)](https://github.com/Leonisaurov/proot-termux/releases/tag/proot-latest)
+[![latest proot release](https://img.shields.io/github/v/release/Leonisaurov/proot-termux?label=latest%20proot)](https://github.com/Leonisaurov/proot-termux/releases/latest)
 
 **proot-termux** is a minimal fork of [termux-packages](https://github.com/termux/termux-packages) that cross-compiles [proot](https://proot-me.github.io/) for Android **aarch64** using the Android NDK r29 via Docker. All other packages and build infrastructure have been stripped away — only proot remains.
 
@@ -179,7 +179,7 @@ The active GitHub Actions workflow automates the package build and release proce
 | **Runner** | `ubuntu-26.04` with 16 GB zram |
 | **Cache** | `~/.termux-build` is cached with key based on `build.sh` hashes |
 | **Build** | `./ci/termux/scripts/run-docker.sh ./ci/termux/build-package.sh -I -a aarch64 --format pacman proot` |
-| **Release** | Creates/updates a `proot-latest` GitHub Release with the `.pkg.tar.xz` artifact |
+| **Release** | Creates/updates an immutable `proot-<version>-<revision>` release and marks it latest |
 | **Artifact** | Also uploaded as a workflow artifact (`proot-aarch64-<sha>`) |
 
 **First run**: ~5 min (seeds the cache).  

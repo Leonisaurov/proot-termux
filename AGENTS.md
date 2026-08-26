@@ -83,7 +83,7 @@ intencionales; sin esa opción, un rootfs debe mostrar sus rutas guest (`/usr`,
 | `build-proot.yml` | ✅ ACTIVO | Push a `ci/termux/packages/proot/**` o `proot-source/**` + `workflow_dispatch` |
 | `docker_image.yml` | ⛔ DESHABILITADO (`if: false` en el job) | — |
 
-`build-proot.yml` steps: clone → zram → restore cache → prepare → build → collect → release → save cache → artifact. Caché: `~/.termux-build` montada en Docker vía `TERMUX_DOCKER_RUN_EXTRA_ARGS` (cache key: hash de build.sh de proot/libtalloc/libandroid-shmem). Primera corrida ~5 min (seeds cache), subsecuentes ~20-30s. Download de release previa: `gh release download proot-latest -R Leonisaurov/proot-termux -p "*.pkg.tar.xz"`.
+`build-proot.yml` steps: clone → zram → restore cache → prepare → build → collect → artifact → versioned release. Caché: `~/.termux-build` montada en Docker vía `TERMUX_DOCKER_RUN_EXTRA_ARGS` (cache key: hash de build.sh de proot/libtalloc/libandroid-shmem). Primera corrida ~5 min (seeds cache), subsecuentes ~20-30s. Los releases usan el formato `proot-<version>-<revision>`.
 
 ### Monitoreo CI (gita)
 
