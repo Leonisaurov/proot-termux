@@ -8,6 +8,7 @@ on:
       - 'ci/termux/packages/libtalloc/**'
       - 'ci/termux/packages/libandroid-shmem/**'
       - 'ci/termux/scripts/linux-kernel-signing-keys.gpg'
+      - 'ci/termux/scripts/profile-restricted.apparmor'
       - 'proot-source/**'
       - '.github/actions/zram/action.yml'
   workflow_dispatch:
