@@ -108,7 +108,10 @@ Action readlink_proc(const Tracee *tracee, char result[PATH_MAX],
 	comparison = compare_paths(proc_path, base);
 	switch (comparison) {
 	case PATHS_ARE_EQUAL:
-		known_tracee = get_tracee(tracee, pid, false);
+		/* This path reader only consumes immutable tracee metadata.  Do not
+		 * reset its temporary talloc context: procfs links are resolved on
+		 * many hot syscall paths, especially with nested PRoot. */
+		known_tracee = tracee_lookup_readonly(pid);
 		if (known_tracee == NULL)
 			return DEFAULT;
 
