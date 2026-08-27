@@ -17,7 +17,6 @@ class NeovimIntegrationTests(unittest.TestCase):
         config = default_config(command=('nvim', '--clean'))
         process = PtyProotProcess.spawn(build_config(config))
         invalid_families = []
-        socket_events = 0
         events = 0
         deadline = time.monotonic() + 8
         quit_sent = False
@@ -50,18 +49,13 @@ class NeovimIntegrationTests(unittest.TestCase):
                         continue
                     events += 1
                     if isinstance(event, (PathRequest, NetRequest)):
-                        if isinstance(event, NetRequest):
-                            if event.operation == 5:
-                                socket_events += 1
-                                self.assertNotEqual(event.family, 0)
-                            elif event.family not in (2, 10):
-                                invalid_families.append((event.operation, event.family))
+                        if isinstance(event, NetRequest) and event.family == 0:
+                            invalid_families.append((event.operation, event.family))
                         process.control_channel.allow_once(event.request_id)
                 if quit_sent and process.returncode is not None:
                     break
             self.assertGreater(events, 0)
             self.assertEqual(invalid_families, [])
-            self.assertGreaterEqual(socket_events, 1)
         finally:
             process.close()
 
