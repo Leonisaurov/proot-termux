@@ -101,21 +101,36 @@ static bool hpc_is_numeric(const char *name)
 static bool hpc_normalize_path(const char *path, char *out, size_t size)
 {
 	char work[PATH_MAX];
-	const char *p;
-	char *q = out;
+	const char *p, *start;
+	char *q;
 	char *end = out + size;
-	char *components[PATH_MAX / 2];
-	size_t component_lengths[PATH_MAX / 2];
-	int n = 0;
+	bool needs_normalization = false;
 
 	if (path == NULL || out == NULL || size < 2 || path[0] != '/')
 		return false;
-	if (strlen(path) >= sizeof(work))
+	if (strnlen(path, sizeof(work)) >= sizeof(work))
 		return false;
+	/* Most proc paths are already canonical.  Keep this common case to a
+	 * single bounded copy and avoid the component bookkeeping below. */
+	for (p = path; *p != '\0'; p++) {
+		if (*p == '.')
+			needs_normalization = true;
+		if (*p == '/' && p[1] == '/')
+			needs_normalization = true;
+	}
+	if (!needs_normalization) {
+		if (strlen(path) >= size)
+			return false;
+		memcpy(out, path, (size_t)(p - path) + 1);
+		return true;
+	}
 	strcpy(work, path);
 	p = work;
+	q = out;
+	if (q + 1 >= end)
+		return false;
+	*q++ = '/';
 	while (*p != '\0') {
-		const char *start;
 		size_t len;
 		while (*p == '/') p++;
 		if (*p == '\0') break;
@@ -125,25 +140,18 @@ static bool hpc_normalize_path(const char *path, char *out, size_t size)
 		if (len == 1 && start[0] == '.')
 			continue;
 		if (len == 2 && start[0] == '.' && start[1] == '.') {
-			if (n > 0) n--;
+			if (q > out + 1) {
+				q--;
+				while (q > out + 1 && q[-1] != '/')
+					q--;
+			}
 			continue;
 		}
-		if (n >= (int)(sizeof(components) / sizeof(components[0])))
-			return false;
 		if (q + len + 1 >= end)
 			return false;
-		components[n] = (char *)start;
-		component_lengths[n] = len;
-		n++;
-	}
-	q = out;
-	if (q + 1 >= end) return false;
-	*q++ = '/';
-	for (int i = 0; i < n; i++) {
-		size_t len = component_lengths[i];
-		if (i != 0) *q++ = '/';
-		if (q + len >= end) return false;
-		memcpy(q, components[i], len);
+		if (q > out + 1 && q[-1] != '/')
+			*q++ = '/';
+		memcpy(q, start, len);
 		q += len;
 	}
 	*q = '\0';
@@ -823,6 +831,9 @@ static int hpc_handle_proc_readlink_enter(Tracee *tracee, Sysnum num)
 		snprintf(target, sizeof(target), "%d", (int)tracee->pid);
 	}
 	else if (hpc_proc_path_pid(path, &pid)) {
+		/* The path detranslation below may use the target tracee's
+		 * temporary context, so retain get_tracee()'s context lifecycle
+		 * here. */
 		target_tracee = get_tracee(tracee, pid, false);
 		if (target_tracee == NULL) {
 			set_sysnum(tracee, PR_void);
