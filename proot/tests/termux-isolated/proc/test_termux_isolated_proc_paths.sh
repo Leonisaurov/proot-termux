@@ -51,7 +51,7 @@ if "$ISOLATED" --termux-paths --proc-isolated -- sh -c \
 fi
 
 self_exe=$("$ISOLATED" --termux-paths --proc-isolated -- sh -c \
-    'readlink /proc/self/exe')
+    'readlink /proc/self/exe; true')
 case "$self_exe" in
     /*) ;;
     *) echo "FAIL: self/exe is not a guest absolute path" >&2; exit 1 ;;
