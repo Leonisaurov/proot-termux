@@ -1,7 +1,7 @@
 # Progreso de la auditoría y puesta a punto
 
 Fecha de corte: 2026-09-06  
-Estado: implementación y validación local completadas; cambios aún sin commit/push.
+Estado: implementación, validación local, commit, publicación y CI completados.
 
 ## Objetivo
 
@@ -109,12 +109,13 @@ Se adoptó el criterio de permitir cambios incompatibles cuando estén justifica
 - Build final: `./proot/scripts/build-native.sh -i -j 2` completó instalación y paquete aarch64. Se verificó `xz -t`, `.PKGINFO` y SHA-256 (`e8706800f29389ed463c0f97d12c3b17e10d57413580dae7966dac476df1d2fe`).
 - `bash -n`, `git diff --check` y `actionlint` (ignorando únicamente el catálogo local obsoleto para `ubuntu-26.04`) pasan.
 
-## Pendiente de entrega
+## Entrega completada
 
-1. Revisar el diff completo una última vez para separar cambios intencionales de artefactos generados. El directorio `proot/artifacts/audit/` está ignorado; `proot/tests/reports/` conserva reportes revisables.
-2. Mantener la decisión del usuario de conservar eliminado `proot-exec.conf`; los tests usan el perfil versionado `proot/tests/harness/fixtures/proot-exec-isolated.conf`.
-3. Ejecutar la secuencia de entrega obligatoria: `git add -A`, commit convencional, `git push origin master` y `gita notify build-proot.yml`.
-4. Como trabajo posterior opcional: sanitizadores, fuzzing prolongado y reproducción con el binario real de Proton Drive/Hermes.
+1. El diff final se revisó y los artefactos locales de auditoría permanecen ignorados; los reportes de tests versionados son intencionales.
+2. Se conserva eliminado `proot-exec.conf`; los tests usan el perfil versionado `proot/tests/harness/fixtures/proot-exec-isolated.conf`.
+3. Commit publicado: `74bcb1309f` (`enhance(proot): harden protocols cleanup and validation`).
+4. CI completado: `build-proot.yml` PASS; paquete `proot-5.1.107.89-93-aarch64.pkg.tar.xz` verificado, checksum validado y release publicado.
+5. Como trabajo posterior opcional: sanitizadores, fuzzing prolongado y reproducción con el binario real de Proton Drive/Hermes.
 
 ## Riesgos y limitaciones conocidos
 
@@ -125,8 +126,8 @@ Se adoptó el criterio de permitir cambios incompatibles cuando estén justifica
 - Las cifras de rendimiento son específicas del dispositivo y deben repetirse tras la última build.
 - No se han ejecutado sanitizadores ni fuzzing prolongado; quedan como mejora posterior a la estabilización funcional.
 - La corrección de `/proc/self/stat` quedó cubierta por el contrato de procfs y las regresiones shell; no se afirma compatibilidad específica con Proton Drive sin su binario real.
-- No se ha hecho commit ni push. La revisión 93 está preparada para la entrega.
+- El workflow CI mostró únicamente advertencias de deprecación de Node 20 en acciones upstream; no afectan al build ni al release.
 
 ## Criterio de finalización
 
-La implementación local está terminada: las suites, el binario final y el paquete son verificables y no quedan fallos conocidos en el alcance auditado. La entrega administrativa queda completada al crear el commit, publicarlo y confirmar el workflow CI.
+La auditoría y la entrega están terminadas: las suites, el binario final, el paquete, el commit, el push y el workflow CI son verificables. No quedan fallos conocidos dentro del alcance auditado.
