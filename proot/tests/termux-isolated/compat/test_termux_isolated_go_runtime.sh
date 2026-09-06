@@ -12,7 +12,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 ISOLATED="$ROOT/bin/termux-isolated"
 PROOT_EXEC="$ROOT/bin/proot-exec"
-CONFIG="$ROOT/../proot-exec.conf"
+CONFIG="$ROOT/tests/harness/fixtures/proot-exec-isolated.conf"
 
 if [ ! -x "$ISOLATED" ]; then
     echo "SKIP: termux-isolated not found at $ISOLATED"

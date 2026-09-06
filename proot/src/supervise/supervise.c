@@ -102,6 +102,49 @@ static ssize_t read_full(int fd, void *buffer, size_t size)
 	return (ssize_t)done;
 }
 
+static int64_t supervise_now_ms(void)
+{
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+		return -1;
+	return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* Bound the entire initial request, including ancillary FDs. Do not apply
+ * this deadline to the client's wait for its guest command to finish. */
+static int wait_client_input(int fd, int64_t deadline)
+{
+	for (;;) {
+		int64_t now = supervise_now_ms();
+		struct pollfd pfd = { .fd = fd, .events = POLLIN };
+		int ready;
+		if (now < 0 || now >= deadline)
+			return -1;
+		ready = poll(&pfd, 1, (int)(deadline - now));
+		if (ready < 0 && errno == EINTR)
+			continue;
+		return ready > 0 && (pfd.revents & POLLIN) ? 0 : -1;
+	}
+}
+
+static ssize_t read_client_request(int fd, void *buffer, size_t size,
+				   int64_t deadline)
+{
+	size_t done = 0;
+	while (done < size) {
+		ssize_t n;
+		if (wait_client_input(fd, deadline) < 0)
+			return -1;
+		n = recv(fd, (char *)buffer + done, size - done, MSG_DONTWAIT);
+		if (n < 0 && (errno == EINTR || errno == EAGAIN))
+			continue;
+		if (n <= 0)
+			return -1;
+		done += (size_t)n;
+	}
+	return (ssize_t)done;
+}
+
 static ssize_t write_full(int fd, const void *buffer, size_t size)
 {
 	size_t done = 0;
@@ -324,6 +367,7 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	int client_fd;
 	ExecRequest req;
 	pid_t pid;
+	int64_t deadline;
 	/* B1: plain accept() without SOCK_CLOEXEC leaks the control-socket
 	 * fd into every --exec guest: the forked child (line ~378) never
 	 * closes it and it survives execvp, so if the supervisor dies the
@@ -336,31 +380,30 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	client_fd = accept4(ctl_fd, NULL, NULL, SOCK_CLOEXEC);
 	if (client_fd < 0 && errno == ENOSYS) {
 		client_fd = accept(ctl_fd, NULL, NULL);
-		if (client_fd >= 0)
-			(void) fcntl(client_fd, F_SETFD, FD_CLOEXEC);
+		if (client_fd >= 0 && fcntl(client_fd, F_SETFD, FD_CLOEXEC) < 0) {
+			close(client_fd);
+			return;
+		}
 	}
 	if (client_fd < 0)
 		return;
 
-	/* C6: SO_PEERCRED authentication — verify the connecting process
-	 * is a tracee (same uid as the supervisor), not a random host
-	 * process that found the abstract socket name.  Without this,
-	 * any process on the host could connect and inject commands. */
+	deadline = supervise_now_ms();
+	if (deadline < 0) {
+		close(client_fd);
+		return;
+	}
+	deadline += 1000;
+	/* Same-UID clients are permitted, including external --exec callers.
+	 * This authenticates the UID, not membership of the tracee set. */
 	{
 		struct ucred cred;
 		socklen_t cred_len = sizeof(cred);
-		if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) == 0) {
-			uid_t my_uid = getuid();
-			if (cred.uid != my_uid) {
-				VERBOSE(NULL, 2, "supervise: rejected --exec from uid %d (expected %d)",
-					(int)cred.uid, (int)my_uid);
-				close(client_fd);
-				return;
-			}
+		if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) < 0 ||
+		    cred_len != sizeof(cred) || cred.uid != getuid()) {
+			close(client_fd);
+			return;
 		}
-		/* If getsockopt fails (shouldn't on Linux), allow the connection
-		 * for backward compatibility — the SCM_RIGHTS fds will still be
-		 * validated. */
 	}
 
 	/* Receive stdin/stdout/stderr from client via SCM_RIGHTS */
@@ -368,19 +411,29 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 	{
 		struct msghdr msg;
 		struct iovec iov;
-		char cmsgbuf[CMSG_SPACE(EXEC_FD_MAX * sizeof(int))];
+		union {
+			struct cmsghdr align;
+			char bytes[CMSG_SPACE(EXEC_FD_MAX * sizeof(int))];
+		} cmsgbuf;
 		char dummy;
 		ssize_t ret;
+		int received = 0;
 
 		memset(&msg, 0, sizeof(msg));
 		iov.iov_base = &dummy;
 		iov.iov_len  = 1;
 		msg.msg_iov        = &iov;
 		msg.msg_iovlen     = 1;
-		msg.msg_control    = cmsgbuf;
+		msg.msg_control    = cmsgbuf.bytes;
 		msg.msg_controllen = sizeof(cmsgbuf);
 
-		ret = recvmsg(client_fd, &msg, 0);
+		do {
+			if (wait_client_input(client_fd, deadline) < 0) {
+				close(client_fd);
+				return;
+			}
+			ret = recvmsg(client_fd, &msg, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
+		} while (ret < 0 && (errno == EINTR || errno == EAGAIN));
 		if (ret >= 0) {
 			struct cmsghdr *cmsg;
 			for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
@@ -388,17 +441,29 @@ void supervise_accept_client(int ctl_fd, Tracee *root_tracee)
 				if (cmsg->cmsg_level == SOL_SOCKET
 				    && cmsg->cmsg_type == SCM_RIGHTS) {
 					int count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-					if (count > EXEC_FD_MAX) count = EXEC_FD_MAX;
-					memcpy(client_fds, CMSG_DATA(cmsg), count * sizeof(int));
-					break;
+					for (int i = 0; i < count; i++) {
+						int passed_fd;
+						memcpy(&passed_fd, (char *)CMSG_DATA(cmsg) + i * sizeof(int), sizeof(int));
+						if (received < EXEC_FD_MAX)
+							client_fds[received] = passed_fd;
+						else
+							close(passed_fd);
+						received++;
+					}
 				}
 			}
+		}
+		if (ret != 1 || (msg.msg_flags & MSG_CTRUNC) || received != EXEC_FD_MAX) {
+			close_client_fds(client_fds);
+			close(client_fd);
+			return;
 		}
 	}
 
 	/* Read the exec request (now proceed normally) */
-	ssize_t n = read_full(client_fd, &req, sizeof(req));
-	if (n != sizeof(req) || req.argc < 1 || req.argc > 255) {
+	ssize_t n = read_client_request(client_fd, &req, sizeof(req), deadline);
+	if (n != sizeof(req) || req.argc < 1 || req.argc > 255 ||
+	    memchr(req.cwd, '\0', sizeof(req.cwd)) == NULL) {
 		close_client_fds(client_fds);
 		close(client_fd);
 		return;

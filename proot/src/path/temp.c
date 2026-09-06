@@ -2,6 +2,7 @@
 #include <sys/stat.h>   /* stat(2), chmod(2), */
 #include <unistd.h>     /* stat(2), rmdir(2), unlink(2), readlink(2), */
 #include <errno.h>      /* errno(2), */
+#include <fcntl.h>
 #include <dirent.h>     /* readdir(3), opendir(3), */
 #include <string.h>     /* strcmp(3), */
 #include <stdlib.h>     /* free(3), getenv(3), */
@@ -66,192 +67,93 @@ const char *get_temp_directory()
 	return temp_directory;
 }
 
-/**
- * Remove recursively the content of the current working directory.
- * This latter has to lie in temp_directory (ie. "/tmp" on most
- * systems).  This function returns -1 if a fatal error occured
- * (ie. the recursion must be stopped), the number of non-fatal errors
- * otherwise.
- *
- * WARNING: this function changes the current working directory for
- * the calling process.
- */
-static int clean_temp_cwd()
+/* Remove entries relative to pinned directory descriptors. Never follow a
+ * replaced symlink or change the process cwd during a talloc destructor. */
+static int clean_temp_fd(int parent_fd)
 {
-	const char *temp_directory = get_temp_directory();
-	const size_t length_temp_directory = strlen(temp_directory);
-	char *prefix = NULL;
-	int nb_errors = 0;
-	DIR *dir = NULL;
-	int status;
-
-	prefix = talloc_size(NULL, length_temp_directory + 1);
-	if (prefix == NULL) {
-		note(NULL, WARNING, INTERNAL, "can't allocate memory");
-		nb_errors++;
-		goto end;
-	}
-
-	/* Sanity check: ensure the current directory lies in
-	 * "/tmp".  */
-	status = readlink("/proc/self/cwd", prefix, length_temp_directory);
-	if (status < 0) {
-		note(NULL, WARNING, SYSTEM, "can't readlink '/proc/self/cwd'");
-		nb_errors++;
-		goto end;
-	}
-	prefix[status] = '\0';
-
-	if (strncmp(prefix, temp_directory, length_temp_directory) != 0) {
-		note(NULL, ERROR, INTERNAL,
-			"trying to remove a directory outside of '%s', "
-			"please report this error.", temp_directory);
-		nb_errors++;
-		goto end;
-	}
-
-	dir = opendir(".");
-	if (dir == NULL) {
-		note(NULL, WARNING, SYSTEM, "can't open '.'");
-		nb_errors++;
-		goto end;
-	}
-
-	while (1) {
-		struct dirent *entry;
-
-		errno = 0;
-		entry = readdir(dir);
-		if (entry == NULL)
-			break;
-
-		if (   strcmp(entry->d_name, ".")  == 0
-		    || strcmp(entry->d_name, "..") == 0)
-			continue;
-
-		/* Skip chmod on symlinks: chmod follows them and would
-		 * report spurious errors when the target no longer
-		 * exists (common with the /dev/{stdin,fd,...} symlinks
-		 * bubblewrap leaves behind in emulated tmpfs dirs).
-		 * We only need to unlink the symlink itself.  */
-		if (entry->d_type != DT_LNK) {
-			status = chmod(entry->d_name, 0700);
-			if (status < 0) {
-				note(NULL, WARNING, SYSTEM, "cant chmod '%s'", entry->d_name);
-				nb_errors++;
-				continue;
-			}
-		}
-
-		if (entry->d_type == DT_DIR) {
-			status = chdir(entry->d_name);
-			if (status < 0) {
-				note(NULL, WARNING, SYSTEM, "can't chdir '%s'", entry->d_name);
-				nb_errors++;
-				continue;
-			}
-
-			/* Recurse.  */
-			status = clean_temp_cwd();
-			if (status < 0) {
-				nb_errors = -1;
-				goto end;
-			}
-			nb_errors += status;
-
-			status = chdir("..");
-			if (status < 0) {
-				note(NULL, ERROR, SYSTEM, "can't chdir to '..'");
-				nb_errors = -1;
-				goto end;
-			}
-
-			status = rmdir(entry->d_name);
-		}
-		else {
-			status = unlink(entry->d_name);
-		}
-		if (status < 0) {
-			note(NULL, WARNING, SYSTEM, "can't remove '%s'", entry->d_name);
-			nb_errors++;
-			continue;
-		}
-	}
-	if (errno != 0) {
-		note(NULL, WARNING, SYSTEM, "can't readdir '.'");
-		nb_errors++;
-	}
-
-end:
-	TALLOC_FREE(prefix);
-
-	if (dir != NULL)
-		(void) closedir(dir);
-
-	return nb_errors;
+    int scan_fd = openat(parent_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    DIR *dir;
+    int errors = 0;
+    if (scan_fd < 0)
+        return -1;
+    dir = fdopendir(scan_fd);
+    if (dir == NULL) {
+        close(scan_fd);
+        return -1;
+    }
+    for (;;) {
+        struct dirent *entry;
+        int child_fd;
+        errno = 0;
+        entry = readdir(dir);
+        if (entry == NULL) {
+            if (errno != 0)
+                errors++;
+            break;
+        }
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        child_fd = openat(parent_fd, entry->d_name,
+                          O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (child_fd >= 0) {
+            /* O_PATH permits opening mode-000 directories. chmod of '.' is
+             * relative to the pinned directory, not to the mutable name. */
+            if (fchmodat(child_fd, ".", 0700, 0) < 0 || clean_temp_fd(child_fd) != 0)
+                errors++;
+            close(child_fd);
+            if (unlinkat(parent_fd, entry->d_name, AT_REMOVEDIR) < 0)
+                errors++;
+        } else if (errno == ENOTDIR || errno == ELOOP) {
+            if (unlinkat(parent_fd, entry->d_name, 0) < 0)
+                errors++;
+        } else if (errno != ENOENT) {
+            errors++;
+        }
+    }
+    closedir(dir);
+    return errors;
 }
 
-/**
- * Remove recursively @path.  This latter has to be a directory lying
- * in temp_directory (ie. "/tmp" on most systems).  This function
- * returns -1 on error, otherwise 0.
- */
+/* Created directories are immediate children of the configured temp root.
+ * Reject lookalike prefixes, traversal, and symlinks before touching contents. */
 static int remove_temp_directory2(const char *path)
 {
-	int result;
-	int status;
-	char *cwd;
-
-#ifdef __ANDROID__
-	cwd = malloc(PATH_MAX);
-	getcwd(cwd, PATH_MAX);
-#else
-	cwd = get_current_dir_name();
-#endif
-
-	status = chmod(path, 0700);
-	if (status < 0) {
-		note(NULL, ERROR, SYSTEM, "can't chmod '%s'", path);
-		result = -1;
-		goto end;
-	}
-
-	status = chdir(path);
-	if (status < 0) {
-		note(NULL, ERROR, SYSTEM, "can't chdir to '%s'", path);
-		result = -1;
-		goto end;
-	}
-
-	status = clean_temp_cwd();
-	result = (status == 0 ? 0 : -1);
-
-	/* Try to remove path even if something went wrong.  */
-	status = chdir("..");
-	if (status < 0) {
-		note(NULL, ERROR, SYSTEM, "can't chdir to '..'");
-		result = -1;
-		goto end;
-	}
-
-	status = rmdir(path);
-	if (status < 0) {
-		note(NULL, ERROR, SYSTEM, "cant remove '%s'", path);
-		result = -1;
-		goto end;
-	}
-
-end:
-	if (cwd != NULL) {
-		status = chdir(cwd);
-		if (status < 0) {
-			result = -1;
-			note(NULL, ERROR, SYSTEM, "can't chdir to '%s'", cwd);
-		}
-		free(cwd);
-	}
-
-	return result;
+    const char *base = get_temp_directory();
+    size_t length = strlen(base);
+    const char *name;
+    int root_fd, child_fd, result = -1;
+    while (length > 1 && base[length - 1] == '/')
+        length--;
+    if (strncmp(path, base, length) != 0)
+        return -1;
+    if (length == 1 && base[0] == '/')
+        name = path + 1;
+    else {
+        if (path[length] != '/')
+            return -1;
+        name = path + length + 1;
+    }
+    if (name[0] == '\0' || strchr(name, '/') != NULL ||
+        strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        return -1;
+    root_fd = open(base, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (root_fd < 0)
+        return -1;
+    child_fd = openat(root_fd, name, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (child_fd >= 0) {
+        if (fchmodat(child_fd, ".", 0700, 0) == 0 && clean_temp_fd(child_fd) == 0)
+            result = 0;
+        close(child_fd);
+        if (unlinkat(root_fd, name, AT_REMOVEDIR) < 0)
+            result = -1;
+    } else if (errno == ENOTDIR || errno == ELOOP) {
+        /* A replaced root symlink may be removed, never traversed. */
+        result = unlinkat(root_fd, name, 0);
+    }
+    close(root_fd);
+    if (result < 0)
+        note(NULL, WARNING, SYSTEM, "can't remove temporary directory '%s'", path);
+    return result;
 }
 
 /**

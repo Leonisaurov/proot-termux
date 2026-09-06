@@ -25,3 +25,18 @@ rootfs guest o al contenedor CI y no deben copiarse al flujo Termux.
 La batería completa puede ser costosa. Ejecuta primero el caso mínimo sin
 protocolo, después `control-fd` y finalmente el harness que atiende eventos
 durante toda la vida del proceso.
+
+La batería se puede seleccionar por capa desde la raíz del repositorio:
+
+```bash
+./proot/tests/run.sh proot
+./proot/tests/run.sh termux-isolated
+./proot/tests/run.sh harness
+./proot/tests/run.sh control-api
+./proot/tests/run.sh all
+```
+
+Entre las regresiones relevantes de `termux-isolated` están
+`shell/test_termux_isolated_shebang.sh` y
+`shell/test_termux_isolated_shebang_fastpath.sh`; ambas cubren la ejecución de
+shebangs, incluida la ruta rápida del launcher.

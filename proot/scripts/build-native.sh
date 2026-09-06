@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+: "${TMPDIR:=/data/data/com.termux/files/usr/tmp}"
+export TMPDIR
+mkdir -p "$TMPDIR"
+test -d "$TMPDIR" && test -w "$TMPDIR"
+
 # === CONSTANTES ===
 SCRIPTDIR=$(cd "$(realpath "$(dirname "$0")")"; pwd)
 PROJECT_DIR=$(cd "$SCRIPTDIR/.."; pwd)

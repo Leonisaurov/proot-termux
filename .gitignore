@@ -29,6 +29,7 @@ checksum*
 /output/
 /proot/ci/termux/output/
 /proot/artifacts/packages/
+/proot/artifacts/audit/
 /*.pkg.tar.xz
 
 # Preinstalled build tools.

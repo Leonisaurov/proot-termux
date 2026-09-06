@@ -10,6 +10,9 @@ on:
       - 'proot/ci/termux/scripts/linux-kernel-signing-keys.gpg'
       - 'proot/ci/termux/scripts/profile-restricted.apparmor'
       - 'proot/src/**'
+      - 'proot/scripts/**'
+      - 'proot/ci/termux/scripts/build/**'
+      - 'proot/ci/termux/scripts/properties.sh'
       - '.github/workflows/build-proot.yml'
       - '.github/actions/zram/action.yml'
   workflow_dispatch:
@@ -63,9 +66,9 @@ jobs:
       id: build-cache
       with:
         path: ~/.termux-build
-        key: proot-${{ hashFiles('proot/ci/termux/packages/proot/build.sh', 'proot/ci/termux/packages/libtalloc/build.sh', 'proot/ci/termux/packages/libandroid-shmem/build.sh') }}
+        key: proot-v2-${{ runner.os }}-aarch64-${{ hashFiles('proot/ci/termux/scripts/properties.sh', 'proot/ci/termux/scripts/build/**', 'proot/ci/termux/packages/proot/build.sh', 'proot/ci/termux/packages/libtalloc/build.sh', 'proot/ci/termux/packages/libandroid-shmem/build.sh') }}
         restore-keys: |
-          proot-
+          proot-v2-${{ runner.os }}-aarch64-
 
     - name: Prepare cache directory
       run: mkdir -p ~/.termux-build
@@ -78,22 +81,32 @@ jobs:
 
     # ----- Collect and upload proot/artifacts -----
     - name: Collect package files
-      if: always()
+      env:
+        RELEASE_TAG: ${{ steps.package-meta.outputs.release_tag }}
       run: |
+        set -euo pipefail
         mkdir -p ./proot/artifacts
-        mv proot/ci/termux/output/*.pkg.tar.xz ./proot/artifacts/ 2>/dev/null || true
+        package="proot/ci/termux/output/${RELEASE_TAG}-aarch64.pkg.tar.xz"
+        test -s "$package"
+        xz -t "$package"
+        tar -xOf "$package" .PKGINFO > proot/artifacts/package-info.txt
+        grep -Fx 'pkgname = proot' proot/artifacts/package-info.txt
+        grep -Fx 'arch = aarch64' proot/artifacts/package-info.txt
+        grep -Fx "pkgver = ${RELEASE_TAG#proot-}" proot/artifacts/package-info.txt
+        cp "$package" proot/artifacts/
+        cd proot/artifacts
+        sha256sum "${RELEASE_TAG}-aarch64.pkg.tar.xz" > SHA256SUMS
 
     - name: Store package files as artifact
-      if: always()
       uses: actions/upload-artifact@v6
       with:
         name: proot-aarch64-${{ github.sha }}
         path: ./proot/artifacts/*
-        if-no-files-found: warn
+        if-no-files-found: error
 
   release:
     needs: build
-    if: needs.build.result == 'success'
+    if: needs.build.result == 'success' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -108,11 +121,14 @@ jobs:
     - name: Upload to GitHub Release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
       run: |
         set -euo pipefail
-        FILE=$(find proot/artifacts -maxdepth 1 -type f -name '*.pkg.tar.xz' -print -quit)
+        cd proot/artifacts
+        sha256sum -c SHA256SUMS
+        FILE="${RELEASE_TAG}-aarch64.pkg.tar.xz"
         [ -f "$FILE" ] || { echo 'No package artifact found' >&2; exit 1; }
-        TAG='${{ needs.build.outputs.release_tag }}'
+        TAG="$RELEASE_TAG"
         if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
           gh release upload "$TAG" "$FILE" \
             --repo "${{ github.repository }}" \
@@ -124,6 +140,7 @@ jobs:
             --notes "proot aarch64 from ${{ github.sha }}"
         else
           gh release create "$TAG" "$FILE" \
+            --target "${{ github.sha }}" \
             --repo "${{ github.repository }}" \
             --title "$TAG" \
             --latest \

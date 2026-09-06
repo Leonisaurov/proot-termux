@@ -27,7 +27,13 @@ def _path(value):
     raw=value.encode('utf-8')
     if len(raw)>=1024: raise ValueError('guest path is too long')
     return raw+b'\0'*(1024-len(raw))
-def _cstring(raw): return raw.split(b'\0',1)[0].decode('utf-8','strict')
+def _cstring(raw):
+    if b'\0' not in raw:
+        raise InvalidFrame('unterminated string')
+    try:
+        return raw.split(b'\0', 1)[0].decode('utf-8', 'strict')
+    except UnicodeDecodeError as exc:
+        raise InvalidFrame('invalid UTF-8') from exc
 def _guest(raw):
     value=_cstring(raw)
     if value and (not value.startswith('/') or '\x00' in value): raise InvalidFrame('non-guest path')
@@ -93,8 +99,21 @@ class ControlChannel:
         if self.state in (ChannelState.FAILED,ChannelState.CLOSED): raise Desynchronized('channel is terminal')
         payload=bytes(payload)
         if len(payload)>MAX_FRAME or not 0<=request_id<=0xffffffffffffffff: raise ValueError('invalid frame')
-        try: self.sock.sendall(HEADER.pack(MAGIC,VERSION,int(Message(typ)),len(payload),request_id)+payload)
-        except OSError as e: self._fail(Desynchronized(str(e)))
+        pending = memoryview(HEADER.pack(MAGIC,VERSION,int(Message(typ)),len(payload),request_id)+payload)
+        deadline = time.monotonic() + self.timeout
+        while pending:
+            left = deadline - time.monotonic()
+            if left <= 0: self._fail(ControlTimeout('frame deadline expired'))
+            try:
+                _, ready, _ = select.select([], [self.sock], [], left)
+                if not ready: self._fail(ControlTimeout('frame deadline expired'))
+                sent = self.sock.send(pending)
+            except (BlockingIOError, InterruptedError):
+                continue
+            except OSError as exc:
+                self._fail(Desynchronized(str(exc)))
+            if sent == 0: self._fail(ControlEOF('peer closed'))
+            pending = pending[sent:]
     def receive(self):
         try: return self._receive()
         except ControlError:

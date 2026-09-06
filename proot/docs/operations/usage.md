@@ -318,8 +318,12 @@ proot --kill-on-exit --link2symlink -L \
 
 Los logs del supervisor se guardan en:
 ```
-$PREFIX/usr/tmp/proot-exit-<PID>.log
+${PROOT_RUNTIME_DIR:-$TMPDIR}/proot-exit-<PID>.log
 ```
+
+`PROOT_RUNTIME_DIR` debe ser un directorio host escribible; si no está
+definido, proot usa `TMPDIR`. El launcher `termux-isolated` configura ambos en
+`$PREFIX/tmp` para sus procesos.
 
 Contenido: `process 'x' exited with status N / killed by signal N`
 

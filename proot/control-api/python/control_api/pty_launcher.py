@@ -28,7 +28,7 @@ class PtyProotProcess:
         if any(x == '--control-fd' or x.startswith('--control-fd=') for x in c.args):
             raise ValueError('control-fd is managed by launcher')
         master = slave = None
-        parent = child = process = None
+        parent = child = process = channel = None
         try:
             master, slave = pty.openpty()
             parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -55,6 +55,8 @@ class PtyProotProcess:
             channel.handshake()
             return cls(process, master, channel, c)
         except Exception:
+            if channel is not None:
+                channel.close()
             for fd in (master, slave):
                 if fd is not None:
                     try: os.close(fd)

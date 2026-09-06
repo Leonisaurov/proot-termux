@@ -14,7 +14,8 @@ test -d "$TMPDIR" && test -w "$TMPDIR" || exit 1
 ROOTFS="/data/data/com.termux/files/usr/var/lib/proot-distro/containers/alpine/rootfs"
 PROOT="/data/data/com.termux/files/usr/bin/proOT"
 PROOT="/data/data/com.termux/files/usr/bin/proot"
-RESULTS="${RESULTS:-/data/data/com.termux/files/home/Develop/Patch/proot-termux/reports/pentest}"
+PROOT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+RESULTS="${RESULTS:-$PROOT_ROOT/reports/pentest}"
 mkdir -p "$RESULTS"
 RESULT_FILE="$RESULTS/d4_e1_e3_e6.txt"
 rm -f "$RESULT_FILE"

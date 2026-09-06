@@ -1309,6 +1309,20 @@ static int control_type_is_decision(uint16_t type)
 		type == CONTROL_DENY_ONCE || type == CONTROL_DENY_ALWAYS;
 }
 
+/* A command result is never a decision. Require the exact v1 layout and
+ * agreement between its redundant type and decision fields. */
+static int control_decision_valid(const ControlHeader *header,
+				 const ControlDecision *decision)
+{
+	if (!control_type_is_decision(header->type) ||
+	    header->size != sizeof(*decision))
+		return 0;
+	return decision->decision ==
+		((header->type == CONTROL_ALLOW_ONCE ||
+		  header->type == CONTROL_ALLOW_ALWAYS) ?
+		 NET_DECISION_ALLOW : NET_DECISION_DENY);
+}
+
 static int control_path_equal(const char *a, const char *b)
 {
 	return a != NULL && b != NULL && strcmp(a, b) == 0;
@@ -1547,9 +1561,10 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 	ControlHeader header;
 	ControlNetRequest request;
 	ControlHeader response_header;
-	ControlDecision response;
+	ControlDecision response = { 0 };
 	unsigned char payload[CONTROL_MAX_FRAME];
 	int protocol_failed = 0;
+	int decision_received = 0;
 	if (config->ask_fd < 0 || !config->control_ready)
 		return 0;
 	if (config->ask_failed)
@@ -1629,17 +1644,13 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 				continue;
 			}
 			protocol_failed = response_header.request_id != header.request_id ||
-				response_header.size < sizeof(response) ||
-				(response_header.type != CONTROL_COMMAND_RESULT &&
-				 response_header.type != CONTROL_ALLOW_ONCE &&
-				 response_header.type != CONTROL_ALLOW_ALWAYS &&
-				 response_header.type != CONTROL_DENY_ONCE &&
-				 response_header.type != CONTROL_DENY_ALWAYS);
+				response_header.size != sizeof(response) ||
+				!control_type_is_decision(response_header.type);
 			if (protocol_failed)
 				break;
 			memcpy(&response, payload, sizeof(response));
-			protocol_failed = response.decision != NET_DECISION_ALLOW &&
-				response.decision != NET_DECISION_DENY;
+			protocol_failed = !control_decision_valid(&response_header, &response);
+			decision_received = !protocol_failed;
 			if (!protocol_failed &&
 			    (response_header.type == CONTROL_ALLOW_ALWAYS ||
 			     response_header.type == CONTROL_DENY_ALWAYS) && addr != NULL) {
@@ -1672,7 +1683,7 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 			break;
 		}
 	}
-	if (protocol_failed) {
+	if (protocol_failed || !decision_received) {
 		/* A partial frame makes the stream untrustworthy.  Do not reuse it for
 		 * later requests; all future decisions fail closed until the CLI
 		 * explicitly installs a new harness FD. */
@@ -1750,18 +1761,13 @@ static int control_path_access(NetPolicyConfig *config, Tracee *tracee,
 			continue;
 		}
 		if (response_header.request_id != header.request_id ||
-		    response_header.size < sizeof(response) ||
-		    (response_header.type != CONTROL_COMMAND_RESULT &&
-		     response_header.type != CONTROL_ALLOW_ONCE &&
-		     response_header.type != CONTROL_ALLOW_ALWAYS &&
-		     response_header.type != CONTROL_DENY_ONCE &&
-		     response_header.type != CONTROL_DENY_ALWAYS)) {
+		    response_header.size != sizeof(response) ||
+		    !control_type_is_decision(response_header.type)) {
 			protocol_failed = 1;
 			break;
 		}
 		memcpy(&response, payload, sizeof(response));
-		if (response.decision != NET_DECISION_ALLOW &&
-		    response.decision != NET_DECISION_DENY) {
+		if (!control_decision_valid(&response_header, &response)) {
 			protocol_failed = 1;
 			break;
 		}

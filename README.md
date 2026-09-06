@@ -4,7 +4,7 @@
 [![Build proot](https://github.com/Leonisaurov/proot-termux/actions/workflows/build-proot.yml/badge.svg)](https://github.com/Leonisaurov/proot-termux/actions/workflows/build-proot.yml)
 [![latest proot release](https://img.shields.io/github/v/release/Leonisaurov/proot-termux?label=latest%20proot)](https://github.com/Leonisaurov/proot-termux/releases/latest)
 
-**proot-termux** is a minimal fork of [termux-packages](https://github.com/termux/termux-packages) that cross-compiles [proot](https://proot-me.github.io/) for Android **aarch64** using the Android NDK r29 via Docker. All other packages and build infrastructure have been stripped away — only proot remains.
+**proot-termux** is a focused fork of [termux-packages](https://github.com/termux/termux-packages) that cross-compiles [proot](https://proot-me.github.io/) for Android **aarch64** using the Android NDK r29 via Docker. The package pipeline targets proot; the checkout also retains the supporting Termux builder, tests, integrations, and documentation.
 
 The goal is a lean, automated build pipeline that produces a ready-to-install `.pkg.tar.xz` artifact on every push. Proot remains a standalone, multipurpose tool; its capabilities are selected explicitly by the caller.
 
@@ -182,11 +182,11 @@ The active GitHub Actions workflow automates the package build and release proce
 
 | Aspect | Detail |
 |---|---|
-| **Trigger** | Push to `proot/ci/termux/packages/proot/**` or `proot/**` |
+| **Trigger** | Push to `proot/ci/termux/packages/proot/**`, its build dependencies, `proot/src/**`, or the workflow/action files; also manual `workflow_dispatch` |
 | **Runner** | `ubuntu-26.04` with 16 GB zram |
 | **Cache** | `~/.termux-build` is cached with key based on `build.sh` hashes |
 | **Build** | `./proot/ci/termux/scripts/run-docker.sh ./proot/ci/termux/build-package.sh -I -a aarch64 --format pacman proot` |
-| **Release** | Creates/updates an immutable `proot-<version>-<revision>` release and marks it latest |
+| **Release** | Creates or updates `proot-<version>-<revision>` and marks it latest; uploading the same tag replaces its package asset |
 | **Artifact** | Also uploaded as a workflow artifact (`proot-aarch64-<sha>`) |
 
 **First run**: ~5 min (seeds the cache).  

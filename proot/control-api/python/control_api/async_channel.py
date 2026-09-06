@@ -112,6 +112,8 @@ class AsyncControlChannel:
     def receive(self):
         if self.state in (ChannelState.FAILED, ChannelState.CLOSED):
             raise Desynchronized("channel is terminal")
+        if self._events:
+            return self._events.popleft()
         try:
             while True:
                 try:
@@ -142,6 +144,8 @@ class AsyncControlChannel:
         self._output.append(memoryview(HEADER.pack(MAGIC, VERSION, int(typ), len(payload), request_id) + payload))
 
     def flush(self):
+        if self.state in (ChannelState.FAILED, ChannelState.CLOSED):
+            raise Desynchronized("channel is terminal")
         while self._output:
             frame = self._output[0]
             try:
@@ -150,6 +154,8 @@ class AsyncControlChannel:
                 return
             except OSError as exc:
                 self._fail(Desynchronized(str(exc)))
+            if sent == 0:
+                self._fail(ControlEOF("peer closed"))
             if sent:
                 frame = frame[sent:]
                 if frame:

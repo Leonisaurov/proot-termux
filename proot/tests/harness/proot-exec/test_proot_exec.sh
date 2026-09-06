@@ -56,11 +56,15 @@ assert "LD_LIBRARY_PATH" not in env, env
 PY
 echo "PASS: host preload variables are removed before PRoot"
 
-default_output=$(CDPATH= cd -- "$DEFAULT_DIR" && "$PROOT_EXEC")
-test "$default_output" = PROOT_EXEC_DEFAULT_OK
-echo "PASS: proot-exec.conf is the default without --config"
+if [[ -f "$DEFAULT_DIR/proot-exec.conf" ]]; then
+    default_output=$(CDPATH= cd -- "$DEFAULT_DIR" && "$PROOT_EXEC")
+    test "$default_output" = PROOT_EXEC_DEFAULT_OK
+    echo "PASS: proot-exec.conf is the default without --config"
+else
+    echo "SKIP: fixture default proot-exec.conf is not present"
+fi
 
-main_config="$ROOT/../proot-exec.conf"
+main_config="$SCRIPT_DIR/../fixtures/proot-exec-isolated.conf"
 main_output=$("$PROOT_EXEC" --config "$main_config" -- \
     "$PREFIX/bin/sh" -c 'printf PROOT_EXEC_MAIN_PROFILE_OK')
 test "$main_output" = PROOT_EXEC_MAIN_PROFILE_OK

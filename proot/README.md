@@ -11,7 +11,7 @@ se entra aquí con `cd proot`; los comandos de esta página que empiezan con
 | Código nativo de PRoot | [`src/`](src/) | [`src/GNUmakefile`](src/GNUmakefile) |
 | Launchers de usuario | [`bin/`](bin/) | [`bin/termux-isolated`](bin/termux-isolated), [`bin/proot-exec`](bin/proot-exec) |
 | API PRCT y harness | [`control-api/`](control-api/) | [`control-api/README.md`](control-api/README.md) |
-| Tests y regresiones | [`tests/`](tests/) | [`tests/rootfs/README.md`](tests/rootfs/README.md) |
+| Tests y regresiones | [`tests/`](tests/) | [`tests/README.md`](tests/README.md) |
 | Build Termux/CI | [`ci/termux/`](ci/termux/) | [`ci/termux/README.md`](ci/termux/README.md) |
 | Build nativa local | [`scripts/build-native.sh`](scripts/build-native.sh) | `./scripts/build-native.sh --help` |
 | Documentación técnica | [`docs/`](docs/) | [`docs/README.md`](docs/README.md) |

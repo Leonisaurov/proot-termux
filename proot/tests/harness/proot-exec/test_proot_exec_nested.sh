@@ -11,7 +11,7 @@ trap 'rm -f "$fixture"' EXIT
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 PROOT_EXEC="${PROOT_EXEC:-$ROOT/bin/proot-exec}"
-CONFIG="$ROOT/../proot-exec.conf"
+CONFIG="$SCRIPT_DIR/../fixtures/proot-exec-isolated.conf"
 
 if [[ ! -x "$PROOT_EXEC" ]]; then
 	printf 'SKIP: proot-exec not found at %s\n' "$PROOT_EXEC"
