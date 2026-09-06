@@ -9,14 +9,15 @@ entre modos dentro de una misma corrida.
 Script: [`test_termux_isolated_benchmark.sh`](../../tests/termux-isolated/performance/test_termux_isolated_benchmark.sh)
 
 Mide, dentro de sesiones interactivas persistentes con pseudo-terminal, el
-tiempo de 5,000 ejecuciones de `/bin/true`. La comparación entre las dos
+tiempo de ejecuciones de `/bin/true`. Por defecto realiza 100 ejecuciones por
+muestra; el valor se puede ampliar con `TERMUX_ISOLATED_BENCH_ITERATIONS`. La comparación entre las dos
 variantes aisladas usa 10 pares: el orden se aleatoriza de forma reproducible,
 se descarta un par de calentamiento y se reportan las 10 parejas restantes.
 Compara una shell Termux directa con
 `termux-isolated --termux-paths`, activando y desactivando explícitamente
 `--proc-isolated`.
 
-Corrida del 2026-08-26, en Termux/aarch64:
+Corrida histórica del 2026-08-26, en Termux/aarch64:
 
 | Caso | Tiempo | Relación contra shell directa |
 |---|---:|---:|

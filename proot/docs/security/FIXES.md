@@ -91,7 +91,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | Leak talloc en shutdown supervise (`free_terminated_tracees`, FU-1..FU-4, `supervise_handle_exited_tracee`, guard `ctl_fd>=0`) | ✅ fixes 5ad187e929 + 414053fc04 |
 | **FASE A COMPLETADA — A2 stat/readlink oracle + C1 kill(-1) broadcast + V4 netlink topology** | ✅ commit `573f4cb8d9` 'fix(isolation): block /proc host stat/readlink oracle, kill(-1) broadcast, netlink topology' (REVISION 19) — pentest ampliado con baselines `*_2` y verificaciones `*_3` |
 | **FASE A COMPLETADA — cierre de los 4 MINORs + hardening señales** | ✅ commit `3b98197d8a` 'fix(isolation): deliver kill broadcasts to guest tracees, block statx on SIGSYS, harden signal validation' (REVISION 20) — kill(-1) entrega real a tracees; statx cubierto en SIGSYS legacy; pentest EMULADO-OK; buffers PATH_MAX; extra kill(0)/kill(-pgid) confinados al guest (ESRCH pgid vacío, EINVAL señal inválida) |
-|| REVISION actual en `ci/termux/packages/proot/build.sh` | **92** — bump SIEMPRE antes de commit si se toca `src/` o `ci/termux/packages/proot/` |
+|| REVISION actual en `ci/termux/packages/proot/build.sh` | **93** — bump SIEMPRE antes de commit si se toca `src/` o `ci/termux/packages/proot/` |
 
 ## 1. Resumen ejecutivo de las 3 auditorías
 
@@ -210,7 +210,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 ## 10. Checklist de commit (reglas AGENTS.md)
 
 1. Editar código (`src/` o `ci/termux/packages/proot/`).
-2. **Bump `TERMUX_PKG_REVISION` en `ci/termux/packages/proot/build.sh` ANTES del commit**. La revisión actual es 92; las referencias a revisiones anteriores en las fases históricas son deliberadas.
+2. **Bump `TERMUX_PKG_REVISION` en `ci/termux/packages/proot/build.sh` ANTES del commit**. La revisión actual es 93; las referencias a revisiones anteriores en las fases históricas son deliberadas.
 3. `git add -A && git commit -m "<type>(<scope>): <summary>"`.
 4. `git push origin master` (SOLO `origin`).
 5. `gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Success)'` — exit 0=éxito, 1=falló, 2=cancelado. **NO timeout, NO streaming.**

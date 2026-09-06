@@ -22,8 +22,8 @@ incluye el arranque y salida completos de proot, Python y el proceso guest.
 El benchmark reproducible es
 [`test_net_policy_benchmark.sh`](../../tests/proot/performance/test_net_policy_benchmark.sh).
 Ejecuta el launcher real `termux-isolated --termux-paths`, crea un receptor UDP
-local para los casos permitidos y mide siete muestras después de una muestra de
-calentamiento. Cada muestra crea un proceso proot nuevo y ejecuta:
+local para los casos permitidos y mide cinco muestras después de una muestra de
+calentamiento por defecto. Cada muestra crea un proceso proot nuevo y ejecuta:
 
 ```text
 socket(AF_INET, SOCK_DGRAM)
@@ -42,7 +42,7 @@ Para repetir la medición:
 
 ```bash
 NET_POLICY_BENCH_ITERATIONS=1000 \
-NET_POLICY_BENCH_REPEATS=7 \
+NET_POLICY_BENCH_REPEATS=5 \
 ./proot/tests/proot/performance/test_net_policy_benchmark.sh
 ```
 
@@ -67,7 +67,7 @@ mediación por syscall y en procesos cortos que arrancan proot repetidamente.
 - Arquitectura: `aarch64`.
 - Ejecutor: Termux nativo, mediante `proot/bin/termux-isolated`.
 - Iteraciones: 1,000 `sendto()` por muestra.
-- Muestras reportadas: 7 por modo, tras una muestra de calentamiento.
+- Muestras reportadas: 5 por modo, tras una muestra de calentamiento.
 
 Los tiempos son específicos del dispositivo, la versión de Android/Termux,
 la carga térmica y la versión de proot. Deben compararse entre modos dentro de
