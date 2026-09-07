@@ -1084,12 +1084,8 @@ static int vnp_handle_get_name(Tracee *tracee, VnpConfig *config)
 }
 
 /**
- * Handle accept/accept4 exit — write fake AF_INET/AF_INET6 loopback
- * address into the tracee's buffer so the caller thinks it got a
- * real TCP connection from localhost.
- *
- * Supports both AF_INET and AF_INET6 based on the listening socket's
- * original domain.
+ * Handle accept/accept4 exit and track the accepted virtual connection.
+ * Non-Android callers also receive a synthetic loopback peer address.
  */
 static int vnp_handle_accept_exit(Tracee *tracee, VnpConfig *config,
                                    VnpFdEntry *listen_entry, int newfd,
@@ -1102,13 +1098,8 @@ static int vnp_handle_accept_exit(Tracee *tracee, VnpConfig *config,
 				    listen_entry->orig_domain);
 	}
 
-	/* Fake the client address as AF_INET or AF_INET6 loopback,
-	 * matching the original domain of the listening socket.
-	 * We use raw PTRACE_POKEDATA instead of write_data or
-	 * process_vm_writev because on Android/aarch64:
-	 * - process_vm_writev may be blocked by SELinux
-	 * - write_data's ptrace workaround does PTRACE_CONT
-	 *   which is unsafe in the EXIT handler context */
+#ifndef __ANDROID__
+	/* Keep the virtual peer address compatible with the real socket type. */
 	if (addr_ptr != 0 && addrlen_ptr != 0) {
 		bool write_ok = true;
 		if (listen_entry->orig_domain == AF_INET6) {
@@ -1135,6 +1126,11 @@ static int vnp_handle_accept_exit(Tracee *tracee, VnpConfig *config,
 			vnp_write_to_tracee(tracee, addrlen_ptr, &addrlen_val, sizeof(addrlen_val));
 		}
 	}
+#else
+	/* Bionic validates the returned family against the accepted AF_UNIX fd. */
+	(void) addr_ptr;
+	(void) addrlen_ptr;
+#endif
 	return 0;
 }
 

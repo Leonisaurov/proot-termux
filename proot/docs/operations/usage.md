@@ -205,6 +205,26 @@ proot --proxy web --rootfs=... /bin/sh -c "curl example.com"
 proot --proxy web2 --rootfs=... /bin/sh -c "curl example.com"  # FALLA
 ```
 
+### Alcance de `--net-policy`
+
+La política estática y el protocolo PRCT v1 clasifican destinos `AF_INET` y
+`AF_INET6`. Las direcciones `AF_UNIX`, tanto pathname como abstractas, no se
+codifican como destinos IP ni se bloquean indiscriminadamente: son necesarias
+para IPC del guest, `--control-fd`, supervisión y la red virtual interna.
+
+Por tanto, `--net-policy deny` no equivale a una mediación de nombres Unix ni a
+una autorización de servicios Android. Un socket Unix puede seguir devolviendo
+un error normal del kernel, `SO_PEERCRED` solo identifica al endpoint y no
+concede sus privilegios. La cobertura de pathname y abstract sockets sin enviar
+payload se mantiene en `tests/proot/networking/test_unix_socket_scope.sh`.
+
+En una red virtual, los sockets guest se implementan sobre `AF_UNIX`. En
+Android, `accept()` y `accept4()` conservan la dirección peer `AF_UNIX` real:
+la envoltura Bionic valida que la familia devuelta coincida con la familia del
+FD aceptado y rechaza una dirección `AF_INET` sintética con `EMSGSIZE`. Los
+resultados de `getsockname()` y `getpeername()` siguen usando la representación
+virtual de la familia guest.
+
 ## Resource Limits
 
 ### Límite de CPU
