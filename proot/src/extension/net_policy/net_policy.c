@@ -14,6 +14,8 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <linux/net.h>
 #include <sys/uio.h>
 #include <stddef.h>
 #include <netdb.h>
@@ -87,6 +89,20 @@ enum {
 	NET_DECISION_DENY = 0,
 	NET_DECISION_ALLOW = 1,
 };
+
+enum {
+	NET_UNIX_UNNAMED = 0,
+	NET_UNIX_PATHNAME = 1,
+	NET_UNIX_ABSTRACT = 2,
+};
+
+#define NET_UNIX_NAME_MAX sizeof(((struct sockaddr_un *)0)->sun_path)
+
+typedef struct {
+	uint8_t kind;
+	uint16_t length;
+	uint8_t name[NET_UNIX_NAME_MAX];
+} NetUnixEndpoint;
 
 typedef struct __attribute__((packed)) {
 	uint32_t magic;
@@ -252,6 +268,7 @@ static FilteredSysnum net_policy_sysnums[] = {
 	{ PR_bind, 0 },
 	{ PR_listen, 0 },
 	{ PR_connect, 0 },
+	{ PR_socketcall, 0 },
 	{ PR_sendto, FILTER_SYSEXIT },
 	{ PR_recvfrom, FILTER_SYSEXIT },
 	{ PR_recvmsg, FILTER_SYSEXIT },
@@ -1350,7 +1367,7 @@ static int net_operation_family_valid(uint32_t operation, uint16_t family)
 	if (operation == CONTROL_NET_PUBLICATION)
 		return family == AF_UNSPEC;
 	return (operation == CONTROL_NET_BIND || operation == CONTROL_NET_CONNECT) &&
-		(family == AF_INET || family == AF_INET6);
+		(family == AF_INET || family == AF_INET6 || family == AF_UNIX);
 }
 
 static int control_net_command(NetPolicyConfig *config, uint16_t type,
@@ -1554,6 +1571,7 @@ static size_t net_family_address_size(uint16_t family)
 
 static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 			       uint32_t event, const struct sockaddr_storage *addr,
+			       const NetUnixEndpoint *unix_endpoint,
 			       uint16_t guest_port, uint16_t host_port, uint16_t protocol,
 			       uint8_t real_exposure, VnpNetworkClass net_class,
 			       const char *proxy)
@@ -1611,6 +1629,13 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 			memcpy(request.address, &((const struct sockaddr_in *)addr)->sin_addr, 4);
 		else if (addr->ss_family == AF_INET6)
 			memcpy(request.address, &((const struct sockaddr_in6 *)addr)->sin6_addr, 16);
+		else if (addr->ss_family == AF_UNIX && unix_endpoint != NULL) {
+			if (unix_endpoint->length > sizeof(request.domain))
+				return -EINVAL;
+			request.address[0] = unix_endpoint->kind;
+			request.address[1] = (uint8_t)unix_endpoint->length;
+			memcpy(request.domain, unix_endpoint->name, unix_endpoint->length);
+		}
 	}
 	if (proxy == NULL)
 		proxy = config->proxy;
@@ -1653,7 +1678,8 @@ static int ask_harness(NetPolicyConfig *config, Tracee *tracee,
 			decision_received = !protocol_failed;
 			if (!protocol_failed &&
 			    (response_header.type == CONTROL_ALLOW_ALWAYS ||
-			     response_header.type == CONTROL_DENY_ALWAYS) && addr != NULL) {
+			     response_header.type == CONTROL_DENY_ALWAYS) && addr != NULL &&
+			    (addr->ss_family == AF_INET || addr->ss_family == AF_INET6)) {
 				unsigned int slot;
 				for (slot = 0; slot < config->dynamic_rule_count; slot++)
 					if (!config->dynamic_rules[slot].active)
@@ -1840,39 +1866,137 @@ static int control_fd_path_operation(Tracee *tracee, int fd,
 	return 0;
 }
 
-static int read_sockaddr(Tracee *tracee, word_t ptr, struct sockaddr_storage *addr)
+static int read_sockaddr_limited(Tracee *tracee, word_t ptr, size_t supplied_length,
+					 struct sockaddr_storage *addr,
+					 NetUnixEndpoint *unix_endpoint)
 {
 	unsigned char header[sizeof(word_t)];
 	sa_family_t family;
 	size_t length;
 
-	/* Android's ptrace fallback cannot reliably read a short, trailing
-	 * fragment.  Read only word-aligned portions of the guest sockaddr;
-	 * the first word contains the family and port for both IP families. */
 	if (ptr == 0 || read_data(tracee, header, ptr, sizeof(header)) < 0)
 		return -EFAULT;
 	memcpy(&family, header, sizeof(family));
 	memset(addr, 0, sizeof(*addr));
+	if (unix_endpoint != NULL)
+		memset(unix_endpoint, 0, sizeof(*unix_endpoint));
 	if (family == AF_INET)
 		length = sizeof(struct sockaddr_in);
 	else if (family == AF_INET6)
 		length = offsetof(struct sockaddr_in6, sin6_scope_id);
-	else
+	else if (family == AF_UNIX) {
+		struct sockaddr_un *unix_addr = (struct sockaddr_un *)addr;
+		size_t path_length;
+		size_t name_length;
+		length = supplied_length == 0 ? sizeof(*unix_addr) : supplied_length;
+		if (length < offsetof(struct sockaddr_un, sun_path))
+			return 0;
+		if (length > sizeof(*unix_addr))
+			length = sizeof(*unix_addr);
+		if (read_data(tracee, addr, ptr, length) < 0)
+			return -EFAULT;
+		if (unix_endpoint == NULL)
+			return 0;
+		path_length = length - offsetof(struct sockaddr_un, sun_path);
+		if (path_length == 0)
+			return 0;
+		if (unix_addr->sun_path[0] == '\0') {
+			unix_endpoint->kind = NET_UNIX_ABSTRACT;
+			name_length = path_length - 1;
+		} else {
+			unix_endpoint->kind = NET_UNIX_PATHNAME;
+			name_length = strnlen(unix_addr->sun_path, path_length);
+		}
+		if (name_length > sizeof(unix_endpoint->name))
+			name_length = sizeof(unix_endpoint->name);
+		memcpy(unix_endpoint->name,
+		       unix_addr->sun_path + (unix_endpoint->kind == NET_UNIX_ABSTRACT),
+		       name_length);
+		unix_endpoint->length = (uint16_t)name_length;
+		return 0;
+	} else
 		return 0;
 	if (read_data(tracee, addr, ptr, length) < 0)
 		return -EFAULT;
 	return 0;
 }
 
+static int read_sockaddr(Tracee *tracee, word_t ptr, struct sockaddr_storage *addr)
+{
+	return read_sockaddr_limited(tracee, ptr, 0, addr, NULL);
+}
+
+static int socketcall_address(Tracee *tracee, int *mapped_syscall,
+				      word_t *address, word_t *address_length)
+{
+	word_t args_addr;
+	word_t call;
+	size_t word_size;
+
+	if (get_sysnum(tracee, CURRENT) != PR_socketcall)
+		return 0;
+	args_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+	if (errno != 0)
+		return -errno;
+	call = peek_reg(tracee, CURRENT, SYSARG_1);
+	if (errno != 0)
+		return -errno;
+	word_size = sizeof_word(tracee);
+	switch (call) {
+	case SYS_BIND:
+		*mapped_syscall = PR_bind;
+		break;
+	case SYS_CONNECT:
+		*mapped_syscall = PR_connect;
+		break;
+	case SYS_SENDTO:
+		*mapped_syscall = PR_sendto;
+		break;
+	case SYS_RECVFROM:
+		*mapped_syscall = PR_recvfrom;
+		break;
+	default:
+		return 0;
+	}
+	if (call == SYS_BIND || call == SYS_CONNECT) {
+		*address = peek_word(tracee, args_addr + word_size);
+		if (errno != 0)
+			return -errno;
+		*address_length = peek_word(tracee, args_addr + 2 * word_size);
+	} else {
+		*address = peek_word(tracee, args_addr + 4 * word_size);
+		if (errno != 0)
+			return -errno;
+		*address_length = peek_word(tracee, args_addr + 5 * word_size);
+	}
+	if (errno != 0)
+		return -errno;
+	return 1;
+}
+
 static int check_operation(Tracee *tracee, NetPolicyConfig *config, int syscall)
 {
 	struct sockaddr_storage addr;
+	NetUnixEndpoint unix_endpoint;
 	word_t ptr;
+	word_t address_length;
 	unsigned int port = 0;
 	VnpNetworkClass net_class = VNP_NET_CLASS_EXTERNAL;
 	char proxy[64];
-	int is_bind = syscall == PR_bind || syscall == PR_listen;
-	int is_datagram = syscall == PR_sendto || syscall == PR_recvfrom;
+	int effective_syscall = syscall;
+	int is_bind;
+	int is_datagram;
+
+	if (syscall == PR_socketcall) {
+		int socketcall_status = socketcall_address(tracee, &effective_syscall,
+								   &ptr, &address_length);
+		if (socketcall_status < 0)
+			return socketcall_status;
+		if (socketcall_status == 0)
+			return 0;
+	}
+	is_bind = effective_syscall == PR_bind || effective_syscall == PR_listen;
+	is_datagram = effective_syscall == PR_sendto || effective_syscall == PR_recvfrom;
 
 	if (config->mode == NET_POLICY_OFF &&
 	    !(config->ask_fd >= 0 && config->control_ready))
@@ -1889,17 +2013,28 @@ static int check_operation(Tracee *tracee, NetPolicyConfig *config, int syscall)
 				!bind_matches(config->allow_bind, config->allow_bind_count, port)
 				? -EACCES : 0;
 		}
-		ptr = peek_reg(tracee, CURRENT, SYSARG_2);
-		if (read_sockaddr(tracee, ptr, &addr) < 0)
+		if (syscall != PR_socketcall) {
+			ptr = peek_reg(tracee, CURRENT, SYSARG_2);
+			address_length = peek_reg(tracee, CURRENT, SYSARG_3);
+		}
+		if (read_sockaddr_limited(tracee, ptr, address_length, &addr,
+					  &unix_endpoint) < 0)
 			return 0;
+		if (addr.ss_family == AF_UNIX) {
+			if (unix_endpoint.kind == NET_UNIX_UNNAMED)
+				return 0;
+			return config->mode == NET_POLICY_OFF || config->proxy[0] == '\0' ||
+				(config->ask_fd >= 0 && config->control_ready) ? 0 : -EACCES;
+		}
 		if (addr.ss_family != AF_INET && addr.ss_family != AF_INET6)
 			return 0;
 		if (addr.ss_family == AF_INET)
 			port = ntohs(((struct sockaddr_in *)&addr)->sin_port);
 		else if (addr.ss_family == AF_INET6)
 			port = ntohs(((struct sockaddr_in6 *)&addr)->sin6_port);
-		remember_bind(config, tracee->pid,
-			(int) peek_reg(tracee, CURRENT, SYSARG_1), port);
+		if (syscall != PR_socketcall)
+			remember_bind(config, tracee->pid,
+				(int) peek_reg(tracee, CURRENT, SYSARG_1), port);
 		/* A port-zero bind only asks the kernel for an ephemeral client
 		 * port; it does not publish a listener and must not require a
 		 * --net-allow-bind rule.  An ensuing listen() is still checked
@@ -1917,11 +2052,24 @@ static int check_operation(Tracee *tracee, NetPolicyConfig *config, int syscall)
 	/* sendto(2)/recvfrom(2) carry the peer address in arg 5; a
 	 * NULL address means the connected socket's peer and is left to
 	 * connect(2)'s decision. */
-	ptr = peek_reg(tracee, CURRENT, is_datagram ? SYSARG_5 : SYSARG_2);
+	if (syscall != PR_socketcall) {
+		ptr = peek_reg(tracee, CURRENT, is_datagram ? SYSARG_5 : SYSARG_2);
+		address_length = peek_reg(tracee, CURRENT,
+			is_datagram ? SYSARG_6 : SYSARG_3);
+	}
 	if (ptr == 0)
 		return 0;
-	if (read_sockaddr(tracee, ptr, &addr) < 0)
+	if (read_sockaddr_limited(tracee, ptr, address_length, &addr,
+				  &unix_endpoint) < 0)
 		return 0;
+	if (addr.ss_family == AF_UNIX) {
+		/* recvfrom() fills this address buffer after the syscall; its input
+		 * bytes are not a destination to authorize. */
+		if (effective_syscall == PR_recvfrom || unix_endpoint.kind == NET_UNIX_UNNAMED)
+			return 0;
+		return config->mode == NET_POLICY_OFF || config->proxy[0] == '\0' ||
+			(config->ask_fd >= 0 && config->control_ready) ? 0 : -EACCES;
+	}
 	if (addr.ss_family != AF_INET && addr.ss_family != AF_INET6)
 		return 0;
 	if (addr.ss_family == AF_INET)
@@ -2017,7 +2165,7 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 			if (domain > UINT16_MAX || !net_operation_family_valid(CONTROL_NET_SOCKET, (uint16_t)domain))
 				status = -EAFNOSUPPORT;
 			else
-				status = ask_harness(config, tracee, CONTROL_NET_SOCKET, &addr,
+				status = ask_harness(config, tracee, CONTROL_NET_SOCKET, &addr, NULL,
 						0, 0, (uint16_t)protocol, 0,
 						VNP_NET_CLASS_UNKNOWN, config->proxy);
 			if (status < 0) {
@@ -2027,7 +2175,7 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 			}
 		}
 		if (syscall == PR_bind || syscall == PR_listen || syscall == PR_connect ||
-		    syscall == PR_sendto || syscall == PR_recvfrom || syscall == PR_recvmsg ||
+		    syscall == PR_sendto || syscall == PR_recvfrom || syscall == PR_socketcall || syscall == PR_recvmsg ||
 		    syscall == PR_ppoll || syscall == PR_read) {
 			if (config->mode != NET_POLICY_OFF && syscall == PR_sendto &&
 			    dns_emulate_send(config, tracee))
@@ -2048,6 +2196,19 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 				dns_observe_send(config, tracee);
 			int network_syscall = syscall == PR_bind || syscall == PR_listen ||
 				syscall == PR_connect || syscall == PR_sendto || syscall == PR_recvfrom;
+			int handoff_syscall = syscall;
+			word_t handoff_ptr = 0;
+			word_t handoff_length = 0;
+			if (syscall == PR_socketcall) {
+				int parsed = socketcall_address(tracee, &handoff_syscall,
+								       &handoff_ptr, &handoff_length);
+				if (parsed < 0) {
+					set_sysnum(tracee, PR_void);
+					poke_reg(tracee, SYSARG_RESULT, parsed);
+					return 1;
+				}
+				network_syscall = parsed > 0;
+			}
 			int status = network_syscall ? check_operation(tracee, config, syscall) : 0;
 			if (status < 0) {
 				set_sysnum(tracee, PR_void);
@@ -2059,33 +2220,39 @@ int net_policy_callback(Extension *extension, ExtensionEvent event,
 			}
 		if (network_syscall && syscall != PR_listen &&
 		    config->ask_fd >= 0 && config->control_ready) {
-				struct sockaddr_storage addr;
-				word_t ptr = (syscall == PR_sendto || syscall == PR_recvfrom) ?
-					peek_reg(tracee, CURRENT, SYSARG_5) :
-					peek_reg(tracee, CURRENT, SYSARG_2);
-				if (ptr != 0 && read_sockaddr(tracee, ptr, &addr) == 0 &&
-				    (addr.ss_family == AF_INET || addr.ss_family == AF_INET6)) {
-					/* read_sockaddr() deliberately treats unsupported sockaddr
-					 * families as non-network addresses.  Keep that invariant in
-					 * the control-fd handoff too: AF_UNIX/AF_NETLINK/AF_UNSPEC in address-bearing calls
-					 * must never become a malformed NET_ACCESS_REQUEST with a
-					 * guessed IPv6 port.  Socket creation is authorized separately through CONTROL_NET_SOCKET. */
-					unsigned int port = addr.ss_family == AF_INET ?
-						ntohs(((struct sockaddr_in *)&addr)->sin_port) :
-						ntohs(((struct sockaddr_in6 *)&addr)->sin6_port);
-					status = ask_harness(config, tracee,
-						syscall == PR_bind ? CONTROL_NET_BIND : CONTROL_NET_CONNECT,
-						&addr, (uint16_t)port, (uint16_t)port, 0, 0,
-						vnp_classify_destination(tracee, &addr, (uint16_t)port,
-									 config->proxy, sizeof(config->proxy)),
-						config->proxy);
-					if (status < 0) {
-						set_sysnum(tracee, PR_void);
-						poke_reg(tracee, SYSARG_RESULT, status);
-						return 1;
-					}
+			struct sockaddr_storage addr;
+			NetUnixEndpoint unix_endpoint;
+			word_t ptr = syscall == PR_socketcall ? handoff_ptr :
+				((syscall == PR_sendto || syscall == PR_recvfrom) ?
+				 peek_reg(tracee, CURRENT, SYSARG_5) :
+				 peek_reg(tracee, CURRENT, SYSARG_2));
+			word_t address_length = syscall == PR_socketcall ? handoff_length :
+				((syscall == PR_sendto || syscall == PR_recvfrom) ?
+				 peek_reg(tracee, CURRENT, SYSARG_6) :
+				 peek_reg(tracee, CURRENT, SYSARG_3));
+			if (ptr != 0 && read_sockaddr_limited(tracee, ptr, address_length,
+							      &addr, &unix_endpoint) == 0 &&
+				    (addr.ss_family == AF_INET || addr.ss_family == AF_INET6 ||
+				     addr.ss_family == AF_UNIX)) {
+				unsigned int port = 0;
+				if (addr.ss_family == AF_INET)
+					port = ntohs(((struct sockaddr_in *)&addr)->sin_port);
+				else if (addr.ss_family == AF_INET6)
+					port = ntohs(((struct sockaddr_in6 *)&addr)->sin6_port);
+				status = ask_harness(config, tracee,
+					handoff_syscall == PR_bind ? CONTROL_NET_BIND : CONTROL_NET_CONNECT,
+					&addr, addr.ss_family == AF_UNIX ? &unix_endpoint : NULL,
+					(uint16_t)port, (uint16_t)port, 0, 0,
+					vnp_classify_destination(tracee, &addr, (uint16_t)port,
+								 config->proxy, sizeof(config->proxy)),
+					config->proxy);
+				if (status < 0) {
+					set_sysnum(tracee, PR_void);
+					poke_reg(tracee, SYSARG_RESULT, status);
+					return 1;
 				}
 			}
+		}
 		}
 		return 0;
 	}
@@ -2578,7 +2745,7 @@ int net_policy_allow_publication(Tracee *tracee, uint16_t host_port,
 	if (config->mode == NET_POLICY_DENY &&
 	    !bind_matches(config->allow_bind, config->allow_bind_count, guest_port))
 		return -EACCES;
-	return ask_harness(config, tracee, CONTROL_NET_PUBLICATION, NULL,
+	return ask_harness(config, tracee, CONTROL_NET_PUBLICATION, NULL, NULL,
 			   guest_port, host_port, 0, 1, VNP_NET_CLASS_BRIDGE,
 			   config->proxy);
 }
