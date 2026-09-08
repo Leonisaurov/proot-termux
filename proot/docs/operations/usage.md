@@ -72,10 +72,13 @@ Pruebas mínimas mediante el sandbox del repositorio:
 ```
 
 En `--termux-paths`, `/data/data/com.termux/...` es una ruta guest válida y
-debe aparecer. Sin esa opción, el rootfs debe mostrar rutas como `/usr` y
-`/home`, nunca rutas Android del host. `--no-proc-isolated` es un opt-out
-explícito que restaura la vista procfs anterior, incluida la posibilidad de
-ver datos procfs host; se usa solo para comparar compatibilidad. El wrapper
+debe aparecer. Sin esa opción, el rootfs muestra rutas guest como `/usr` y
+`/home`, bloquea las rutas Termux, almacenamiento y externas, y puede conservar
+rutas permitidas del runtime Android, como `/system/etc/hosts`. Esto
+proporciona aislamiento de la raíz guest y de los enlaces procfs, no un namespace
+completo del filesystem Android. `--no-proc-isolated` es un opt-out explícito que
+restaura la vista procfs anterior, incluida la posibilidad de ver datos procfs
+host; se usa solo para comparar compatibilidad. El wrapper
 `./bin/termux-isolated` activa la vista estricta por defecto.
 
 ### Nivel 3: Aislamiento granular
@@ -208,22 +211,33 @@ proot --proxy web2 --rootfs=... /bin/sh -c "curl example.com"  # FALLA
 ### Alcance de `--net-policy`
 
 La política estática y el protocolo PRCT v1 clasifican destinos `AF_INET` y
-`AF_INET6`. Las direcciones `AF_UNIX`, tanto pathname como abstractas, no se
-codifican como destinos IP ni se bloquean indiscriminadamente: son necesarias
-para IPC del guest, `--control-fd`, supervisión y la red virtual interna.
+`AF_INET6`. También reconocen `AF_UNIX` pathname y abstracto como endpoints
+separados: el tipo, la longitud exacta y los bytes del nombre viajan en
+`NET_ACCESS_REQUEST`; los paths host nunca se exponen.
 
-Por tanto, `--net-policy deny` no equivale a una mediación de nombres Unix ni a
-una autorización de servicios Android. Un socket Unix puede seguir devolviendo
-un error normal del kernel, `SO_PEERCRED` solo identifica al endpoint y no
-concede sus privilegios. La cobertura de pathname y abstract sockets sin enviar
-payload se mantiene en `tests/proot/networking/test_unix_socket_scope.sh`.
+Con `--net-policy deny` y un proxy, los endpoints Unix del guest se deniegan
+salvo que exista un `--control-fd` válido y el harness devuelva una decisión de
+allow. En ese modo, `bind`, `connect` y las operaciones address-bearing
+soportadas por el fork pueden llegar a PRCT; `socketcall` usa la misma política.
+Sin proxy o con `--net-policy off`, se conserva el comportamiento directo
+compatible. Un wildcard de `--net-allow` en PRCT sólo entrega el evento al
+harness: no autoriza por sí mismo.
+
+Los sockets anónimos y los sockets internos del control plane no deben
+confundirse con autorización para el guest. `SO_PEERCRED` sólo identifica al
+endpoint y no concede privilegios. La cobertura real está en:
+
+- `tests/proot/networking/test_unix_socket_scope.sh`
+- `tests/proot/networking/test_control_fd.sh`
+- `tests/proot/networking/test_accept_matrix.sh`
 
 En una red virtual, los sockets guest se implementan sobre `AF_UNIX`. En
 Android, `accept()` y `accept4()` conservan la dirección peer `AF_UNIX` real:
 la envoltura Bionic valida que la familia devuelta coincida con la familia del
 FD aceptado y rechaza una dirección `AF_INET` sintética con `EMSGSIZE`. Los
 resultados de `getsockname()` y `getpeername()` siguen usando la representación
-virtual de la familia guest.
+virtual de la familia guest. Los listeners publicados con `-p` conservan la misma
+semántica del peer `AF_UNIX` en Android.
 
 ## Resource Limits
 

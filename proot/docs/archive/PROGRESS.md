@@ -2,6 +2,11 @@
 
 Fecha: 2026-08-23
 
+> **Histórico, no normativo.** Este informe conserva el estado de una revisión
+> anterior. El test de control-fd fue reubicado en
+> `../tests/proot/networking/test_control_fd.sh`; los commits y resultados
+> actuales deben consultarse en la documentación operativa y el historial Git.
+
 ## Estado actual
 
 El trabajo está implementado parcialmente y tiene un commit dedicado:
@@ -51,7 +56,7 @@ Revisar `git diff` y conservar estos cambios:
 - `control-api/python/test_control_api.py`
   - `printf integration-ok` → `echo -n integration-ok`, porque el `/bin/sh`
     de este Termux no tiene `printf` builtin ni ejecutable resoluble.
-- `pentest/test_control_fd.sh`
+- `tests/proot/networking/test_control_fd.sh`
   - afirma que una aprobación PRCT no vence un bind `:ro`.
   - regla proactiva de lectura sobre `/control/file`.
   - el caso de reveal usa glob/builtins para no agotar forks.
@@ -89,7 +94,7 @@ Para referencias Termux usar:
 
 ```bash
 ./termux-isolated -- sh -c \
-  'cd /home/Develop/Patch/proot-termux && PROOT=/usr/bin/proot ./pentest/test_control_fd.sh'
+  'cd /home/Develop/Patch/proot-termux && PROOT=/usr/bin/proot bash proot/tests/proot/networking/test_control_fd.sh'
 ```
 
 Dentro de `termux-isolated`, el prefix guest es `/usr` y el binario real es
@@ -107,7 +112,7 @@ con `env = os.environ.copy()` y luego ajustar `PATH`.
 
 ## Fallo pendiente: REVEAL_SHADOW
 
-El caso relevante está en la segunda mitad de `pentest/test_control_fd.sh`,
+El caso relevante está en la segunda mitad de `tests/proot/networking/test_control_fd.sh`,
 función `run_reveal(scope, expected_visible)`:
 
 ```text
@@ -144,7 +149,7 @@ no exponer host paths.
       packages/proot/build.sh proot-source/src
    ```
 
-2. Corregir el entorno de `pentest/test_control_fd.sh` para preservar
+2. Corregir el entorno de `tests/proot/networking/test_control_fd.sh` para preservar
    `LD_LIBRARY_PATH` bajo `termux-isolated`.
 
 3. Ejecutar el pentest dentro de `./termux-isolated` usando `/usr/bin/proot`.

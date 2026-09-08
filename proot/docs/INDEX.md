@@ -15,19 +15,22 @@
 - [Contrato binario PRCT](../control-api/PROTOCOL.md)
 - [Ejemplo de configuración](../examples/proot-exec/proot-exec.conf.example)
 
-## Arquitectura y seguridad
+## Arquitectura, protocolo y seguridad
 
 - [Detalles de PRoot](architecture/proot-details.md)
-- [Arquitectura del sandbox](architecture/proot-sandbox-impl.md)
+- [Arquitectura vigente del sandbox](architecture/proot-sandbox-impl.md)
 - [Vista proc aislada](architecture/proc-leaks.md)
+- [Contrato binario PRCT](../control-api/PROTOCOL.md)
 - [Hardening y regresiones](security/FIXES.md)
 - [Reporte de vulnerabilidades](security/vulneration-report.md)
+- [Histórico de control-fd](archive/PROGRESS.md)
 
 ## Validación y mantenimiento
 
-- Los scripts de pruebas viven en `../tests/<tema>/`.
+- Los scripts de pruebas viven en `../tests/<tema>/`; la matriz de red está en
+  `../tests/proot/networking/`.
 - Los resultados persistentes viven en `../reports/`.
-- Los planes de trabajo viven en `../tasks/`.
+- Los planes de trabajo viven en `../tasks/` y no son contratos operativos.
 - Los artefactos generados viven en `../artifacts/` y no son código fuente.
-- Los documentos bajo [`archive/`](archive/) conservan referencias históricas;
-  sus rutas antiguas no describen el layout actual.
+- Los documentos bajo [`archive/`](archive/) son históricos y sus rutas antiguas
+  no describen el layout actual.

@@ -16,13 +16,20 @@ aarch64 build; implementations reject big-endian hosts. Every frame has this
 | 8 | u32 | payload size, at most 4096 |
 | 12 | u64 | request id |
 
-Payloads are packed C layouts. `NET_ACCESS_REQUEST` is 230 bytes. For
-BIND/CONNECT, family is AF_INET (2) or AF_INET6 (10); PUBLICATION uses family
-0; SOCKET uses the requested nonzero socket domain and carries zero
-address/ports:
+Payloads are packed C layouts. `NET_ACCESS_REQUEST` is 230 bytes:
 `u32 operation, i32 guest_pid, i32 host_pid, u16 family, u16 protocol,
 u16 guest_port, u16 host_port, u8 address[16], u8 virtual_class,
 u8 real_exposure, char proxy[64], char domain[128]`.
+
+For IP operations, family is AF_INET (2) or AF_INET6 (10). PUBLICATION uses
+family 0. AF_UNIX uses family 1: `address[0]` is the endpoint kind (`0`
+unnamed, `1` pathname, `2` abstract), `address[1]` is the exact byte length,
+and `domain[0:length]` carries the guest endpoint bytes. Abstract names are
+opaque bytes and may contain NUL; they are never parsed as C strings or guest
+paths. Unnamed endpoints have length zero. Host paths are never placed in the
+frame or returned in errors. SOCKET uses the requested nonzero socket domain
+and carries zero address and ports; authorizing SOCKET does not authorize a
+later BIND or CONNECT.
 `PATH_ACCESS_REQUEST` is 2056 bytes (`u32 operation, u32 reason,
 char path[1024], char other_path[1024]`). A `SHADOW_EVENT` has the same
 payload shape as a path request. Decision payloads are 98 bytes:

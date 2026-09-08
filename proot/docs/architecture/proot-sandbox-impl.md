@@ -1,90 +1,91 @@
-# Hermes sandbox integration proposal for proot-termux
+# Hermes sandbox integration for proot-termux
 
-## Purpose
+## Alcance
 
-Hermes uses this fork as a Termux sandbox with read-only host binds,
-`--proc-isolation`, and the virtual-network extension. The fork already gives
-Hermes the important primitive for a safe first network mode:
+Hermes usa este fork como backend Termux con binds de filesystem, aislamiento de
+procesos y red virtual opcional. Este documento describe la arquitectura
+implementada; no es una propuesta de una CLI futura.
 
-```text
-proot --proxy NAME ...
-```
+La frontera sigue siendo la de PRoot: reduce exposición y media operaciones,
+pero no equivale a una VM ni a un namespace completo del kernel. El consumidor
+debe probar el binario real, el kernel y los permisos Android de la plataforma.
 
-With `--proxy NAME`, guest TCP/UDP sockets are translated to abstract Unix
-sockets. Instances using the same name can communicate; different names are
-isolated. Without `-p`, no real TCP port is opened and the virtual network has
-no Internet path on Android ARM64. `-p HOST:GUEST` is different: it starts a
-real TCP bridge and is an explicit exposure to the host network.
+## Red virtual
 
-Hermes can therefore expose a session-level `direct` versus `proxy` choice
-today. Hermes cannot currently ask the harness for permission before an
-arbitrary guest process calls `bind(2)`: proot has no approval event channel in
-the bind path, and command-text inspection is not a reliable substitute for a
-syscall hook.
+`--proxy NAME` traduce sockets guest a endpoints Unix abstractos. Dos procesos
+con el mismo nombre comparten la red virtual; nombres distintos quedan
+separados. Sin `-p` no se abre un puerto TCP real. `-p HOST:GUEST` es una
+exposición explícita hacia la red host y se valida antes de iniciar el bridge.
 
-## Minimal upstream feature requested
+Sin proxy, el comportamiento de red es directo y compatible. No debe
+presentarse como aislamiento.
 
-Add an opt-in bind mediation mode, without coupling proot to Hermes or any UI.
-The smallest useful interface would be:
+## Política y control PRCT
 
-```text
---bind-policy=allow       # current behavior
---bind-policy=deny        # reject guest bind requests
---bind-policy=ask FD      # notify a controller and wait for a decision
-```
+La política estática usa `--net-policy`, `--net-allow`, `--net-deny`,
+`--net-allow-bind` y `--net-deny-bind`. Las reglas deny prevalecen. Para
+mediación dinámica, `--control-fd FD` instala el protocolo PRCT v1 sobre un
+socketpair Unix full-duplex. El canal es independiente del proxy: puede mediar
+filesystem sin red virtual; con proxy también recibe solicitudes de red.
 
-The exact CLI spelling may change, but the semantics should remain:
+El canal envía `HELLO` antes del guest y puede producir:
 
-1. Intercept guest `bind(2)` before registering the virtual socket or starting
-   a `-p` bridge.
-2. Send a structured request over a dedicated inherited Unix FD or the
-   existing `--supervise` control channel. Never use stdout/stderr for the
-   protocol.
-3. Include a request id, tracee PID, address family, guest address, guest port,
-   proxy name, and whether the request would expose a host port.
-4. Block that bind until the controller replies `allow` or `deny` for the
-   request id.
-5. Deny on timeout, malformed replies, closed controller, or supervisor exit.
-6. Apply the same gate to `-p` host bridges; a bridge must never be created
-   before approval.
-7. Cancel pending requests when the tracee exits and ensure registry/helper
-   cleanup is unchanged.
+- `PATH_ACCESS_REQUEST` para accesos externos al filesystem;
+- `NET_ACCESS_REQUEST` para sockets, bind, connect y publicación;
+- `SHADOW_EVENT` para cambios de shadows;
+- `COMMAND_RESULT` para comandos del controlador.
 
-This keeps policy in the harness: proot only mediates the syscall and carries
-the decision. It also works for Python, C, compiled servers, child processes,
-IPv4, and IPv6, unlike shell heuristics.
+El harness responde por `request_id`. Frames incompletos, inválidos, EOF,
+timeout o desincronización fallan cerrados y dejan el canal inutilizable hasta
+instalar explícitamente otro FD.
 
-## Controller expectations
+Los wildcards de red que Hermes añade en PRCT son sólo hand-off: permiten que
+un destino desconocido llegue al harness antes del bloqueo estático. No son
+aprobaciones y nunca sustituyen una respuesta `ALLOW`.
 
-The harness should present the request to the operator and return a decision
-with a bounded lifetime. The UI may later support one-shot approval,
-session-scoped approval, or a port/name allowlist, but those policies should
-remain outside proot. The protocol must identify virtual and real exposure so
-the UI can explain that a plain `--proxy` bind is visible only to peers in the
-same virtual network while `-p` reaches the host network.
+## Endpoints Unix
 
-## Useful follow-up features
+La política reconoce `AF_UNIX` pathname y abstract. El frame PRCT conserva el
+tipo, la longitud exacta y los bytes del nombre; los nombres abstractos no se
+tratan como strings ni como paths, y los paths host nunca se exponen. Las
+operaciones address-bearing soportadas incluyen `bind`, `connect`, `sendto`,
+`recvfrom` y las variantes `socketcall` disponibles en la arquitectura.
 
-These are lower priority than bind mediation:
+En modo directo o con `--net-policy off`, el comportamiento Unix conserva la
+compatibilidad del kernel. En modo proxy seguro, un endpoint Unix requiere un
+control fd válido y una decisión del harness; sin él se deniega. Los sockets
+anónimos y los endpoints internos del control plane no deben confundirse con
+autorización del guest. La especificación binaria está en
+[`control-api/PROTOCOL.md`](../../control-api/PROTOCOL.md).
 
-- expose virtual-network state and active registry entries for diagnostics;
-- expose bridge lifecycle and selected host ports to the controller;
-- complete `--fake-net` for interface/netlink discovery so `/proc`-adjacent
-  network information does not reveal the host topology;
-- normalize or mask Android cgroup identity where feasible;
-- return clean, documented errors for intercepted ptrace attempts;
-- provide supervisor events for tracee exit, bridge exit, and stale registry
-  cleanup.
+## Contrato de integración Hermes
 
-The existing ARM64 limitation must remain explicit: syscall argument
-rewriting cannot implement a transparent Internet escape from a virtual
-network. `--proxy` should continue to mean isolated virtual networking, not a
-best-effort Internet proxy.
+Hermes debe:
 
-## Hermes integration contract
+1. usar `--proxy NAME` sólo para el perfil de red seguro o una red virtual
+   solicitada explícitamente;
+2. mantener `direct` como compatibilidad y no como aislamiento;
+3. activar `--control-fd` sólo cuando el harness esté listo para responder;
+4. separar la política de filesystem de la política de red;
+5. reiniciar sesiones persistentes cuando cambie la tabla de binds;
+6. no añadir `-p` implícitamente.
 
-Hermes should pass `--proxy NAME` only when the user enables the sandbox
-network mode. It should derive an isolated name per task when none is supplied,
-restart persistent sessions atomically when the mode changes, and never add
-`-p` implicitly. Once bind mediation exists, Hermes can connect `--bind-policy`
-to its approval harness without changing the proot virtual-network model.
+La guía operativa de Hermes documenta `compat`/`restricted`, `direct`/`secure`
+y los límites de PRCT. Las regresiones viven en:
+
+- `tests/proot/networking/test_unix_socket_scope.sh`
+- `tests/proot/networking/test_control_fd.sh`
+- `tests/proot/networking/test_net_policy.sh`
+- `tests/proot/networking/test_accept_matrix.sh`
+
+## Trabajo futuro separado
+
+Las siguientes mejoras no forman parte del contrato actual y requieren diseño y
+pruebas independientes:
+
+- completar cobertura de interfaces Android específicas por kernel;
+- ampliar diagnósticos de bridges y registros de red virtual;
+- medir dependencias para sustituir gradualmente el bind raíz en un rootfs
+  mínimo;
+- añadir nuevas superficies de mediación sólo con cambios de protocolo y
+  pruebas reales.
