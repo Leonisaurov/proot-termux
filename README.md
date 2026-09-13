@@ -99,11 +99,14 @@ kill and pidfd access to the instance.
 
 When using `./proot/bin/termux-isolated --termux-paths`, paths such as
 `/data/data/com.termux/files/usr` are valid guest paths by design. With the
-default rootfs mode, paths should instead remain inside that rootfs (for
-example `/usr` or `/home`) and must not reveal Android host paths. Use
-`--no-proc-isolated` is an explicit opt-out: it restores the previous procfs
-behavior, including host procfs data, and is intended only for compatibility
-comparisons. `./proot/bin/termux-isolated` uses the strict view by default.
+default rootfs mode, guest paths remain rooted at locations such as `/usr` and
+`/home`; Termux, storage, and external paths are blocked, while permitted
+Android runtime paths such as `/system/etc/hosts` may remain available.
+This provides guest-root and proc-link isolation, not a complete Android
+filesystem namespace. `--no-proc-isolated` is an explicit opt-out: it restores
+the previous procfs behavior, including host procfs data, and is intended only
+for compatibility comparisons. `./proot/bin/termux-isolated` uses the strict
+view by default.
 
 Android internal storage is unavailable by default. The launcher masks
 `$HOME/storage`, `/storage/emulated/0`, `/storage/self/primary`, and `/sdcard`

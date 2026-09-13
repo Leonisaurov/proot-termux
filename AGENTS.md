@@ -236,7 +236,7 @@ El estado temporal de estas extensiones no usa una ruta Termux compilada:
 proot usa `PROOT_RUNTIME_DIR` y, si no existe, `TMPDIR`. El consumidor debe
 proporcionar un directorio válido; proot no inventa binds ni rutas de Termux.
 
-Red virtual con **Abstract Unix Domain Sockets** (sin TCP/IP real): `socket(AF_INET/AF_INET6)`→`AF_UNIX`, `bind/connect` traducidos a `@proot-vnet-{name}-{port}-{token}`; `getsockname/getpeername` emulan loopback (`127.0.0.1`/`::1`); `setsockopt(IPPROTO_TCP)` voided. Registry compartido para multi-instancia: `<PROOT_RUNTIME_DIR o TMPDIR>/proot-net/{name}/registry.lock` (flock; magic `0x50524F4E` = **"PRON"**; entradas 512 × 116 B, ~59 KB). `-p HOST:VIRTUAL` lanza helper (`--vnp-helper NAME`, `virtual_net_helper.c` 422 líneas) que abre TCP real y hace bridge TCP→Unix.
+Red virtual con **Abstract Unix Domain Sockets** (sin TCP/IP real): `socket(AF_INET/AF_INET6)`→`AF_UNIX`, `bind/connect` traducidos a `@proot-vnet-{name}-{port}-{token}`; `getsockname/getpeername` emulan loopback (`127.0.0.1`/`::1`); `setsockopt(IPPROTO_TCP)` voided. Registry compartido para multi-instancia: `<PROOT_RUNTIME_DIR o TMPDIR>/proot-net/{name}/registry.lock` (flock; magic `0x50524F4E` = **"PRON"**; entradas 512 × 116 B, ~59 KB). `-p HOST:VIRTUAL` lanza helper (`--vnp-helper NAME`, `virtual_net_helper.c` 422 líneas) que abre TCP real y hace bridge TCP→Unix. En Android, `accept()`/`accept4()` conservan el peer `AF_UNIX` real, también en listeners publicados; la familia virtual guest se sigue mostrando mediante `getsockname()`/`getpeername()`, y una dirección peer `AF_INET` sintética provoca `EMSGSIZE` en Bionic.
 
 | Escenario | Resultado |
 |-----------|-----------|
@@ -283,8 +283,10 @@ filtro de nombres:
   copian estadísticas ni topología del procfs host.
 - `maps`, `exe`, `cwd` y enlaces `/proc/*` se sanitizan y conservan la vista
   guest. En modo `--termux-paths`, las rutas Termux son guest válidas; con un
-  rootfs, se conservan sus rutas (`/usr`, `/home`) y se ocultan rutas Android
-  o externas al rootfs.
+  rootfs, se conservan sus rutas (`/usr`, `/home`), se bloquean rutas Termux,
+  de almacenamiento y externas, y pueden permanecer visibles rutas permitidas
+  del runtime Android, como `/system/etc/hosts`. Esto no equivale a un
+  namespace completo del filesystem Android.
 - `/proc/net`, `/proc/sys`, `/proc/kcore`, `/proc/keys`, `/proc/kmsg` y
   equivalentes sensibles no aparecen en el listado. PIDs que no pertenecen a
   la instancia devuelven `ENOENT`/`ESRCH` según la operación.
