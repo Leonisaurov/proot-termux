@@ -517,28 +517,61 @@ static void hpc_remove_synth_fd(Tracee *tracee, int fd)
 	}
 }
 
+/* Record the classification of @fd in the per-fd table.  The table is
+ * shared by synthesized files, maps descriptors and the NONMAPS read
+ * cache, so a synthesized/maps entry must never be squeezed out by
+ * negative read-classification entries: when the table is full, reclaim
+ * the first NONMAPS slot.  A new NONMAPS entry with no slot to reclaim
+ * is simply left uncached (reads fall back to a per-call readlink). */
+static void hpc_add_fd_kind(Tracee *tracee, int fd, int kind)
+{
+	int n;
+
+	if (hpc_proc_synth_slot(tracee, fd) >= 0)
+		return;
+
+	if (tracee->proc_synth_count < MAX_PROC_SYNTH_FDS) {
+		n = tracee->proc_synth_count++;
+		tracee->proc_synth_fds[n] = fd;
+		tracee->proc_synth_kinds[n] = (unsigned char)kind;
+		tracee->proc_synth_offsets[n] = 0;
+		return;
+	}
+
+	if (kind == PROC_SYNTH_NONMAPS)
+		return;
+
+	for (n = 0; n < tracee->proc_synth_count; n++) {
+		if (tracee->proc_synth_kinds[n] == PROC_SYNTH_NONMAPS) {
+			tracee->proc_synth_fds[n] = fd;
+			tracee->proc_synth_kinds[n] = (unsigned char)kind;
+			tracee->proc_synth_offsets[n] = 0;
+			return;
+		}
+	}
+}
+
 static void hpc_copy_synth_fd(Tracee *tracee, int oldfd, int newfd)
 {
 	unsigned char kind;
 	size_t offset;
+	int oldslot;
+	int newslot;
+
 	if (oldfd == newfd) return;
-	int oldslot = hpc_proc_synth_slot(tracee, oldfd);
-	int newslot = hpc_proc_synth_slot(tracee, newfd);
-	if (oldslot < 0 || tracee->proc_synth_count >= MAX_PROC_SYNTH_FDS)
+	oldslot = hpc_proc_synth_slot(tracee, oldfd);
+	if (oldslot < 0)
 		return;
+	/* Save the source metadata before removal: dropping the target slot
+	 * can compact the array and move the source slot. */
 	kind = tracee->proc_synth_kinds[oldslot];
 	offset = tracee->proc_synth_offsets[oldslot];
-	if (newslot >= 0) {
-		/* Save the source metadata before removal: compacting the array can
-		 * move the source slot when newfd precedes oldfd. */
-		hpc_remove_synth_fd(tracee, newfd);
-	}
-	if (tracee->proc_synth_count >= MAX_PROC_SYNTH_FDS)
-		return;
-	newslot = tracee->proc_synth_count++;
-	tracee->proc_synth_fds[newslot] = newfd;
-	tracee->proc_synth_kinds[newslot] = kind;
-	tracee->proc_synth_offsets[newslot] = offset;
+	hpc_remove_synth_fd(tracee, newfd);
+
+	hpc_add_fd_kind(tracee, newfd, kind);
+	newslot = hpc_proc_synth_slot(tracee, newfd);
+	if (newslot >= 0)
+		tracee->proc_synth_offsets[newslot] = offset;
 }
 
 static void hpc_track_synth_open(Tracee *tracee)
@@ -561,12 +594,7 @@ static void hpc_track_synth_open(Tracee *tracee)
 	hpc_remove_synth_fd(tracee, fd);
 	if (kind == PROC_SYNTH_NONE)
 		return;
-	if (tracee->proc_synth_count < MAX_PROC_SYNTH_FDS) {
-		int n = tracee->proc_synth_count++;
-		tracee->proc_synth_fds[n] = fd;
-		tracee->proc_synth_kinds[n] = (unsigned char)kind;
-		tracee->proc_synth_offsets[n] = 0;
-	}
+	hpc_add_fd_kind(tracee, fd, kind);
 }
 
 /* Classify a descriptor used by read(2)/pread64(2) exactly once and cache
@@ -592,12 +620,7 @@ static int hpc_classify_read_fd(Tracee *tracee, int fd)
 			kind = PROC_SYNTH_MAPS;
 	}
 
-	if (tracee->proc_synth_count < MAX_PROC_SYNTH_FDS) {
-		int n = tracee->proc_synth_count++;
-		tracee->proc_synth_fds[n] = fd;
-		tracee->proc_synth_kinds[n] = (unsigned char)kind;
-		tracee->proc_synth_offsets[n] = 0;
-	}
+	hpc_add_fd_kind(tracee, fd, kind);
 
 	return kind;
 }

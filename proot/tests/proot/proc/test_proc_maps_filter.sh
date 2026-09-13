@@ -82,6 +82,19 @@ if "Name:\tproot-guest" not in status or "TracerPid:\t0" not in status:
     print("LEAK: synthetic status missing")
     sys.exit(1)
 
+# The per-fd classification table is shared with synthesized files: filling
+# it with NONMAPS entries (>32 distinct read fds) must not squeeze out a
+# later synthesized descriptor.
+fds = [os.open("/dev/null", os.O_RDONLY) for _ in range(40)]
+for f in fds:
+    os.read(f, 1)
+filled = read_maps("/proc/self/status")
+for f in fds:
+    os.close(f)
+if "Name:\tproot-guest" not in filled:
+    print("REGRESSION: synth file lost after classification table fill")
+    sys.exit(1)
+
 # Host pid maps stay unreachable.
 try:
     os.stat("/proc/1/maps")
