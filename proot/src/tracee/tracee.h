@@ -271,7 +271,6 @@ typedef struct tracee {
 	 * calls on it can have AT_EXECFN patched (fallback for kernels < 6.4
 	 * that don't support prctl(PR_GET_AUXV)). -1 when not active. */
 	int auxv_fd;
-	int maps_fd;
 	/* FDs for procfs files whose global contents are synthesized by the
 	 * proc isolation extension.  The offset is maintained independently
 	 * because the underlying host procfs fd must never be exposed. */

@@ -433,8 +433,9 @@ enum {
 	PROC_SYNTH_MOUNTINFO,
 	/* Per-fd read classification cache.  High values keep them clear of
 	 * the synthesized kinds above (and of PROC_SYNTH_NONE == 0). */
-	PROC_SYNTH_MAPS = 0xf0,
-	PROC_SYNTH_NONMAPS = 0xf1,
+	PROC_SYNTH_MAPS_SELF = 0xf0,
+	PROC_SYNTH_MAPS_OTHER = 0xf1,
+	PROC_SYNTH_NONMAPS = 0xf2,
 };
 
 static int hpc_proc_synth_kind(const char *path)
@@ -597,7 +598,23 @@ static void hpc_track_synth_open(Tracee *tracee)
 	hpc_add_fd_kind(tracee, fd, kind);
 }
 
-/* Classify a descriptor used by read(2)/pread64(2) exactly once and cache
+/* True when @proc_path is the current tracee's own maps view (including a
+ * thread's /proc/<pid>/task/<tid>/maps), as opposed to another tracee's. */
+static bool hpc_maps_is_self(const Tracee *tracee, const char *proc_path)
+{
+	char self_maps_path[PATH_MAX];
+
+	snprintf(self_maps_path, sizeof(self_maps_path), "/proc/%d/maps",
+		 (int)tracee->pid);
+	return strcmp(proc_path, "/proc/self/maps") == 0 ||
+	       strcmp(proc_path, self_maps_path) == 0 ||
+	       (strncmp(proc_path, self_maps_path,
+			 strlen(self_maps_path) - strlen("maps")) == 0 &&
+		strstr(proc_path, "/task/") != NULL &&
+		strstr(proc_path, "/maps") != NULL);
+}
+
+/* Classify a descriptor used by read/pread64/readv exactly once and cache
  * the result in the same per-fd table as the synthesized files.  This
  * removes the readlink(2) (and the second ptrace stop) that used to run for
  * *every* read: only descriptors known to be a maps file or a synthesized
@@ -617,7 +634,9 @@ static int hpc_classify_read_fd(Tracee *tracee, int fd)
 		len = strlen(path);
 		if (strncmp(path, "/proc/", 6) == 0 && len >= 5 &&
 		    strcmp(path + len - 5, "/maps") == 0)
-			kind = PROC_SYNTH_MAPS;
+			kind = hpc_maps_is_self(tracee, path)
+				? PROC_SYNTH_MAPS_SELF
+				: PROC_SYNTH_MAPS_OTHER;
 	}
 
 	hpc_add_fd_kind(tracee, fd, kind);
@@ -1399,32 +1418,24 @@ static void hpc_sanitize_maps_metadata(char *line, size_t len)
  * loader.  The tracee sees a maps indistinguishable from a native
  * process of the guest rootfs.
  *
- * E7: lazy maps_fd detection — if maps_fd was never registered by
- * the open handler (non-canonical path, openat with relative path,
- * etc.), detect it here by checking if the fd points to a maps file.
- */
-static int hpc_handle_maps_read_exit(Tracee *tracee)
+ * @known_self is 1/0 when the descriptor was already classified by
+ * hpc_classify_read_fd(), or -1 for the cache-full fallback where the
+ * descriptor must still be checked here (so a maps file is never let
+ * through unfiltered). */
+static int hpc_handle_maps_read_exit(Tracee *tracee, int known_self)
 {
     int fd = (int) peek_reg(tracee, ORIGINAL, SYSARG_1);
     char proc_path[PATH_MAX];
-    char self_maps_path[PATH_MAX];
     bool self_maps;
-    int status;
 
-    /* E7: lazy detection — if maps_fd not yet registered, check if
-     * this fd points to a maps file and register it. */
-    status = readlink_proc_pid_fd(tracee->pid, fd, proc_path);
-    if (status < 0 || strstr(proc_path, "/maps") == NULL)
-        return 0;
-    tracee->maps_fd = fd;
-    snprintf(self_maps_path, sizeof(self_maps_path), "/proc/%d/maps",
-             (int)tracee->pid);
-    self_maps = strcmp(proc_path, "/proc/self/maps") == 0 ||
-                strcmp(proc_path, self_maps_path) == 0 ||
-                (strncmp(proc_path, self_maps_path,
-                         strlen(self_maps_path) - strlen("maps")) == 0 &&
-                 strstr(proc_path, "/task/") != NULL &&
-                 strstr(proc_path, "/maps") != NULL);
+    if (known_self < 0) {
+        if (readlink_proc_pid_fd(tracee->pid, fd, proc_path) < 0 ||
+            strstr(proc_path, "/maps") == NULL)
+            return 0;
+        self_maps = hpc_maps_is_self(tracee, proc_path);
+    } else {
+        self_maps = known_self != 0;
+    }
 
     {
         word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
@@ -1611,10 +1622,11 @@ static int hpc_handle_maps_read_exit(Tracee *tracee)
 static int hpc_block_maps_vector_enter(Tracee *tracee)
 {
 	int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
+	int kind = hpc_classify_read_fd(tracee, fd);
 	/* Reuse the same per-fd classification as read/pread64: only a maps
 	 * descriptor needs to be voided, and non-maps descriptors avoid the
 	 * readlink(2) entirely. */
-	if (hpc_classify_read_fd(tracee, fd) != PROC_SYNTH_MAPS)
+	if (kind != PROC_SYNTH_MAPS_SELF && kind != PROC_SYNTH_MAPS_OTHER)
 		return 0;
 	set_sysnum(tracee, PR_void);
 	poke_reg(tracee, SYSARG_RESULT, 0);
@@ -2010,13 +2022,15 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
                 unsigned char kind = tracee->proc_synth_kinds[slot];
                 if (kind == PROC_SYNTH_NONMAPS)
                     return 0;
-                if (kind == PROC_SYNTH_MAPS)
-                    return hpc_handle_maps_read_exit(tracee);
+                if (kind == PROC_SYNTH_MAPS_SELF)
+                    return hpc_handle_maps_read_exit(tracee, 1);
+                if (kind == PROC_SYNTH_MAPS_OTHER)
+                    return hpc_handle_maps_read_exit(tracee, 0);
                 return hpc_handle_synth_read_exit(tracee);
             }
             /* Unclassified fd (cache full): the ENTER classifier requested
              * the EXIT only for maps candidates, so keep failing closed. */
-            return hpc_handle_maps_read_exit(tracee);
+            return hpc_handle_maps_read_exit(tracee, -1);
         }
         case PR_statx:
             /* exit.c's handle_statx_syscall() re-runs a host stat() when

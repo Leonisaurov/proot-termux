@@ -527,18 +527,11 @@ void translate_syscall_exit(Tracee *tracee)
 	case PR_openat2:
 	case PR_openat:
 	case PR_open: {
-		/* Track opens of the guest's proc maps file so read() results
-		 * can be filtered/patched.  The maps tracking must run
-		 * unconditionally, BEFORE the execfn early return below:
-		 * execfn_addr is only set after a successful execve, but the
-		 * initial shell may open its maps file before that, which
-		 * left maps_fd unregistered (and the filter silent).
-		 *
-		 * NOTE: the path is read from the ORIGINAL register, so it
-		 * may be the untranslated "/proc/self/maps" OR the translated
-		 * "/proc/<pid>/maps" depending on when the extension ran;
-		 * accept both.  The buffer must be big enough for "/proc/" +
-		 * pid + "/maps" (up to 19 bytes). */
+		/* Track the guest's /proc/<pid>/auxv descriptor so a later
+		 * read() can patch AT_EXECFN.  NOTE: the path is read from the
+		 * ORIGINAL register, so it may be the untranslated
+		 * "/proc/self/auxv" OR the translated "/proc/<pid>/auxv".  The
+		 * buffer must be big enough for "/proc/" + pid + "/auxv". */
 		char path_buf[64];
 		Reg path_reg = (syscall_number == PR_open) ? SYSARG_1 : SYSARG_2;
 
@@ -548,19 +541,6 @@ void translate_syscall_exit(Tracee *tracee)
 		                peek_reg(tracee, ORIGINAL, path_reg),
 		                sizeof(path_buf)) <= 0)
 			goto end;
-		/* Track opens of the guest's proc maps file so read() results
-		 * can be filtered/patched.  Accept both the original path
-		 * ("/proc/self/maps") and the translated one
-		 * ("/proc/<pid>/maps"). */
-		{
-			char expected_pid[32];
-			int elen = snprintf(expected_pid, sizeof(expected_pid),
-			                    "/proc/%d/maps", tracee->pid);
-			if (strcmp(path_buf, "/proc/self/maps") == 0
-			    || (elen > 0 && (size_t) elen < sizeof(expected_pid)
-			        && strcmp(path_buf, expected_pid) == 0))
-				tracee->maps_fd = (int) syscall_result;
-		}
 		if (tracee->execfn_addr == 0)
 			goto end;
 		/* Track opens of the guest's auxv file so read() results can

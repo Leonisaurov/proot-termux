@@ -279,7 +279,6 @@ Tracee *new_dummy_tracee(TALLOC_CTX *context)
 	tracee->fs = talloc_zero(tracee, FileSystemNameSpace);
 	tracee->heap = talloc_zero(tracee, Heap);
 	tracee->auxv_fd = -1;
-	tracee->maps_fd = -1;
 	tracee->proc_synth_count = 0;
 	tracee->proc_synth_pending_kind = 0;
 	tracee->supervise = false;
@@ -556,7 +555,6 @@ int new_child(Tracee *parent, word_t clone_flags)
 	child->voided_syscall_cancelled = parent->voided_syscall_cancelled;
 	child->execfn_addr = parent->execfn_addr;
 	child->auxv_fd = parent->auxv_fd;
-	child->maps_fd = parent->maps_fd;
 	child->proc_synth_count = parent->proc_synth_count;
 	memcpy(child->proc_synth_fds, parent->proc_synth_fds,
 	       sizeof(child->proc_synth_fds));

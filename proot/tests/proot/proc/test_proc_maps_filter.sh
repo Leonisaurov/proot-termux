@@ -25,7 +25,9 @@ trap cleanup EXIT
 
 cat > "$FIXTURE" <<'PY'
 import os
+import subprocess
 import sys
+import time
 
 
 def read_maps(path, mode="read"):
@@ -94,6 +96,15 @@ for f in fds:
 if "Name:\tproot-guest" not in filled:
     print("REGRESSION: synth file lost after classification table fill")
     sys.exit(1)
+
+# Another guest tracee's maps (classified MAPS_OTHER) is still filtered.
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)"])
+time.sleep(0.4)
+try:
+    assert_filtered(read_maps("/proc/%d/maps" % child.pid), "other-tracee")
+finally:
+    child.terminate()
+    child.wait()
 
 # Host pid maps stay unreachable.
 try:
