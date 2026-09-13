@@ -82,6 +82,31 @@ Estos tiempos incluyen crear las instancias de proot, sus binds y la shell del
 guest. No son una medición de throughput ni de latencia de una aplicación
 persistente.
 
+## Lecturas bajo `--proc-isolated`
+
+Bajo `--proc-isolated`, `read(2)`/`pread64(2)` y `readv(2)`/`preadv(2)` deben
+tramitarse para poder filtrar `/proc/<pid>/maps`. El coste medido en un bucle
+de un solo fd (Termux/aarch64) era:
+
+| Bucle | Antes | Después (REV 98-99) | Mejora |
+|---|---:|---:|---:|
+| 150k `pread` | ~27-30 s | ~11.5-12.3 s | ~2.3x |
+| 100k `preadv` | ~12 s | ~8 s | ~1.5x |
+
+La mejora proviene de clasificar cada descriptor una sola vez (tabla por fd
+compartida con los fds sintetizados) y pedir la parada de salida únicamente
+para fds `maps`/synth, en lugar de hacer un `readlink(2)` y dos paradas ptrace
+por cada lectura. El filtrado se verifica con
+[`test_proc_maps_filter.sh`](../../tests/proot/proc/test_proc_maps_filter.sh)
+(read, pread, preadv, dup, reuso de fd, saturación de tabla, maps de otro
+tracee, `status` sintético, PID host).
+
+Reproducción: compilar un bucle de `pread`/`preadv` sobre un fd normal y
+medirlo bajo proot con y sin `--proc-isolated`. El coste restante son las
+paradas `ptrace`/`wait4` inherentes y, en la ruta por defecto sin flags, el
+`lstat` por componente de `canonicalize()` (ítem D7, diferido por riesgo de
+coherencia).
+
 ## Política de red
 
 La medición específica de `net_policy`, con `off`, `allow` y `deny`, está en
