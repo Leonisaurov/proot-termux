@@ -323,6 +323,8 @@ static bool hpc_sensitive_android_prefix(const char *path)
 	static const char *const prefixes[] = {
 		"/system/", "/vendor/", "/apex/", "/dev/block/", NULL
 	};
+	if (path == NULL)
+		return false;
 	for (int i = 0; prefixes[i] != NULL; i++)
 		if (strncmp(path, prefixes[i], strlen(prefixes[i])) == 0)
 			return true;
