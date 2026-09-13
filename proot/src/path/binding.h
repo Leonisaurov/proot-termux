@@ -79,5 +79,8 @@ extern const char *get_root(const Tracee* tracee);
 extern int substitute_binding(const Tracee* tracee, Side side, char path[PATH_MAX]);
 extern void remove_binding_from_all_lists(const Tracee *tracee, Binding *binding);
 extern int check_binding_access(const Tracee *tracee, const char guest_path[PATH_MAX], bool is_write);
+/* Like check_binding_access() but reuses an already resolved binding, so
+ * hot path translation does not pay a second get_binding() scan. */
+extern int check_binding_mode(const Binding *binding, bool is_write);
 
 #endif /* BINDING_H */

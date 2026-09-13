@@ -522,7 +522,9 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 		    binding->access_mode == BINDING_ACCESS_MASK)
 			status = 0;
 		else
-			status = check_binding_access(tracee, requested_guest_path, is_write);
+			/* Reuse the binding resolved above instead of a
+			 * second get_binding() scan on the same path. */
+			status = check_binding_mode(binding, is_write);
 		if (status < 0) {
 			if (requires_control)
 				return status;

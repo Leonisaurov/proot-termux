@@ -1107,14 +1107,8 @@ int initialize_bindings(Tracee *tracee)
  * Returns 0 if allowed, -EROFS if writing to a RO binding,
  * -EACCES if reading from a WO binding.
  */
-int check_binding_access(const Tracee *tracee, const char guest_path[PATH_MAX], bool is_write)
+int check_binding_mode(const Binding *binding, bool is_write)
 {
-	const Binding *binding;
-
-	if (guest_path == NULL || guest_path[0] != '/')
-		return 0;
-
-	binding = get_binding(tracee, GUEST, guest_path);
 	if (binding == NULL)
 		return 0;
 
@@ -1128,4 +1122,12 @@ int check_binding_access(const Tracee *tracee, const char guest_path[PATH_MAX], 
 		return -EACCES;
 
 	return 0;
+}
+
+int check_binding_access(const Tracee *tracee, const char guest_path[PATH_MAX], bool is_write)
+{
+	if (guest_path == NULL || guest_path[0] != '/')
+		return 0;
+
+	return check_binding_mode(get_binding(tracee, GUEST, guest_path), is_write);
 }
