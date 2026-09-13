@@ -28,11 +28,15 @@ import os
 import sys
 
 
-def read_maps(path, pread=False):
+def read_maps(path, mode="read"):
     fd = os.open(path, os.O_RDONLY)
     try:
-        if pread:
+        if mode == "pread":
             return os.pread(fd, 1 << 20, 0).decode(errors="replace")
+        if mode == "preadv":
+            buf = bytearray(1 << 20)
+            n = os.preadv(fd, [buf], 0)
+            return buf[:n].decode(errors="replace")
         return os.read(fd, 1 << 20).decode(errors="replace")
     finally:
         os.close(fd)
@@ -45,7 +49,8 @@ def assert_filtered(data, label):
 
 
 assert_filtered(read_maps("/proc/self/maps"), "read")
-assert_filtered(read_maps("/proc/self/maps", pread=True), "pread")
+assert_filtered(read_maps("/proc/self/maps", mode="pread"), "pread")
+assert_filtered(read_maps("/proc/self/maps", mode="preadv"), "preadv")
 
 # fd-number reuse: a non-maps descriptor is classified NONMAPS, then closed
 # and reopened as maps.  A stale cache entry would leak the loader paths.

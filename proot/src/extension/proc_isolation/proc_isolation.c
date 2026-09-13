@@ -1587,10 +1587,11 @@ static int hpc_handle_maps_read_exit(Tracee *tracee)
 
 static int hpc_block_maps_vector_enter(Tracee *tracee)
 {
-	char proc_path[PATH_MAX];
 	int fd = (int)peek_reg(tracee, CURRENT, SYSARG_1);
-	if (readlink_proc_pid_fd(tracee->pid, fd, proc_path) < 0 ||
-	    strstr(proc_path, "/maps") == NULL)
+	/* Reuse the same per-fd classification as read/pread64: only a maps
+	 * descriptor needs to be voided, and non-maps descriptors avoid the
+	 * readlink(2) entirely. */
+	if (hpc_classify_read_fd(tracee, fd) != PROC_SYNTH_MAPS)
 		return 0;
 	set_sysnum(tracee, PR_void);
 	poke_reg(tracee, SYSARG_RESULT, 0);
