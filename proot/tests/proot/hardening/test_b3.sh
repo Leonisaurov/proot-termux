@@ -9,6 +9,10 @@ mkdir -p "$TMPDIR"
 test -d "$TMPDIR" && test -w "$TMPDIR" || exit 1
 
 ROOTFS="/data/data/com.termux/files/usr/var/lib/proot-distro/containers/alpine/rootfs"
+if [ ! -d "$ROOTFS" ]; then
+  echo "SKIP: guest rootfs not present at $ROOTFS (install it with proot-distro)"
+  exit 0
+fi
 PROOT="/data/data/com.termux/files/usr/bin/proot"
 PROOT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 RESULTS="${RESULTS:-$PROOT_ROOT/reports/pentest}"

@@ -1498,8 +1498,10 @@ static int control_apply_command(NetPolicyConfig *config, uint16_t type,
 		if (i >= 128)
 			return -ENOSPC;
 		strncpy(config->path_rules[i].path, command->path, CONTROL_PATH_LEN - 1);
+		config->path_rules[i].path[CONTROL_PATH_LEN - 1] = '\0';
 		strncpy(config->path_rules[i].other_path, command->other_path,
 			CONTROL_PATH_LEN - 1);
+		config->path_rules[i].other_path[CONTROL_PATH_LEN - 1] = '\0';
 		config->path_rules[i].operation = command->operation;
 		config->path_rules[i].decision = type == CONTROL_SET_RULE
 			? command->decision

@@ -5,7 +5,7 @@ import shutil
 import time
 import unittest
 
-from control_api import PathRequest
+from control_api import NetRequest, PathRequest
 from control_api.pty_launcher import PtyProotProcess
 from control_api.proot_tui.presets import build_config, default_config
 
@@ -51,6 +51,11 @@ class TmpdirControlIntegrationTests(unittest.TestCase):
                     if isinstance(event, PathRequest):
                         requests.append(event)
                         process.control_channel.deny_once(event.request_id)
+                    elif isinstance(event, NetRequest):
+                        # PRCT now mediates AF_UNIX too (for example the
+                        # guest runtime's /dev/socket/logdw connection), so
+                        # every request must be answered or the guest blocks.
+                        process.control_channel.allow_once(event.request_id)
                 if process.returncode is not None:
                     break
             self.assertNotEqual(process.returncode, 0, output.decode(errors="replace"))
@@ -89,6 +94,10 @@ class TmpdirBindIntegrationTests(unittest.TestCase):
                         break
                     if isinstance(event, PathRequest):
                         requests.append(event)
+                        process.control_channel.allow_once(event.request_id)
+                    elif isinstance(event, NetRequest):
+                        # Answer mediated AF_UNIX requests (bionic logd) so the
+                        # guest can reach the TMPDIR write under test.
                         process.control_channel.allow_once(event.request_id)
             self.assertEqual(process.returncode, 0)
             tmpdir = os.environ.get("TMPDIR", "/data/data/com.termux/files/usr/tmp")

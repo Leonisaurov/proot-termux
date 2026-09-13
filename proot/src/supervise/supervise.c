@@ -863,7 +863,6 @@ int exec_connect(const Tracee *tracee, int argc, char *const argv[])
 
 	if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
 		close(fd);
-		fd = -1;
 		goto try_log;
 	}
 

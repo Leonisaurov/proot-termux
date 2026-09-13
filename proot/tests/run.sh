@@ -8,12 +8,27 @@ test -d "$TMPDIR" && test -w "$TMPDIR"
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
+# Keep running the whole battery: report every failure instead of aborting on
+# the first one (set -e would otherwise hide the remaining tests).
+FAILED_TESTS=()
+
+run_step() {
+    local label=$1
+    shift
+    local rc=0
+    echo "=== ${label} ==="
+    "$@" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "!!! FAILED (exit ${rc}): ${label}" >&2
+        FAILED_TESTS+=("$label")
+    fi
+}
+
 run_dir() {
     local dir=$1
     local test
     while IFS= read -r test; do
-        echo "=== $test ==="
-        bash "$test"
+        run_step "$test" bash "$test"
     done < <(find "$ROOT/tests/$dir" -type f -name 'test_*.sh' -print | sort)
 }
 
@@ -22,14 +37,17 @@ run_control_api() {
     for tool in python3 cargo bun; do
         command -v "$tool" >/dev/null || {
             echo "ERROR: control-api tests require $tool" >&2
-            return 1
+            FAILED_TESTS+=("control-api (missing $tool)")
+            return 0
         }
     done
-    PYTHONPATH="$ROOT/control-api/python${PYTHONPATH:+:$PYTHONPATH}" \
+    run_step "control-api/python" env \
+        PYTHONPATH="$ROOT/control-api/python${PYTHONPATH:+:$PYTHONPATH}" \
         python3 -m unittest discover -s "$ROOT/tests/control-api/python" -v
-    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/control-api/rust/target}" \
+    run_step "control-api/rust" env \
+        CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/control-api/rust/target}" \
         cargo test --offline --manifest-path "$ROOT/control-api/rust/Cargo.toml"
-    bun test "$ROOT/control-api/bun/control_api.test.ts"
+    run_step "control-api/bun" bun test "$ROOT/control-api/bun/control_api.test.ts"
 }
 
 case "${1:-all}" in
@@ -48,3 +66,10 @@ case "${1:-all}" in
         exit 2
         ;;
 esac
+
+if [ "${#FAILED_TESTS[@]}" -ne 0 ]; then
+    echo "" >&2
+    echo "=== FAILURES (${#FAILED_TESTS[@]}) ===" >&2
+    printf '  - %s\n' "${FAILED_TESTS[@]}" >&2
+    exit 1
+fi

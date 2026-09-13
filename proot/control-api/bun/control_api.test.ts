@@ -16,8 +16,8 @@ test("launcher close kills and reaps a peer ignoring TERM",async()=>{
  expect(p.process.signalCode).toBe("SIGKILL");
  expect(p.channel.state).toBe("closed");
 });
-test("accepts SOCKET and PUBLICATION families", async()=>{
- for(const [op,family] of [[5,1],[5,16],[3,0],[2,10]]){
+test("accepts SOCKET, PUBLICATION and AF_UNIX families", async()=>{
+ for(const [op,family] of [[5,1],[5,16],[3,0],[2,10],[2,1],[1,1]]){
   const io=new PassThrough(); const c=ControlChannel.fromStream(io,100);
   try {const p=Buffer.alloc(230);p.writeUInt32LE(op,0);p.writeUInt16LE(family,12);
    io.write(Buffer.concat([hello(),frame(Message.NET_ACCESS_REQUEST,1n,p)]));

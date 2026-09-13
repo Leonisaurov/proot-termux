@@ -69,6 +69,7 @@ class NeovimIntegrationTests(unittest.TestCase):
         config = default_config(command=("python3", "-c", code))
         process = PtyProotProcess.spawn(build_config(config))
         socket_events = 0
+        bind_events = 0
         output = bytearray()
         try:
             deadline = time.monotonic() + 8
@@ -90,14 +91,23 @@ class NeovimIntegrationTests(unittest.TestCase):
                             pass
                         break
                     if isinstance(event, NetRequest) and event.operation == 5:
-                        socket_events += 1
+                        # SOCKET carries the requested socket domain.  The guest
+                        # runtime may create more than one (for example bionic
+                        # connects to /dev/socket/logdw at startup), so only the
+                        # AF_UNIX family is asserted here.
                         self.assertEqual(event.family, 1)
+                        socket_events += 1
+                    if (isinstance(event, NetRequest) and event.operation == 1
+                            and "prct-unix-bind-test" in event.domain):
+                        self.assertEqual(event.family, 1)
+                        bind_events += 1
                     if isinstance(event, (PathRequest, NetRequest)):
                         process.control_channel.allow_once(event.request_id)
                 if process.returncode is not None:
                     break
             self.assertEqual(process.returncode, 0, output.decode(errors="replace"))
-            self.assertEqual(socket_events, 1)
+            self.assertGreaterEqual(socket_events, 1)
+            self.assertGreaterEqual(bind_events, 1)
         finally:
             process.close()
             try:

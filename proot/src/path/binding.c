@@ -791,7 +791,6 @@ Binding *new_binding(Tracee *tracee, const char *host, const char *guest, bool m
 			goto error;
 		}
 		strcpy(binding->host.path, host);
-		status = 0;
 	} else {
 		status = realpath2(tracee->reconf.tracee, binding->host.path, host, true);
 		if (status < 0) {

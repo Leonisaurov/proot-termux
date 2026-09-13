@@ -538,7 +538,6 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 				if (dynamic < 0)
 					return status;
 			}
-			status = 0;
 		}
 	}
 

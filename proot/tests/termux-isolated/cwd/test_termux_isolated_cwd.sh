@@ -11,6 +11,11 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 TERMUX_ISOLATED="${TERMUX_ISOLATED:-$REPO_ROOT/bin/termux-isolated}"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+# The Termux root that termux-isolated maps to the guest "/": $PREFIX is
+# /usr and $HOME is /home inside the rootfs.  Derive the expected guest
+# path from the actual fixture location instead of assuming TMPDIR lives
+# under $PREFIX (it may legitimately be $HOME/tmp).
+TERMUX_ROOT="${TERMUX_ROOT:-/data/data/com.termux/files}"
 FIXTURE="$TMPDIR/termux-isolated-cwd-$$"
 
 if [[ ! -x "$TERMUX_ISOLATED" ]]; then
@@ -22,17 +27,22 @@ mkdir -p "$FIXTURE"
 cleanup() { rmdir "$FIXTURE" 2>/dev/null || true; }
 trap cleanup EXIT
 
-expected_rootfs="/usr/tmp/$(basename "$FIXTURE")"
+case "$FIXTURE" in
+    "$TERMUX_ROOT"/*) expected_rootfs="/${FIXTURE#"$TERMUX_ROOT"/}" ;;
+    *) expected_rootfs="$FIXTURE" ;;
+esac
 output=$("$TERMUX_ISOLATED" --cwd "$FIXTURE" -- sh -c 'pwd')
 test "$output" = "$expected_rootfs"
 echo "PASS: rootfs translates host --cwd to $expected_rootfs"
 
-expected_termux="$PREFIX/tmp/$(basename "$FIXTURE")"
+# In --termux-paths mode host and guest spellings are identical, so the
+# fixture's real location is the expected guest path.
+expected_termux="$FIXTURE"
 output=$("$TERMUX_ISOLATED" --termux-paths --cwd "$expected_termux" -- sh -c 'pwd')
 test "$output" = "$expected_termux"
 echo "PASS: termux-paths preserves guest --cwd"
 
-python3 - "$TERMUX_ISOLATED" "$FIXTURE" <<'PY'
+python3 - "$TERMUX_ISOLATED" "$FIXTURE" "$expected_rootfs" <<'PY'
 import os
 import fcntl
 import pty
@@ -42,7 +52,7 @@ import sys
 import termios
 import time
 
-wrapper, host_cwd = sys.argv[1:]
+wrapper, host_cwd, expected_guest = sys.argv[1:]
 master, slave = pty.openpty()
 
 
@@ -93,7 +103,7 @@ try:
 finally:
     os.close(master)
 
-expected = "/usr/tmp/" + os.path.basename(host_cwd)
+expected = expected_guest
 assert expected.encode() in output, output.decode(errors="replace")
 print("PASS: interactive shell honors explicit --cwd")
 PY

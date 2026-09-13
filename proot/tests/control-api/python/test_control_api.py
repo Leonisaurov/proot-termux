@@ -17,6 +17,14 @@ class TestControlAPI(unittest.TestCase):
    p=struct.pack('<IiiHHHH16sBB64s128s',2,7,8,2,6,443,0,b'\x7f\0\0\1'+b'\0'*12,0,0,b'p\0'.ljust(64,b'\0'),b'\0'*128)
    raw=HEADER.pack(MAGIC,1,2,len(p),9)+p
    b.sendall(raw[:3]); b.sendall(raw[3:]); r=c.receive(); self.assertEqual((r.request_id,r.proxy),(9,'p'))
+ def test_af_unix_family_accepted(self):
+  with self.channel_pair() as (c,b):
+   b.sendall(self.hello())
+   address=bytes([2,5])+b'\0'*14
+   p=struct.pack('<IiiHHHH16sBB64s128s',2,7,8,1,0,0,0,address,0,0,b'\0'*64,b'@name'+b'\0'*123)
+   b.sendall(HEADER.pack(MAGIC,1,2,len(p),11)+p)
+   r=c.receive(); self.assertIsInstance(r,NetRequest)
+   self.assertEqual((r.operation,r.family,r.domain),(2,1,'@name'))
  def test_legacy_first_frame_rejected_and_terminal(self):
   with self.channel_pair() as (c,b):
    b.sendall(HEADER.pack(MAGIC,VERSION,Message.COMMAND_RESULT,0,1))

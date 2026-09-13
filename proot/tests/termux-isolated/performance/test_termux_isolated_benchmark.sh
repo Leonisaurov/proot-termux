@@ -17,6 +17,7 @@ import os
 import math
 import pty
 import random
+import re
 import select
 import statistics
 import subprocess
@@ -69,7 +70,10 @@ def measure_once(argv):
         start = time.monotonic()
         os.write(master, command)
         output = read_until(master, b":END_BENCH")
-        if b"\n0:END_BENCH" not in output:
+        # The interactive shell prompt (for example "$ ") may separate the
+        # echoed command from its output, so require the exit status 0 marker
+        # without a leading digit rather than a bare newline.
+        if not re.search(rb"(?<!\d)0:END_BENCH", output):
             raise AssertionError(output.decode(errors="replace"))
         elapsed = time.monotonic() - start
         os.write(master, b"exit\n")

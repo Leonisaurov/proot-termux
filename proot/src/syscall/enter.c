@@ -238,7 +238,6 @@ static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX
 				if (dynamic < 0)
 					return static_status;
 			}
-			static_status = 0;
 		}
 	}
 

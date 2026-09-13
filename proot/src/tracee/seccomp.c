@@ -137,8 +137,6 @@ static int handle_seccomp_event_common(Tracee *tracee)
 	int status;
 	Sysnum sysnum = get_sysnum(tracee, CURRENT);
 
-	sysnum = get_sysnum(tracee, CURRENT);
-
 	status = notify_extensions(tracee, SIGSYS_OCC, 0, 0);
 	if (status < 0) {
 		VERBOSE(tracee, 4, "SIGSYS errored out when being handled by an extension");

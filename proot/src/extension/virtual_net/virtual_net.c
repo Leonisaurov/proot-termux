@@ -1092,11 +1092,9 @@ static int vnp_handle_accept_exit(Tracee *tracee, VnpConfig *config,
                                    word_t addr_ptr, word_t addrlen_ptr)
 {
 	/* Track the new fd with same virtual port */
-	VnpFdEntry *entry = vnp_find_fd(config, newfd, tracee->pid);
-	if (entry == NULL) {
-		entry = vnp_add_fd(config, tracee->pid, newfd, listen_entry->virtual_port,
-				    listen_entry->orig_domain);
-	}
+	if (vnp_find_fd(config, newfd, tracee->pid) == NULL)
+		(void) vnp_add_fd(config, tracee->pid, newfd, listen_entry->virtual_port,
+				  listen_entry->orig_domain);
 
 #ifndef __ANDROID__
 	/* Keep the virtual peer address compatible with the real socket type. */

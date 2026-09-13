@@ -138,7 +138,8 @@ static void print_execve_help(const Tracee *tracee, const char *argv0, int statu
 	note(tracee, ERROR, SYSTEM, "execve(\"%s\")", argv0);
 
 	/* termux-exec replaced execve with path with one that doesn't exist inside proot?  */
-	if (status == -ENOENT && getenv("LD_PRELOAD") != NULL && strstr(getenv("LD_PRELOAD"), "libtermux-exec.so") != NULL) {
+	const char *ld_preload = getenv("LD_PRELOAD");
+	if (status == -ENOENT && ld_preload != NULL && strstr(ld_preload, "libtermux-exec.so") != NULL) {
 		note(tracee, INFO, USER,
 "It seems that termux-exec is active and is prepending /data/data/com.termux/... to executable paths\n"
 "If this is path is not available inside proot, please \"unset LD_PRELOAD\"");
@@ -395,6 +396,17 @@ static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
 				if (strlen(arg) > length
 				    && arg[length] != argument->separator) {
 					print_error_separator(tracee, argument);
+					return -1;
+				}
+
+				/* Defensive: every real option entry must carry
+				 * a handler; END_OF_OPTIONS is excluded by the
+				 * class != NULL loop condition above.  A NULL
+				 * here would otherwise crash on a malformed
+				 * option table. */
+				if (option->handler == NULL) {
+					note(tracee, ERROR, INTERNAL,
+					     "option '%s' has no handler.", arg);
 					return -1;
 				}
 

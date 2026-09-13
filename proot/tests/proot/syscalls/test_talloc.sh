@@ -10,6 +10,10 @@ test -d "$TMPDIR" && test -w "$TMPDIR" || exit 1
 export PROOT_RUNTIME_DIR="$TMPDIR"
 
 ROOTFS="/data/data/com.termux/files/usr/var/lib/proot-distro/containers/alpine/rootfs"
+if [ ! -d "$ROOTFS" ]; then
+  echo "SKIP: guest rootfs not present at $ROOTFS (install it with proot-distro)"
+  exit 0
+fi
 PROOT="/data/data/com.termux/files/usr/bin/proot"
 
 echo "=== Talloc memory report ==="

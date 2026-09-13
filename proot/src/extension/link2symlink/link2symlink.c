@@ -832,8 +832,9 @@ static int handle_sysexit_end(Extension *extension)
 		else
 			name++;
 
-		/* Check if it is a link */
-		status = lstat(original, &statl);
+		/* Check if it is a link (statl is zero-initialized; a failed
+		 * lstat leaves it as a non-symlink, matching the fallback). */
+		(void) lstat(original, &statl);
 
 		if (strncmp(name, PREFIX, strlen(PREFIX)) == 0) {
 			if (S_ISLNK(statl.st_mode)) {

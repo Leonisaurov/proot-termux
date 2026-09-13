@@ -30,7 +30,11 @@ static bool probe_f2fs_bug(const Tracee *tracee) {
 	strcpy(tmp, base_tmp);
 	strcat(tmp, "/proot_f2fsbug_XXXXXX");
 	if (mkdtemp(tmp) == NULL) {
-		note(tracee, WARNING, SYSTEM, "Unable to create temp directory for f2fs bug probe");
+		/* Best-effort probe: an unwritable temp root (for example a
+		 * read-only bind in a nested sandbox) simply means "no f2fs
+		 * workaround needed", not a user-facing error.  Keep it out
+		 * of the default stderr so it cannot pollute tool output. */
+		VERBOSE(tracee, 1, "Unable to create temp directory for f2fs bug probe");
 		goto end;
 	}
 

@@ -131,7 +131,11 @@ class ControlChannel:
         if typ is Message.NET_ACCESS_REQUEST:
             if len(p)!=NET_SIZE: self._fail(InvalidFrame('net payload'))
             x=struct.unpack('<IiiHHHH16sBB64s128s',p)
-            if ((x[0] in (1, 2) and x[3] not in (2,10)) or (x[0] == 3 and x[3] != 0) or (x[0] == 5 and x[3] == 0)): self._fail(InvalidFrame('net family'))
+            # Address-bearing operations (BIND/CONNECT/DNS) accept AF_UNIX (1),
+            # AF_INET (2) and AF_INET6 (10); PUBLICATION uses AF_UNSPEC (0) and
+            # SOCKET carries the requested nonzero socket domain.  This mirrors
+            # PROTOCOL.md and net_policy.c:net_operation_family_valid().
+            if ((x[0] in (1, 2, 4) and x[3] not in (1, 2, 10)) or (x[0] == 3 and x[3] != 0) or (x[0] == 5 and x[3] == 0)): self._fail(InvalidFrame('net family'))
             return NetRequest(typ,rid,x[0],x[1],x[3],x[4],x[5],x[6],x[7],x[8],x[9],_cstring(x[10]),_cstring(x[11]))
         if typ in (Message.PATH_ACCESS_REQUEST,Message.SHADOW_EVENT):
             if len(p)!=PATH_SIZE: self._fail(InvalidFrame('path payload'))

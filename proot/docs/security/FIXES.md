@@ -45,6 +45,42 @@ corrección sysenter/sysexit para kernels Android antiguos quedan identificados
 para portarlos al árbol compilado del fork, con pruebas específicas antes de
 activarlos.
 
+## I — Revisión 96 (auditoría completa)
+
+Revisión completa (seguridad, rendimiento, leaks, regresiones) con el flujo
+oficial `scripts/build-native.sh` (build limpio sin warnings) y la batería de
+pruebas. Correcciones aplicadas:
+
+- **Regresión de protocolo PRCT/AF_UNIX (la más relevante)**: `net_policy`
+  envía endpoints `AF_UNIX` (family 1) en `BIND`/`CONNECT`, tal como documenta
+  `control-api/PROTOCOL.md`, pero los tres decoders (`python/control_api/__init__.py`,
+  `rust/src/lib.rs`, `bun/control_api.ts`) rechazaban family 1. Cualquier guest
+  que abriera un socket Unix (por ejemplo el `connect` de bionic a
+  `/dev/socket/logdw`) desincronizaba el canal y bloqueaba el tracee. Se acepta
+  family 1/2/10 para las operaciones address-bearing y se añade cobertura de
+  regresión en los tres lenguajes.
+- **Endurecimiento**: terminación NUL explícita de reglas de path PRCT tras
+  `strncpy` (`net_policy.c`), guarda defensiva de handler nulo en el despacho
+  de opciones CLI, y `getenv("LD_PRELOAD")` cacheado (evita doble consulta y
+  posible deref nulo) en `cli.c`.
+- **Ruido**: el sondeo best-effort f2fs ya no emite `WARNING` cuando no puede
+  crear su directorio temporal (por ejemplo temp root de solo lectura en un
+  sandbox anidado); pasa a nivel verbose.
+- **Limpieza**: eliminados dead stores detectados por `clang --analyze`
+  (`enter.c`, `exit.c`, `binding.c`, `path.c`, `auxv.c`, `seccomp.c`,
+  `supervise.c`, `link2symlink.c`, `virtual_net.c`) y una llamada duplicada a
+  `get_sysnum()`.
+- **Tests**: `tests/run.sh` continúa la batería y reporta todos los fallos en
+  vez de abortar en el primero; los tests dependientes del rootfs alpine se
+  saltan limpiamente si no está presente; `test_termux_isolated_cwd.sh` deriva
+  el path guest real (soporta `TMPDIR` bajo `$PREFIX` o `$HOME`); el benchmark
+  de termux-isolated valida el resultado 0 sin depender del prompt del PTY.
+
+Verificación: build nativo limpio (`-c`) con 0 warnings; baterías `proot`,
+`termux-isolated` y `harness` RC=0; `control-api` Python 47/47, Rust 7/7 y Bun
+9/9. Los tests que requieren el rootfs alpine hacen SKIP explícito en este
+entorno.
+
 ## F — Vista `/proc` guest estricta (REV 30)
 
 La implementación actual amplía `ISOLATE_PROC` a una vista procfs coherente y
@@ -91,7 +127,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | Leak talloc en shutdown supervise (`free_terminated_tracees`, FU-1..FU-4, `supervise_handle_exited_tracee`, guard `ctl_fd>=0`) | ✅ fixes 5ad187e929 + 414053fc04 |
 | **FASE A COMPLETADA — A2 stat/readlink oracle + C1 kill(-1) broadcast + V4 netlink topology** | ✅ commit `573f4cb8d9` 'fix(isolation): block /proc host stat/readlink oracle, kill(-1) broadcast, netlink topology' (REVISION 19) — pentest ampliado con baselines `*_2` y verificaciones `*_3` |
 | **FASE A COMPLETADA — cierre de los 4 MINORs + hardening señales** | ✅ commit `3b98197d8a` 'fix(isolation): deliver kill broadcasts to guest tracees, block statx on SIGSYS, harden signal validation' (REVISION 20) — kill(-1) entrega real a tracees; statx cubierto en SIGSYS legacy; pentest EMULADO-OK; buffers PATH_MAX; extra kill(0)/kill(-pgid) confinados al guest (ESRCH pgid vacío, EINVAL señal inválida) |
-|| REVISION actual en `ci/termux/packages/proot/build.sh` | **95** — bump SIEMPRE antes de commit si se toca `src/` o `ci/termux/packages/proot/` |
+|| REVISION actual en `ci/termux/packages/proot/build.sh` | **96** — bump SIEMPRE antes de commit si se toca `src/` o `ci/termux/packages/proot/` |
 
 ## 1. Resumen ejecutivo de las 3 auditorías
 
@@ -210,7 +246,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 ## 10. Checklist de commit (reglas AGENTS.md)
 
 1. Editar código (`src/` o `ci/termux/packages/proot/`).
-2. **Bump `TERMUX_PKG_REVISION` en `ci/termux/packages/proot/build.sh` ANTES del commit**. La revisión actual es 95; las referencias a revisiones anteriores en las fases históricas son deliberadas.
+2. **Bump `TERMUX_PKG_REVISION` en `ci/termux/packages/proot/build.sh` ANTES del commit**. La revisión actual es 96; las referencias a revisiones anteriores en las fases históricas son deliberadas.
 3. `git add -A && git commit -m "<type>(<scope>): <summary>"`.
 4. `git push origin master` (SOLO `origin`).
 5. `gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Success)'` — exit 0=éxito, 1=falló, 2=cancelado. **NO timeout, NO streaming.**
