@@ -431,6 +431,10 @@ enum {
 	PROC_SYNTH_SYSCALL,
 	PROC_SYNTH_ATTR,
 	PROC_SYNTH_MOUNTINFO,
+	/* Per-fd read classification cache.  High values keep them clear of
+	 * the synthesized kinds above (and of PROC_SYNTH_NONE == 0). */
+	PROC_SYNTH_MAPS = 0xf0,
+	PROC_SYNTH_NONMAPS = 0xf1,
 };
 
 static int hpc_proc_synth_kind(const char *path)
@@ -550,7 +554,12 @@ static void hpc_track_synth_open(Tracee *tracee)
 	path[sizeof(path) - 1] = '\0';
 	if (kind == PROC_SYNTH_NONE)
 		kind = hpc_proc_synth_kind(path);
-	if (kind == PROC_SYNTH_NONE || hpc_proc_synth_slot(tracee, fd) >= 0)
+	/* A freshly opened fd may reuse a number whose previous target (and
+	 * cached classification) is gone.  Drop the stale entry before
+	 * deciding what this descriptor is; leaving a stale NONMAPS entry
+	 * would let a later maps open on the same number bypass filtering. */
+	hpc_remove_synth_fd(tracee, fd);
+	if (kind == PROC_SYNTH_NONE)
 		return;
 	if (tracee->proc_synth_count < MAX_PROC_SYNTH_FDS) {
 		int n = tracee->proc_synth_count++;
@@ -558,6 +567,39 @@ static void hpc_track_synth_open(Tracee *tracee)
 		tracee->proc_synth_kinds[n] = (unsigned char)kind;
 		tracee->proc_synth_offsets[n] = 0;
 	}
+}
+
+/* Classify a descriptor used by read(2)/pread64(2) exactly once and cache
+ * the result in the same per-fd table as the synthesized files.  This
+ * removes the readlink(2) (and the second ptrace stop) that used to run for
+ * *every* read: only descriptors known to be a maps file or a synthesized
+ * file need EXIT filtering.  A cached NONMAPS result is only trusted until
+ * the fd is closed/duplicated/reopened, all of which update the table. */
+static int hpc_classify_read_fd(Tracee *tracee, int fd)
+{
+	int slot = hpc_proc_synth_slot(tracee, fd);
+	int kind = PROC_SYNTH_NONMAPS;
+	char path[PATH_MAX];
+	size_t len;
+
+	if (slot >= 0)
+		return tracee->proc_synth_kinds[slot];
+
+	if (readlink_proc_pid_fd(tracee->pid, fd, path) == 0) {
+		len = strlen(path);
+		if (strncmp(path, "/proc/", 6) == 0 && len >= 5 &&
+		    strcmp(path + len - 5, "/maps") == 0)
+			kind = PROC_SYNTH_MAPS;
+	}
+
+	if (tracee->proc_synth_count < MAX_PROC_SYNTH_FDS) {
+		int n = tracee->proc_synth_count++;
+		tracee->proc_synth_fds[n] = fd;
+		tracee->proc_synth_kinds[n] = (unsigned char)kind;
+		tracee->proc_synth_offsets[n] = 0;
+	}
+
+	return kind;
 }
 
 static size_t hpc_proc_synth_text(Tracee *tracee, int kind, char *out, size_t size)
@@ -1596,12 +1638,13 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
                 for (j = 0; flag_sysnum_map[i].sysnums[j] != -1; j++) {
                     int sysnum = flag_sysnum_map[i].sysnums[j];
                     word_t flags = 0;
-                    /* PR_getdents64, PR_getdents, PR_read and the open
-                     * family need FILTER_SYSEXIT (filter at exit for /proc/
-                     * PID and maps filtering) */
+                    /* getdents and the open/fd-lifecycle family need
+                     * FILTER_SYSEXIT.  read/pread64 do NOT: their EXIT is
+                     * requested dynamically at ENTER only when the fd is a
+                     * synthesized file or a maps file, so ordinary reads pay
+                     * a single ptrace stop and no readlink(2). */
 					if (flag_sysnum_map[i].flag == ISOLATE_PROC &&
 						(sysnum == PR_getdents64 || sysnum == PR_getdents ||
-						 sysnum == PR_read || sysnum == PR_pread64 ||
 						 sysnum == PR_dup || sysnum == PR_dup2 || sysnum == PR_dup3 ||
 						 sysnum == PR_fcntl || sysnum == PR_close ||
                          sysnum == PR_open || sysnum == PR_openat ||
@@ -1759,6 +1802,23 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
                     return 1;
                 }
             }
+        }
+
+        /* read(2)/pread64(2) only need an EXIT stop when the descriptor is
+         * a synthesized file or a maps file.  Classify it once here (the
+         * cache makes repeated reads syscall-free) and request the EXIT
+         * only for those; ordinary reads keep a single ptrace stop. */
+        if ((config->flags & ISOLATE_PROC) &&
+            (num == PR_read || num == PR_pread64)) {
+            int fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
+            int kind = hpc_classify_read_fd(tracee, fd);
+            /* The core also needs the EXIT stop to patch AT_EXECFN in
+             * /proc/self/auxv reads (exit.c, case PR_read). */
+            if (kind != PROC_SYNTH_NONMAPS || fd == tracee->auxv_fd) {
+                tracee->sysexit_pending = true;
+                tracee->restart_how = PTRACE_SYSCALL;
+            }
+            return 0;
         }
 
         return 0;
@@ -1919,11 +1979,21 @@ int hpc_callback(Extension *extension, ExtensionEvent event,
         case PR_getdents:
             return hpc_handle_getdents_exit(tracee, PR_getdents);
 		case PR_read:
-		case PR_pread64:
-            if (hpc_handle_synth_read_exit(tracee) == 0 &&
-                hpc_proc_synth_slot(tracee, (int)peek_reg(tracee, ORIGINAL, SYSARG_1)) >= 0)
-                return 0;
+		case PR_pread64: {
+            int fd = (int)peek_reg(tracee, ORIGINAL, SYSARG_1);
+            int slot = hpc_proc_synth_slot(tracee, fd);
+            if (slot >= 0) {
+                unsigned char kind = tracee->proc_synth_kinds[slot];
+                if (kind == PROC_SYNTH_NONMAPS)
+                    return 0;
+                if (kind == PROC_SYNTH_MAPS)
+                    return hpc_handle_maps_read_exit(tracee);
+                return hpc_handle_synth_read_exit(tracee);
+            }
+            /* Unclassified fd (cache full): the ENTER classifier requested
+             * the EXIT only for maps candidates, so keep failing closed. */
             return hpc_handle_maps_read_exit(tracee);
+        }
         case PR_statx:
             /* exit.c's handle_statx_syscall() re-runs a host stat() when
              * the kernel result is an error, overwriting the ENOENT we
