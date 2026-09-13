@@ -211,11 +211,16 @@ proot/tests/proot/hardening/test_b6.sh             # B6: bridge children killed 
 proot/tests/proot/hardening/test_b8.sh             # B8: talloc leak verification
 proot/tests/proot/hardening/test_phase_c.sh        # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fake-perms
 proot/tests/proot/syscalls/test_d4_e1_e3_e6.sh     # D4 socket, E1 renameat2, E3 uname, E6 mknod (39 tests)
+proot/tests/proot/proc/test_proc_maps_filter.sh    # filtrado maps: read/pread/preadv, dup, reuso fd, saturación, otro tracee
 proot/tests/proot/syscalls/test_upstream_link2symlink.sh  # regresiones portadas de upstream
 proot/tests/termux-isolated/storage/test_termux_isolated_storage.sh # storage opt-in y binds :mask
 proot/tests/termux-isolated/shell/test_termux_isolated_shebang.sh # termux-exec y shebangs en ambos modos
 proot/tests/termux-isolated/shell/test_termux_isolated_default_shell.sh # shell $SHELL en modo interactivo
 ```
+
+`./proot/tests/run.sh` continúa la batería tras cada fallo y los reporta todos al
+final; los tests que requieren el rootfs alpine hacen SKIP limpio si no está
+presente.
 
 Para una regresión nueva, crea primero el script, ejecútalo con `bash -n` y
 `git diff --check`, y después lanza el archivo mediante `require_escalated`.
@@ -339,7 +344,7 @@ Port mapping (`-p host:container`, máx 64, auto-puerto libre), auto-redirect de
 |---------|---------------|
 | `extension/virtual_net/` (5: .c/h/internal.h/helper.c/helper.h) | Red virtual, registry fd cache (E2), helper `--vnp-helper` |
 | `extension/resource_limit/` (3: .c/h/internal.h) | sched_getaffinity fake + gate fork/clone |
-| `extension/proc_isolation/` (2: .c/h) | `hpc_callback`: /proc, ptrace, kill, netlink, maps. E5 pidfd_open→ISOLATE_PROC, E7 lazy maps_fd |
+| `extension/proc_isolation/` (2: .c/h) | `hpc_callback`: /proc, ptrace, kill, netlink, maps. E5 pidfd_open→ISOLATE_PROC. Lecturas: clasificación por fd (synth/maps self/other/NONMAPS) para filtrar sin `readlink` ni segunda parada ptrace |
 | `extension/fake_id0/fake_id0.c` | `--fake-permissions` (override_permissions no-op + access emulated) |
 | `supervise/` (2: .c/h) | `--supervise`/`--exec`, signalfd+poll, socket abstracto, SO_PEERCRED |
 | `cli/proot.c` (1004+) | handlers `--proxy`/`-p`, `resource_config`, `--recommended-etc-rw`, `--fake-permissions`, E4 -q host-rootfs doc |
@@ -372,7 +377,9 @@ Port mapping (`-p host:container`, máx 64, auto-puerto libre), auto-redirect de
 - **Registry cleanup**: entradas stale de `registry.lock` no se limpian solas (no afectan). Limpieza manual: borrar el directorio `proot-net/` dentro de `PROOT_RUNTIME_DIR` o `TMPDIR` del proceso correspondiente.
 - **Tamaños reales** (para estimar diffs): `virtual_net.c`=1144, `virtual_net_helper.c`=422, `cli/proot.c`=1004, `cli/proot.h`=614, `cli/cli.c`=694, `GNUmakefile`=318, `tracee/event.c`=976, `tracee/tracee.h`=399.
 - **D5 hash table**: ✅ implementada. Hash estático 256 buckets + `tracee_hash_update()` para PID change en cli.c. Sin talloc lifecycle issues.
-- **D6 binding cache**: SKIP — riesgo de dangling pointers supera ganancia (3-10 bindings típicas, scan lineal es efectivamente O(1)).
+- **D6 binding cache**: SKIP — `compare_paths2()` ya poda con un chequeo O(1); riesgo de dangling pointers supera la ganancia real.
+- **D7 canonicalize cache**: SKIP — `fake_id0` y `link2symlink` dependen de notificaciones `HOST_PATH` por componente; saltarlas en un cache-hit pierde funcionalidad. Requeriría flag opt-in con tradeoff de coherencia.
+- **Lecturas `--proc-isolated`**: clasificación por fd (synth/maps/NONMAPS) evita el `readlink` y la segunda parada ptrace por lectura; ver REV 98-101 en `proot/docs/security/FIXES.md` §I y `proot/docs/performance/benchmarks.md`.
 - **E items**: E1-E8 todos RESUELTO (REV 24-27). Ver `proot/docs/security/FIXES.md` §7 para detalles.
 - **proot necesita `env -i`** al ejecutar en rootfs Alpine — el entorno heredado causa execve failures. Los wrappers están en `proot/tests/rootfs/`.
 
@@ -393,6 +400,7 @@ proot/tests/proot/hardening/test_b6.sh             # bridge children killed on e
 proot/tests/proot/hardening/test_b8.sh             # talloc leak verification
 proot/tests/proot/hardening/test_phase_c.sh        # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fake-perms
 proot/tests/proot/syscalls/test_d4_e1_e3_e6.sh     # D4 socket, E1 renameat2, E3 uname, E6 mknod (39 tests)
+proot/tests/proot/proc/test_proc_maps_filter.sh    # filtrado maps tras la clasificación por fd
 ```
 
 ## Configuración del agente

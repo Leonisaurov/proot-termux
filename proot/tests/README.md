@@ -36,6 +36,11 @@ La batería se puede seleccionar por capa desde la raíz del repositorio:
 ./proot/tests/run.sh all
 ```
 
+`run.sh` no aborta en el primer fallo: ejecuta toda la capa seleccionada y
+resume los tests fallidos al final. Los tests que dependen del rootfs Alpine
+hacen SKIP limpio (exit 0) cuando no está instalado, para que la batería siga
+siendo ejecutable en un Termux sin ese contenedor.
+
 Entre las regresiones relevantes de `termux-isolated` están
 `shell/test_termux_isolated_shebang.sh` y
 `shell/test_termux_isolated_shebang_fastpath.sh`; ambas cubren la ejecución de
