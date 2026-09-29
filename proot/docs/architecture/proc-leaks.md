@@ -127,7 +127,7 @@ Solo /proc/self funciona para acceder a datos del proceso actual.
 | /proc/zoneinfo | ENOENT | OK |
 | /proc/net/ | ENOENT | OK |
 | /proc/config.gz | ENOENT | OK |
-| /proc/meminfo | Zeros sinteticos | OK |
+| /proc/meminfo | Datos reales del host (resumen de maquina) | OK |
 | /proc/stat | Zeros sinteticos | OK |
 | /proc/loadavg | Zeros sinteticos | OK |
 | /proc/uptime | Zeros sinteticos | OK |
@@ -151,6 +151,7 @@ Solo /proc/self funciona para acceder a datos del proceso actual.
 |---|----------|-----------|--------|---------|
 | 1 | /proc/self/maps (prooted PID) | INFORMATIVO | Corregido en REV 30 | Se eliminan las líneas del loader temporal; los 18 vectores siguen bloqueados |
 | 2 | /proc/cpuinfo (datos reales) | N/A | No es leak | Comportamiento correcto para uso personal |
+| 3 | /proc/meminfo devolvía ceros | MEDIA-ALTA | Corregido (REV 103) | Datos de máquina falsos; ahora lee el archivo real del host |
 
 Total: 0 criticos, 0 altos, 1 informativo corregido
 Correctamente filtrados: 29 vectores
@@ -204,3 +205,32 @@ guest coherentes (y formas sintéticas para pipes y sockets, sin inodes host).
 `TracerPid` permanece oculto como detalle del tracer, mientras que `ptrace`,
 `wait`, `fork`, `clone` y `execve` conservan su semántica funcional para los
 procesos de la instancia; `--ptrace-isolated` solo rechaza PIDs ajenos.
+
+## /proc/meminfo con totales reales (REV 103)
+
+`/proc/meminfo` es un resumen de máquina, no información de otro proceso: sus
+totales no revelan PIDs, `cmdline` ni trabajo de terceros. Hasta REV 102 el open
+se redirigía a `/dev/null` y el filtro servía ceros hardcodeados, de modo que el
+guest veía `MemTotal: 0 kB` presentado como dato válido (un consumidor que decide
+con RAM concluye falsamente que el dispositivo está al borde del OOM). Arreglarlo
+desde el consumidor era imposible: la síntesis ocurre por ruta dentro del filtro,
+así que un `--bind=/proc/meminfo:/proc/meminfo:ro` posterior al bind de procfs
+seguía devolviendo ceros.
+
+Ahora `meminfo` se comporta como `cpuinfo` (dato de máquina ya aceptado en el
+Hallazgo 2): no se sintetiza, su open no se redirige a `/dev/null` y el guest lee
+el archivo real del host. `uptime`, `loadavg` y los contadores globales de `stat`
+conservan la vista sintética porque Android los deniega al tracee (EACCES incluso
+fuera de proot): leer el archivo real convertiría un éxito sintético en un open
+fallido.
+
+La regresión `proot/tests/proot/proc/test_meminfo_machine_summary.sh` fija el
+contrato completo: `MemTotal`/`SwapTotal` iguales a los del host,
+`MemFree`/`MemAvailable` > 0, el juego completo de campos del host,
+`uptime`/`loadavg`/`stat` sintéticos, PIDs host inalcanzables y tracees del guest
+visibles (listado y `/proc/<pid>/status`).
+
+Nota de implementación: `PROC_SYNTH_CPUINFO` colisionaba con `PROC_SYNTH_NONE`
+(ambos 0), así que `cpuinfo` sólo pasaba real por accidente y su `case` en
+`hpc_proc_synth_text` era código muerto. El enum fija ahora `PROC_SYNTH_STAT = 1`
+como base explícita, y `cpuinfo`/`meminfo` no tienen kind de síntesis.

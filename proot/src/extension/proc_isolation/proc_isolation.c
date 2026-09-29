@@ -414,10 +414,16 @@ static bool hpc_is_guest_proc_path(const char *path)
 	return false;
 }
 
+/* Machine summaries (cpuinfo, meminfo) are pass-through, not synthesized:
+ * they are world-readable on Android and describe the device instead of
+ * another process, so the guest reads the real host file.
+ * uptime, loadavg and the global stat counters stay synthesized below because
+ * Android denies them to the tracee (EACCES even outside proot): the real
+ * open(2) would fail where the guest-safe view currently succeeds. */
 enum {
-	PROC_SYNTH_CPUINFO,
-	PROC_SYNTH_MEMINFO,
-	PROC_SYNTH_STAT,
+	/* Explicit base: an auto-incrementing first member would be 0 and
+	 * collide with PROC_SYNTH_NONE, silently disabling that kind. */
+	PROC_SYNTH_STAT = 1,
 	PROC_SYNTH_UPTIME,
 	PROC_SYNTH_LOADAVG,
 	PROC_SYNTH_STATUS,
@@ -477,9 +483,10 @@ static int hpc_proc_synth_kind(const char *path)
 			}
 		}
 	}
-	/* If this is not a per-process path, p already names a global file. */
-	if (strcmp(p, "cpuinfo") == 0) return PROC_SYNTH_CPUINFO;
-	if (strcmp(p, "meminfo") == 0) return PROC_SYNTH_MEMINFO;
+	/* If this is not a per-process path, p already names a global file.
+	 * "cpuinfo" and "meminfo" are absent on purpose: they are machine
+	 * summaries (see the enum note), so their open is not redirected to
+	 * /dev/null and the guest reads the real host file. */
 	if (strcmp(p, "stat") == 0) return per_process ? PROC_SYNTH_STAT_ONE : PROC_SYNTH_STAT;
 	if (strcmp(p, "uptime") == 0) return PROC_SYNTH_UPTIME;
 	if (strcmp(p, "loadavg") == 0) return PROC_SYNTH_LOADAVG;
@@ -655,12 +662,6 @@ static size_t hpc_proc_synth_text(Tracee *tracee, int kind, char *out, size_t si
 		LIST_FOREACH(t, list, link)
 			if (!t->terminated) nproc++;
 	switch (kind) {
-	case PROC_SYNTH_CPUINFO:
-		return (size_t)snprintf(out, size,
-			"processor\t: 0\nBogoMIPS\t: 0.00\nFeatures\t: \nCPU implementer\t: 0x00\n\n");
-	case PROC_SYNTH_MEMINFO:
-		return (size_t)snprintf(out, size,
-			"MemTotal:           0 kB\nMemFree:            0 kB\nMemAvailable:       0 kB\nBuffers:            0 kB\nCached:             0 kB\nSwapCached:         0 kB\nSwapTotal:          0 kB\nSwapFree:           0 kB\n");
 	case PROC_SYNTH_STAT:
 		return (size_t)snprintf(out, size,
 			"cpu  0 0 0 0 0 0 0 0 0 0\nprocs_running %u\nprocs_blocked 0\n", nproc ? 1 : 0);

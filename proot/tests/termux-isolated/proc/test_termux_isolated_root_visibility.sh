@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Regression for guest-root links and intentional Android/Termux path binds.
+# The two --termux-paths cases need no guest rootfs; the rootfs cases SKIP
+# (PASS=2 SKIP=2) when the alpine container is not installed.
 set -euo pipefail
 
 : "${TMPDIR:=/data/data/com.termux/files/usr/tmp}"
@@ -13,11 +15,6 @@ TERMUX_ISOLATED="${TERMUX_ISOLATED:-$REPO_ROOT/bin/termux-isolated}"
 TERMUX_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 TERMUX_ROOT="${TERMUX_PREFIX%/usr}"
 ROOTFS="${PROOT_TEST_ROOTFS:-$TERMUX_ROOT/usr/var/lib/proot-distro/containers/alpine/rootfs}"
-
-if [ ! -d "$ROOTFS" ]; then
-    echo "SKIP: guest rootfs not present at $ROOTFS (install it with proot-distro)"
-    exit 0
-fi
 
 if [[ ! -x "$TERMUX_ISOLATED" ]]; then
     echo "SKIP: termux-isolated wrapper not found at $TERMUX_ISOLATED"

@@ -212,6 +212,7 @@ proot/tests/proot/hardening/test_b8.sh             # B8: talloc leak verificatio
 proot/tests/proot/hardening/test_phase_c.sh        # C2-C7: MS_RDONLY, /etc :ro, proc, PEERCRED, fake-perms
 proot/tests/proot/syscalls/test_d4_e1_e3_e6.sh     # D4 socket, E1 renameat2, E3 uname, E6 mknod (39 tests)
 proot/tests/proot/proc/test_proc_maps_filter.sh    # filtrado maps: read/pread/preadv, dup, reuso fd, saturación, otro tracee
+proot/tests/proot/proc/test_meminfo_machine_summary.sh # meminfo real + uptime/loadavg/stat sintéticos + aislamiento
 proot/tests/proot/syscalls/test_upstream_link2symlink.sh  # regresiones portadas de upstream
 proot/tests/termux-isolated/storage/test_termux_isolated_storage.sh # storage opt-in y binds :mask
 proot/tests/termux-isolated/shell/test_termux_isolated_shebang.sh # termux-exec y shebangs en ambos modos
@@ -282,10 +283,14 @@ filtro de nombres:
 - `/proc` conserva únicamente `self`, `thread-self`, archivos globales
   soportados y PIDs de tracees vivos; también cubre `getdents{,64}`, `dup`,
   `fcntl`, `fdopendir`, lecturas parciales y aperturas relativas con `dirfd`.
-- Los archivos globales y por proceso soportados se sintetizan con formato
-  Linux válido. `stat`, `meminfo`, `uptime`, `mountinfo`, `status`, `limits`,
-  `maps`, `attr/current`, `io`, `sched`, `pagemap`, `fdinfo` y similares no
-  copian estadísticas ni topología del procfs host.
+- Los archivos globales y por proceso soportados se sirven con formato Linux
+  válido. Los que se sintetizan (`stat`, `uptime`, `mountinfo`, `status`,
+  `limits`, `maps`, `attr/current`, `io`, `sched`, `pagemap`, `fdinfo` y
+  similares) no copian estadísticas ni topología del procfs host. Los resúmenes
+  de máquina `cpuinfo` y `meminfo` son passthrough del archivo real del host: son
+  datos del dispositivo, no de otro proceso. `uptime`, `loadavg` y los contadores
+  globales de `stat` siguen sintéticos porque Android los deniega al tracee
+  (EACCES incluso fuera de proot).
 - `maps`, `exe`, `cwd` y enlaces `/proc/*` se sanitizan y conservan la vista
   guest. En modo `--termux-paths`, las rutas Termux son guest válidas; con un
   rootfs, se conservan sus rutas (`/usr`, `/home`), se bloquean rutas Termux,
