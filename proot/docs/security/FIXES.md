@@ -115,6 +115,37 @@ Verificación: build nativo limpio (`-c`) con 0 warnings; baterías `proot`,
 9/9. Los tests que requieren el rootfs alpine hacen SKIP explícito en este
 entorno.
 
+## J — Resúmenes de máquina en `/proc` (REV 103)
+
+`/proc/meminfo` era un archivo sintético de ceros: el `open` se redirigía a
+`/dev/null` y `hpc_proc_synth_text()` devolvía totales hardcodeados, así que
+cualquier consumidor que decidiera con `MemAvailable`/`MemFree` leía un dato
+falso presentado como válido (conclusión: "dispositivo al borde del OOM"). Un
+bind del archivo real desde el consumidor no lo arregla: la síntesis ocurre por
+ruta dentro del filtro.
+
+- `meminfo` —y `cpuinfo`— pasan a ser passthrough del archivo real del host: son
+  resúmenes de máquina, no datos de otro proceso. `uptime`, `loadavg` y los
+  contadores globales de `stat` conservan la vista sintética porque Android los
+  deniega al tracee (`EACCES` incluso fuera de proot): el `open` real fallaría
+  donde hoy hay un éxito sintético.
+- Colisión latente corregida: `PROC_SYNTH_CPUINFO` valía 0 igual que
+  `PROC_SYNTH_NONE`, de modo que `cpuinfo` pasaba real por accidente y su `case`
+  de texto era código muerto. El enum fija `PROC_SYNTH_STAT = 1` como base
+  explícita y pierde los dos miembros que ya no se sintetizan.
+- Regresión: `tests/proot/proc/test_meminfo_machine_summary.sh` (MemTotal y
+  SwapTotal iguales a los del host, `MemFree`/`MemAvailable` > 0, juego completo
+  de campos, `uptime`/`loadavg`/`stat` sintéticos, aislamiento intacto).
+  `test_termux_isolated_root_visibility.sh` deja de saltarse sus dos casos de
+  `--termux-paths` cuando no hay rootfs alpine instalado.
+- Verificación: `tests/run.sh proot` y `tests/run.sh termux-isolated` RC=0, con
+  SKIP explícito en los casos que requieren el rootfs alpine.
+- Aclaración documental sin cambio de código: `--net-policy deny` no filtra
+  `connect(AF_UNIX)` (ni pathname ni abstracto); la rama AF_UNIX de
+  `net_policy.c::check_operation()` sólo devuelve `EACCES` con `--proxy` activo y
+  sin control-fd. Es IPC local, así que conectar a `/dev/socket/*` desde el guest
+  no es una fuga.
+
 ## F — Vista `/proc` guest estricta (REV 30)
 
 La implementación actual amplía `ISOLATE_PROC` a una vista procfs coherente y
