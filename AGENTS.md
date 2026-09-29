@@ -10,7 +10,7 @@ ruta operativa vigente.
 
 ## Project Overview
 
-Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker + CI GitHub Actions). La fuente vive en `proot/src/` — sin parches, sin downloads. Rama `master`. Security hardening: fases A-F completadas (ver `proot/docs/security/FIXES.md`).
+Fork proot-only: cross-compila proot para Android aarch64 (NDK r30 vía Docker + CI GitHub Actions). La fuente vive en `proot/src/` — sin parches, sin downloads. Rama `master`. Security hardening: fases A-F completadas (ver `proot/docs/security/FIXES.md`).
 
 ## Build & CI
 
