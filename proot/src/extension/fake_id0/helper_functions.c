@@ -1,18 +1,28 @@
 #include <linux/limits.h>
 #include <string.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
 
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
 #include "tracee/mem.h"
+#include "cli/note.h"
 #include "path/path.h"
 #include "extension/fake_id0/config.h"
 #include "extension/fake_id0/helper_functions.h"
 
 #define META_TAG ".proot-meta-file."
+
+/* Meta files must never follow a symlink supplied by the guest, so the flag
+ * has to exist; a hand-rolled fallback value would silently disable the
+ * defense instead of failing to build.  */
+#ifndef O_NOFOLLOW
+#    error "O_NOFOLLOW is required to open meta files safely"
+#endif
 
 #define OWNER_PERMS	 0
 #define GROUP_PERMS	 1
@@ -284,22 +294,71 @@ int get_dir_path(char path[PATH_MAX], char dir_path[PATH_MAX])
 int get_meta_path(char orig_path[PATH_MAX], char meta_path[PATH_MAX]) 
 {
 	char *filename;
+	size_t separator;
+	size_t required;
 
 	/*Separate the final component from the path. */
 	get_dir_path(orig_path, meta_path);
 	filename = get_name(orig_path);
 
-	/* Add a / between the final component and the rest of the path. */
-	if(strcmp(meta_path, "/") != 0)
-		strcat(meta_path, "/");
+	/* A '/' goes between the directory and the tag, unless the directory
+	 * already is the root.  Everything is measured before anything is
+	 * written: this is what keeps meta_path inside PATH_MAX. */
+	separator = (strcmp(meta_path, "/") != 0 ? 1 : 0);
 
-	if(strlen(meta_path) + strlen(filename) + strlen(META_TAG) >= PATH_MAX)
+	required = strlen(meta_path) + separator + strlen(META_TAG) + strlen(filename);
+	if (required >= PATH_MAX)
 		return -ENAMETOOLONG;
+
+	if (separator != 0)
+		strcat(meta_path, "/");
 
 	/* Insert the meta_tag between the path and its final component. */
 	strcat(meta_path, META_TAG);
 	strcat(meta_path, filename);
 	return 0;
+}
+
+/** Open the meta file @path, refusing anything the guest could have placed
+ *  there.
+ *
+ *  A meta path is predictable ("<directory>/.proot-meta-file.<name>") and its
+ *  directory is writable by the guest, so opening it by name would let the
+ *  guest point proot -- which runs with the host uid -- at any file that uid
+ *  can write, and have proot truncate or read it.  Meta files are only ever
+ *  created by proot, so anything that isn't a regular file is treated as
+ *  absent.
+ */
+static FILE *meta_open(const char *path, bool for_write)
+{
+	int flags;
+	int fd;
+	FILE *fp;
+
+	flags = (for_write ? (O_WRONLY | O_CREAT | O_TRUNC) : (O_RDONLY | O_NONBLOCK))
+	        | O_NOFOLLOW | O_CLOEXEC;
+
+	fd = open(path, flags, 0600);
+	if (fd < 0)
+		return NULL;
+
+	if (!for_write) {
+		struct stat statbuf;
+
+		/* O_NOFOLLOW stops symlinks but not the other file types: don't
+		 * block on a fifo or read from a device the guest left there. */
+		if (fstat(fd, &statbuf) < 0 || !S_ISREG(statbuf.st_mode)) {
+			close(fd);
+			errno = ELOOP;
+			return NULL;
+		}
+	}
+
+	fp = fdopen(fd, for_write ? "w" : "r");
+	if (fp == NULL)
+		close(fd);
+
+	return fp;
 }
 
 /** Stores in mode, owner, and group the relative information found in the meta
@@ -309,37 +368,61 @@ int get_meta_path(char orig_path[PATH_MAX], char meta_path[PATH_MAX])
 
 int read_meta_file(char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group, Config *config)
 {
-	FILE *fp;
 	int lcl_mode;
-	fp = fopen(path, "r");
+	int lcl_owner;
+	int lcl_group;
+	FILE *fp;
+
+	fp = meta_open(path, false);
 	if(!fp) {
-		/* If the metafile doesn't exist, allow overly permissive behavior. */
+		/* Absent, dangling or not a regular file: fall back to the
+		 * overly permissive behavior. */
 		*owner = config->euid;
 		*group = config->egid;
 		*mode = otod(755);
 		return 0;
 
 	}
-	fscanf(fp, "%d %d %d ", &lcl_mode, owner, group);
-	lcl_mode = otod(lcl_mode);
-	*mode = (mode_t)lcl_mode;
+
+	/* The three values are stored in decimal by write_meta_file().  A short
+	 * read means the file isn't a meta file proot wrote, so it must not
+	 * leave lcl_mode untouched. */
+	if (fscanf(fp, "%d %d %d ", &lcl_mode, &lcl_owner, &lcl_group) != 3) {
+		fclose(fp);
+		*owner = config->euid;
+		*group = config->egid;
+		*mode = otod(755);
+		return 0;
+	}
 	fclose(fp);
+
+	*mode = (mode_t) otod(lcl_mode);
+	*owner = (uid_t) lcl_owner;
+	*group = (gid_t) lcl_group;
 	return 0;
 }
 
 /** Writes mode, owner, and group to the meta file specified by path. If 
  *  is_creat is set to true, the umask needs to be used since it would have
  *  been by a real system call.
+ *
+ *  Returns -errno on failure; the meta file is PRoot's own bookkeeping, so the
+ *  callers don't deny the guest over it (see handle_*_enter_end).
  */
 
 int write_meta_file(char path[PATH_MAX], mode_t mode, uid_t owner, gid_t group,
 	bool is_creat, Config *config)
 {
 	FILE *fp;
-	fp = fopen(path, "w");
-	if(!fp)
-		//Errno is set
-		return -1;
+
+	fp = meta_open(path, true);
+	if(!fp) {
+		int status = (errno > 0 ? -errno : -EACCES);
+
+		note(NULL, WARNING, INTERNAL, "can't write meta file \"%s\": %s",
+		     path, strerror(-status));
+		return status;
+	}
 
 	/** In syscalls that don't have the ability to create a file (chmod v open)
 	 *  for example, the umask isn't used in determining the permissions of the
@@ -348,7 +431,22 @@ int write_meta_file(char path[PATH_MAX], mode_t mode, uid_t owner, gid_t group,
 	if(is_creat)
 		mode = (mode & ~(config->umask) & 0777);
 
-	fprintf(fp, "%d\n%d\n%d\n", dtoo(mode), owner, group);
-	fclose(fp);
+	if (fprintf(fp, "%d\n%d\n%d\n", dtoo(mode), owner, group) < 0) {
+		int status = -errno;
+
+		fclose(fp);
+		note(NULL, WARNING, INTERNAL, "can't write meta file \"%s\": %s",
+		     path, strerror(-status));
+		return status;
+	}
+
+	if (fclose(fp) != 0) {
+		int status = -errno;
+
+		note(NULL, WARNING, INTERNAL, "can't close meta file \"%s\": %s",
+		     path, strerror(-status));
+		return status;
+	}
+
 	return 0;
 }

@@ -66,5 +66,8 @@ int handle_rename_enter_end(Tracee *tracee, Reg oldfd_sysarg, Reg oldpath_sysarg
 	if(status < 0)
 		return status;
 
-	return write_meta_file(meta_path, mode, uid, gid, 0, config); 
+	/* The meta file is PRoot's own bookkeeping: the rename itself already
+	 * happened, so a meta that can't be written must not deny it. */
+	(void) write_meta_file(meta_path, mode, uid, gid, 0, config);
+	return 0;
 }

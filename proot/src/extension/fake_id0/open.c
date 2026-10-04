@@ -71,8 +71,11 @@ int handle_open_enter_end(Tracee *tracee, Reg fd_sysarg, Reg path_sysarg,
 
 		mode = peek_reg(tracee, ORIGINAL, mode_sysarg);
 		poke_reg(tracee, mode_sysarg, (mode|0700));
-		status = write_meta_file(meta_path, mode, config->euid, config->egid, 1, config);
-		return status;
+
+		/* The meta file is PRoot's own bookkeeping: not being able to
+		 * record it must not deny a creation the guest is allowed to do. */
+		(void) write_meta_file(meta_path, mode, config->euid, config->egid, 1, config);
+		return 0;
 	}
 
 check:

@@ -52,5 +52,10 @@ int handle_chmod_enter_end(Tracee *tracee, Reg path_sysarg, Reg mode_sysarg,
 
 	call_mode = peek_reg(tracee, ORIGINAL, mode_sysarg);
 	set_sysnum(tracee, PR_getuid);
-	return write_meta_file(meta_path, call_mode, owner, group, 0, config);
+
+	/* The chmod is already emulated (the syscall was replaced above):
+	 * failing to record the mode in the meta file must not turn the
+	 * emulated success into a denial. */
+	(void) write_meta_file(meta_path, call_mode, owner, group, 0, config);
+	return 0;
 }
