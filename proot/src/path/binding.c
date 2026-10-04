@@ -27,6 +27,7 @@
 #include <assert.h>   /* assert(3), */
 #include <limits.h>   /* PATH_MAX, */
 #include <errno.h>    /* E* */
+#include <stdbool.h>  /* bool, */
 #include <fcntl.h>    /* open(2), */
 #include <dirent.h>   /* opendir(3), readdir(3), */
 #include <sys/queue.h> /* CIRCLEQ_*, */
@@ -153,6 +154,8 @@ Binding *get_binding(const Tracee *tracee, Side side, const char path[PATH_MAX])
 {
 	Binding *binding;
 	size_t path_length = strlen(path);
+	bool guard_computed = false;
+	bool guard_skip_all = false;
 
 	/* Sanity checks.  */
 	assert(path != NULL && path[0] == '/');
@@ -184,11 +187,25 @@ Binding *get_binding(const Tracee *tracee, Side side, const char path[PATH_MAX])
 		 * used as an asymmetric binding, ex.:
 		 *
 		 *     proot -m /usr:/location /usr/local/slackware
+		 *
+		 * This predicate only depends on (side, root, path), all of
+		 * which are fixed for the whole walk, so it is computed once
+		 * and reused: when it holds, no candidate can be returned and
+		 * the remaining iterations would all continue.  It stays lazy --
+		 * evaluated at the first prefix match, as before -- because
+		 * get_root() returns NULL when there is no root binding yet and
+		 * compare_paths() dereferences its argument.
 		 */
-		if (   side == HOST
-		    && compare_paths(get_root(tracee), "/") != PATHS_ARE_EQUAL
-		    && belongs_to_guestfs(tracee, path))
-				continue;
+		if (side == HOST) {
+			if (!guard_computed) {
+				guard_skip_all = (   compare_paths(get_root(tracee), "/")
+				                    != PATHS_ARE_EQUAL
+				                && belongs_to_guestfs(tracee, path));
+				guard_computed = true;
+			}
+			if (guard_skip_all)
+				return NULL;
+		}
 
 		return binding;
 	}
