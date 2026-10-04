@@ -75,7 +75,7 @@ ids=$(printf '%s\n' "$binds" | awk '{print $1}' | sort -u | wc -l | tr -d '[:spa
 if [ "$ids" = "2" ]; then
     pass "los dos mounts sintetizados tienen ids distintos"
 else
-    fail "los bind sintéticos comparten id ($ids lineas unicas)"
+    fail "los bind sintéticos comparten id ($ids líneas únicas)"
 fi
 
 if printf '%s\n' "$out" | grep -qE '^[0-9]+ [0-9]+ 0:1 / / rw,relatime - bind '; then

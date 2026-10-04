@@ -1,23 +1,23 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Contracto de los meta files de fake_id0 y de su alcanzabilidad real.
+# Contrato de los meta files de fake_id0 y de su alcance real.
 #
 # Contexto verificado: el subsistema de meta files ("<dir>/.proot-meta-file.<x>",
 # helper_functions.c + open/mk/chmod/chown/stat/rename/unlink/exec/access/
-# utimensat) esta entero bajo #ifdef USERLAND, y USERLAND no se define en ninguna
+# utimensat) está entero bajo #ifdef USERLAND, y USERLAND no se define en ninguna
 # config de build de este repo (GNUmakefile, scripts/build-native.sh,
 # ci/termux/packages/proot/build.sh).  Por eso el binario no lo contiene y el
-# vector de symlink es LATENTE: solo seria explotable en un build con USERLAND.
+# vector de symlink es LATENTE: solo sería explotable en un build con USERLAND.
 #
-# Que valida:
-#   1. Alcanzabilidad: el binario instalado sigue sin el subsistema (si alguien
+# Qué valida:
+#   1. Alcance: el binario instalado sigue sin el subsistema (si alguien
 #      activa USERLAND, este test se vuelve rojo y obliga a revalidar el punto 2
 #      con proot real, no con grep).
-#   2. Contracto del codigo: las rutas de meta se abren con O_NOFOLLOW y con
+#   2. Contrato del código: las rutas de meta se abren con O_NOFOLLOW y con
 #      S_ISREG en lectura, fscanf valida su retorno, y get_meta_path mide antes
 #      de concatenar.  Un fopen() pelado sobre la ruta del meta reabre el escape
 #      de integridad en cuanto USERLAND exista.
-#   3. Contracto observable de -0 en el build vigente: el guest se ve root,
-#      chmod/chown no son denegados, stat sirve dueno 0, y NO se crean meta
+#   3. Contrato observable de `-0` en el build vigente: el guest se ve root,
+#      chmod/chown no son denegados, stat sirve dueño 0, y NO se crean meta
 #      files en el territorio del guest.
 set -uo pipefail
 
@@ -38,24 +38,24 @@ pass() { echo "  ok - $*"; }
 [ -x "$PROOT" ] || { echo "SKIP: falta $PROOT (ejecuta ./proot/scripts/build-native.sh -i)"; exit 0; }
 [ -f "$HELPERS" ] || { echo "SKIP: no existe $HELPERS"; exit 0; }
 
-echo "=== fake_id0: meta files (USERLAND) y contracto de -0 ==="
+echo "=== fake_id0: meta files (USERLAND) y contrato de -0 ==="
 
-# --- 1. alcanzabilidad en el build vigente ---
+# --- 1. alcance en el build vigente ---
 if command -v strings >/dev/null 2>&1; then
     if [ "$(strings "$PROOT" | grep -c 'proot-meta-file')" = "0" ]; then
         pass "el binario no incluye el subsistema de meta files (USERLAND apagado)"
     else
-        fail "el binario AHORA contiene meta files: USERLAND se activo y hay que revalidar el symlink ejecutando proot"
+        fail "el binario AHORA contiene meta files: USERLAND se activó y hay que revalidar el symlink ejecutando proot"
     fi
 else
-    echo "  skip - strings no disponible; no se comprueba la alcanzabilidad"
+    echo "  skip - strings no disponible; no se comprueba el alcance"
 fi
 
-# --- 2. contracto del codigo de las rutas de meta ---
+# --- 2. contrato del código de las rutas de meta ---
 if grep -qE '\bfopen[[:space:]]*\(' "$HELPERS"; then
-    fail "quedo un fopen() sobre rutas de meta (reabre el symlink-follow)"
+    fail "quedó un fopen() sobre rutas de meta (reabre el symlink-follow)"
 else
-    pass "ningun fopen() en helper_functions.c: las metas se abren por fd"
+    pass "ningún fopen() en helper_functions.c: las metas se abren por fd"
 fi
 
 for pat in 'O_NOFOLLOW' 'O_CLOEXEC' 'S_ISREG'; do
@@ -80,7 +80,7 @@ else
     fail "get_meta_path concatena antes de medir (overflow de char[PATH_MAX])"
 fi
 
-# --- 3. contracto observable de -0 con el build vigente ---
+# --- 3. contrato observable de -0 con el build vigente ---
 FIX=$(mktemp -d "$TMPDIR/proot-fake-id0.XXXXXX") || exit 1
 cleanup() { [ -n "${FIX:-}" ] && rm -rf -- "$FIX"; }
 trap cleanup EXIT INT TERM
@@ -95,27 +95,27 @@ uid=$(guest "$PREFIX/bin/id" -u | tr -d '[:space:]')
 if [ "$uid" = "0" ]; then
     pass "-0: el guest se ve uid 0"
 else
-    fail "-0: el guest reporto uid '$uid' (esperado 0) $(cat "$FIX/stderr")"
+    fail "-0: el guest reportó uid '$uid' (esperado 0) $(cat "$FIX/stderr")"
 fi
 
 if guest "$PREFIX/bin/sh" -c 'touch /mnt/plain && chmod 640 /mnt/plain && chown 123:123 /mnt/plain'; then
     pass "-0: create/chmod/chown emulados no son denegados"
 else
-    fail "-0: la secuencia create/chmod/chown fallo: $(cat "$FIX/stderr")"
+    fail "-0: la secuencia create/chmod/chown falló: $(cat "$FIX/stderr")"
 fi
 
 owner=$(guest "$PREFIX/bin/stat" -c '%u %g' /mnt/plain | tr -d '[:space:]')
 if [ "$owner" = "00" ]; then
-    pass "-0: stat sirve dueno root al guest"
+    pass "-0: stat sirve dueño root al guest"
 else
-    fail "-0: stat sirvio dueno '$owner' (esperado 0 0)"
+    fail "-0: stat sirvió dueño '$owner' (esperado 0 0)"
 fi
 
 leftovers=$(find "$FIX/bind" -name '.proot-meta-file.*' -print | wc -l | tr -d '[:space:]')
 if [ "$leftovers" = "0" ]; then
     pass "-0: el build vigente no escribe meta files en el territorio del guest"
 else
-    fail "-0: aparecieron $leftovers meta files: USERLAND esta activo y el symlink-follow debe revalidarse ejecutando proot"
+    fail "-0: aparecieron $leftovers meta files: USERLAND está activo y el symlink-follow debe revalidarse ejecutando proot"
 fi
 
 echo ""
@@ -123,4 +123,4 @@ if [ "$FAILS" -ne 0 ]; then
     echo "FAILURES: $FAILS"
     exit 1
 fi
-echo "PASS: contracto de meta files y de --change-id=0:0 intactos"
+echo "PASS: contrato de meta files y de --change-id=0:0 intactos"
