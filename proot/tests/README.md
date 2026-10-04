@@ -46,3 +46,25 @@ Entre las regresiones relevantes de `termux-isolated` están
 `shell/test_termux_isolated_shebang.sh` y
 `shell/test_termux_isolated_shebang_fastpath.sh`; ambas cubren la ejecución de
 shebangs, incluida la ruta rápida del launcher.
+
+## Subdirectorios de `proot/`
+
+| Subdirectorio | Qué cubre |
+|---|---|
+| `hardening/` | fases B/C del hardening, contrato de `fake_id0`, limpieza de temporales y protocolo `--supervise` |
+| `syscalls/` | semántica de syscalls emuladas (`renameat2`, `uname`, `mknod`, `socket`) y gestión talloc |
+| `proc/` | vista `/proc`: filtrado de `maps`, resúmenes de máquina, `mountinfo` de bindings |
+| `resource/` | `--fd-limit` y `--proc-limit` (gate de fork con `EAGAIN`) |
+| `compat/` | compatibilidad del kernel anfitrión: `--ashmem-memfd` y el camino `memfd_create` |
+| `performance/` | benchmarks de anidación y clientes `--exec`, comparación entre builds y coste de `--net-policy` |
+| `networking/` | `--proxy`, `--net-policy`, `--control-fd`, matriz de `accept` y scope de Unix sockets |
+| `probes/` | programas C que compilan los tests anteriores |
+
+`run.sh` descubre los tests con `find -name 'test_*.sh'`, así que añadir un
+directorio temático nuevo basta para que entre en la batería.
+
+Los probes de `probes/` siguen la convención de nombre del `.gitignore`: el
+prefijo `p_` (`p_fs.c`, `p_sys.c`, …) está reservado a los probes del pentest
+local y **no se trackea**. Un probe que forma parte de una regresión commiteada
+debe llamarse sin ese prefijo (`fork_gate.c`, `memfd_probe.c`); si no, el test
+que lo compila falla en un clone limpio.

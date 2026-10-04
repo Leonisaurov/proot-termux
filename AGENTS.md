@@ -10,7 +10,7 @@ ruta operativa vigente.
 
 ## Project Overview
 
-Fork proot-only: cross-compila proot para Android aarch64 (NDK r30 vía Docker + CI GitHub Actions). La fuente vive en `proot/src/` — sin parches, sin downloads. Rama `master`. Security hardening: fases A-F completadas (ver `proot/docs/security/FIXES.md`).
+Fork proot-only: cross-compila proot para Android aarch64 (NDK r29 vía Docker + CI GitHub Actions). La fuente vive en `proot/src/` — sin parches, sin downloads. Rama `master`. Security hardening: fases A-F completadas (ver `proot/docs/security/FIXES.md`).
 
 ## Build & CI
 
@@ -217,6 +217,11 @@ proot/tests/proot/syscalls/test_upstream_link2symlink.sh  # regresiones portadas
 proot/tests/termux-isolated/storage/test_termux_isolated_storage.sh # storage opt-in y binds :mask
 proot/tests/termux-isolated/shell/test_termux_isolated_shebang.sh # termux-exec y shebangs en ambos modos
 proot/tests/termux-isolated/shell/test_termux_isolated_default_shell.sh # shell $SHELL en modo interactivo
+proot/tests/build/test_stale_deps.sh               # .d tolerantes a headers del sysroot eliminados (-MP)
+proot/tests/proot/hardening/test_fake_id0_meta_symlink.sh # contrato de los meta files de fake_id0 y qué hace -0 de verdad
+proot/tests/proot/resource/test_fd_and_proc_limit.sh # --fd-limit heredado al guest; --proc-limit cierra el fork con EAGAIN
+proot/tests/proot/compat/test_ashmem_memfd.sh      # --ashmem-memfd deja un fd de memoria utilizable
+proot/tests/proot/proc/test_mountinfo_bindings.sh  # mountinfo expone cada binding como mount
 ```
 
 `./proot/tests/run.sh` continúa la batería tras cada fallo y los reporta todos al
@@ -232,9 +237,20 @@ Resultados: B=14/14 PASS, C=6/6 PASS, D4/E1/E3/E6=39/39 PASS. Reportes en `proot
 
 ## Arquitectura del fork (no obvia desde los nombres de archivo)
 
-### Extensiones reales (12) en `proot/src/extension/`
+### Extensiones reales (13) en `proot/src/extension/`
 
-`virtual_net`, `resource_limit`, `proc_isolation`, `fake_id0`, `kompat`, `port_switch`, `sysvipc`, `link2symlink`, `hidden_files`, `mountinfo`, `fix_symlink_size`, `ashmem_memfd`.
+`net_policy`, `virtual_net`, `resource_limit`, `proc_isolation`, `fake_id0`, `kompat`, `port_switch`, `sysvipc`, `link2symlink`, `hidden_files`, `mountinfo`, `fix_symlink_size`, `ashmem_memfd`.
+
+### Net policy (`--net-policy`, `--net-allow-*`, `--net-deny-*`, `--control-fd`)
+
+Política estática de red (`extension/net_policy/net_policy.c`, 2826 líneas):
+`off|deny|allow` como modo base, reglas `--net-allow-bind/--net-deny-bind` por
+puerto y `--net-allow/--net-deny` por destino; una regla `deny` siempre gana. Se
+aplica **antes** de las traducciones de `virtual_net` y `port_switch`, así un
+destino denegado no deja estado en el registry ni en el helper. Con
+`--control-fd FD`, los destinos `*`, `tcp://*` y `udp://*` entregan el frame
+`PRCT` (versión 1, timeout de decisión 1 s) al harness, que sigue teniendo que
+autorizarlos. Regresión: `proot/tests/proot/networking/test_net_policy.sh`.
 
 ### Virtual Networking (`--proxy NAME`)
 
@@ -386,7 +402,12 @@ Port mapping (`-p host:container`, máx 64, auto-puerto libre), auto-redirect de
 - **D7 canonicalize cache**: SKIP — `fake_id0` y `link2symlink` dependen de notificaciones `HOST_PATH` por componente; saltarlas en un cache-hit pierde funcionalidad. Requeriría flag opt-in con tradeoff de coherencia.
 - **Lecturas `--proc-isolated`**: clasificación por fd (synth/maps/NONMAPS) evita el `readlink` y la segunda parada ptrace por lectura; ver REV 98-101 en `proot/docs/security/FIXES.md` §I y `proot/docs/performance/benchmarks.md`.
 - **E items**: E1-E8 todos RESUELTO (REV 24-27). Ver `proot/docs/security/FIXES.md` §7 para detalles.
+- **`-MP` en `COMPILE`**: los `.d` generados declaran un target phony por header prerequisito, así que un header del sysroot eliminado o renombrado (p.ej. `ndk-sysroot 30-0` quitó `android/legacy_stdlib_inlines.h` y `bits/stdlib_inlines.h`) ya no aborta el build con `No rule to make target ... Stop.`. Un árbol con `.d` viejos sin stubs se repara con `./proot/scripts/build-native.sh -c` (o `make clean`).
+- **`tracee/mem_watchdog.o/.d`**: artefactos huérfanos de una fuente que ya no existe (`mem_watchdog.c`); no están en `OBJECTS`/`DEPS`, `make clean` no los toca y no afectan el build.
 - **proot necesita `env -i`** al ejecutar en rootfs Alpine — el entorno heredado causa execve failures. Los wrappers están en `proot/tests/rootfs/`.
+- **Contradicción de NDK, pendiente de decisión**: este archivo dice «NDK r29» en *Project Overview*, pero el pin real del pipeline es **r30** — `proot/ci/termux/scripts/properties.sh:308` fija `TERMUX_NDK_VERSION_NUM="30"`, existen `proot/ci/termux/ndk-patches/30/` y los commits `4030519896`/`1cb21ffdcb` pinean la toolchain r30. No se unificó ninguna de las dos: confirma cuál manda antes de tocar el texto o el pin.
+- **`fake_id0` vive en buena parte bajo `#ifdef USERLAND`**: ninguna configuración de build de este repo define `USERLAND` (`src/GNUmakefile`, `scripts/build-native.sh`, `ci/termux/packages/proot/build.sh`). Los call sites de `handle_open/mk/chmod/chown/stat_enter_end` —y por tanto todo el subsistema de meta files— están dentro de esos guardas, y el build oficial compila con `-O3 -flto -ffunction-sections -fdata-sections` + `-Wl,--gc-sections`, así que la cadena `".proot-meta-file."` desaparece del binario: `strings $PREFIX/bin/proot | grep -c proot-meta-file` da 0. Lo que sí se compila es la emulación de identidad (`getuid`/`getresuid`/`getegid` pokes) y el `handle_stat_exit_end` `#ifndef USERLAND`, que es lo que hace que `-0` muestre `0 0` en `stat -c '%u %g'`. No atribuyas al build oficial comportamiento del modo USERLAND, y pon la guardia `#ifdef`/`#ifndef USERLAND` que corresponda en cualquier regresión de esas rutas.
+- **Probes de test y `.gitignore`**: `/proot/tests/proot/probes/p_*` está ignorado a propósito (probes del pentest local). Un probe que necesite estar trackeado se nombra sin el prefijo `p_` (`fork_gate.c`, `memfd_probe.c`); si no, su test falla en un clone limpio.
 
 ## Pentest / Hardening Testing
 

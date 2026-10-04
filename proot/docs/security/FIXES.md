@@ -146,6 +146,86 @@ ruta dentro del filtro.
   sin control-fd. Es IPC local, así que conectar a `/dev/socket/*` desde el guest
   no es una fuga.
 
+## K — Meta files de `fake_id0` y guard del binding (REV 104-105)
+
+### K.1 Los meta files se abrían sin proteger la última componente (latente)
+
+`fake_id0` guarda el owner/group/mode que percibe el guest en un *meta file*
+adyacente: `<dir>/.proot-meta-file.<nombre>`. El nombre lo controla el guest y
+`read_meta_file()`/`write_meta_file()` lo abrían con `fopen()`, que sigue
+symlinks: un guest que colocaba `ln -s <destino> dir/.proot-meta-file.x` hacía
+que proot —corriendo con el uid real del host— truncase y escribiera sobre
+cualquier archivo escribible por ese uid. Además `fscanf()` se usaba sin validar
+el retorno (`lcl_mode` quedaba sin inicializar si el archivo estaba truncado) y
+`get_meta_path()` concatenaba antes de comprobar longitud, sin contar el
+separador.
+
+**Alcance real, medido contra el binario instalado:** todo el subsistema de meta
+files está alcanzado sólo desde `#ifdef USERLAND` (los call sites de
+`handle_open/mk/chmod/chown/stat_enter_end` en `fake_id0.c`), y ninguna
+configuración de build de este repo define `USERLAND` (ni `src/GNUmakefile`, ni
+`scripts/build-native.sh`, ni `ci/termux/packages/proot/build.sh`). Como el build
+oficial lleva `-flto -ffunction-sections -Wl,--gc-sections`, la cadena
+`".proot-meta-file."` ni siquiera aparece: `strings $PREFIX/bin/proot |
+grep -c proot-meta-file` da **0**. Es por tanto un **problema latente**, no un
+escape alcanzable con `-0` en Termux; la severidad que anunció el commit
+`48e6dba29c` ("escape de sandbox") es excesiva y queda corregida aquí. El fix se
+conserva porque la defensa es barata, el flag `-0` sí se publica, y cualquier
+build con `USERLAND` activado heredaría el vector.
+
+Cambios (`src/extension/fake_id0/helper_functions.c`):
+
+- `meta_open()` privado sustituye los dos `fopen()`: `O_NOFOLLOW | O_CLOEXEC` y,
+  en lectura, `fstat` + `S_ISREG` (el `O_NOFOLLOW` no cubre FIFOs) con `ELOOP`
+  si no es archivo regular. No se añade `st_uid == getuid()`: guest y proot
+  comparten uid real, así que sería una falsa garantía.
+- `read_meta_file()` lee en `int` (el `%d` contra `uid_t *`/`gid_t *` no era
+  seguro) y exige `fscanf(...) == 3`; si no, trata el meta como ausente y cae en
+  el fallback (`euid`/`egid`/`otod(755)`), que es la semántica correcta también
+  para `ELOOP`/`ENOTDIR`.
+- `write_meta_file()` devuelve `-errno` real y avisa por `note()`.
+- `get_meta_path()` computa `dir + separador + META_TAG + nombre` y devuelve
+  `-ENAMETOOLONG` **antes** de cualquier `strcat()`.
+- "Emulate, Never Deny" en los dos caminos de creación: `open.c` y `mk.c` registran el meta en
+  best-effort (`(void) write_meta_file(...)`, `return 0`), porque un fallo del
+  libro interno de proot no debe negar una creación que el guest tiene permiso
+  de hacer. Las mutaciones de metadatos (`chmod.c`, `rename.c`, `utimensat.c`)
+  sí propagan el `-errno`.
+
+### K.2 Guard invariante memorizado en `get_binding()` (REV 105)
+
+`get_binding()` se invoca por componente de ruta y, por cada candidato que pasa
+el filtro de prefijo, recalculaba el predicado anti-falso-positivo de binding
+asimétrico (`compare_paths(get_root(tracee), "/") != PATHS_ARE_EQUAL &&
+belongs_to_guestfs(tracee, path)`), que sólo depende de `(side, root, path)`,
+fijos durante todo el bucle. Queda memorizado la primera vez.
+
+Se mantuvo deliberadamente **perezoso**, sin subirlo sobre el `CIRCLEQ_FOREACH_`:
+`get_root()` devuelve `NULL` cuando todavía no hay binding raíz y
+`compare_paths()` hace `strlen()` de su primer argumento, así que un hoisting
+eager invocaría el guard con la lista vacía y abriría un crash que hoy no existe.
+Cuando el guard se cumple, las iteraciones restantes habrían hecho `continue`
+todas, así que el `return NULL` inmediato es equivalente.
+
+Medición A/B en el dispositivo (`tests/proot/performance/test_nested_benchmark.sh`,
+dos binarios instalados uno tras otro, mismos fixtures): sin el cambio
+`0.151/0.158 · 1.94/2.12 · 24.6/21.9 s` para profundidades 1/2/3; con él
+`0.156/0.155 · 2.05/1.99 · 22.4/22.9 s`. Ninguna diferencia queda fuera del ruido
+de la corrida: el guard sobrante es computación pura en usuario mientras el coste
+real lo dominan los `stat`/`readlink`/`openat` que el sandbox tiene que hacer de
+verdad. Se asume ganancia en forma de trabajo estrictamente menor, no como
+número; si algún día se mide una regresión aquí, este es el A/B que hay que
+repetir.
+
+### K.3 Regresiones que cubren features sin test propio
+
+| Test | Afirma |
+|---|---|
+| `tests/proot/hardening/test_fake_id0_meta_symlink.sh` | alcance real del subsistema (0 hits en el binario), contrato de fuente (`O_NOFOLLOW`/`S_ISREG`, `fscanf == 3`, `-ENAMETOOLONG` antes del `strcat`) y comportamiento observable de `-0` en Termux: `touch`/`chmod`/`chown` salen 0 (por el uid real compartido, no por emulación) y el `stat` sirve `0 0` gracias al poke de `handle_stat_exit_end`, sin que se escriba ningún meta file |
+| `tests/proot/resource/test_fd_and_proc_limit.sh` | `--fd-limit` llega al guest (`ulimit -Sn`/`-Hn`) y rechaza valores < 32; `--proc-limit` cierra la puerta tras N procesos con `EAGAIN`. Probe `probes/fork_gate.c` — bash reintenta el `EAGAIN` y daría falso negativo |
+| `tests/proot/compat/test_ashmem_memfd.sh` | `--ashmem-memfd` deja un fd de memoria escribible y legible y no altera lo que percibe el guest cuando el kernel ya tiene `memfd_create` nativo. Probe `probes/memfd_probe.c` |
+| `tests/proot/proc/test_mountinfo_bindings.sh` | `/proc/<pid>/mountinfo` expone cada binding como mount, con ids únicos, sin duplicar la raíz y conservando las líneas reales del kernel; bajo `--proc-isolated` la tabla sigue válidamente separada |
+
 ## F — Vista `/proc` guest estricta (REV 30)
 
 La implementación actual amplía `ISOLATE_PROC` a una vista procfs coherente y
@@ -192,7 +272,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | Leak talloc en shutdown supervise (`free_terminated_tracees`, FU-1..FU-4, `supervise_handle_exited_tracee`, guard `ctl_fd>=0`) | ✅ fixes 5ad187e929 + 414053fc04 |
 | **FASE A COMPLETADA — A2 stat/readlink oracle + C1 kill(-1) broadcast + V4 netlink topology** | ✅ commit `573f4cb8d9` 'fix(isolation): block /proc host stat/readlink oracle, kill(-1) broadcast, netlink topology' (REVISION 19) — pentest ampliado con baselines `*_2` y verificaciones `*_3` |
 | **FASE A COMPLETADA — cierre de los 4 MINORs + hardening señales** | ✅ commit `3b98197d8a` 'fix(isolation): deliver kill broadcasts to guest tracees, block statx on SIGSYS, harden signal validation' (REVISION 20) — kill(-1) entrega real a tracees; statx cubierto en SIGSYS legacy; pentest EMULADO-OK; buffers PATH_MAX; extra kill(0)/kill(-pgid) confinados al guest (ESRCH pgid vacío, EINVAL señal inválida) |
-|| REVISION actual en `ci/termux/packages/proot/build.sh` | **102** — bump SIEMPRE antes de commit si se toca `src/` o `ci/termux/packages/proot/` |
+|| REVISION actual en `ci/termux/packages/proot/build.sh` | **105** (REV 104: meta files de `fake_id0`, §K.1; REV 105: guard del binding, §K.2) — bump SIEMPRE antes de commit si se toca `src/` o `ci/termux/packages/proot/`. Léela siempre del archivo, no de esta fila |
 
 ## 1. Resumen ejecutivo de las 3 auditorías
 
@@ -311,7 +391,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 ## 10. Checklist de commit (reglas AGENTS.md)
 
 1. Editar código (`src/` o `ci/termux/packages/proot/`).
-2. **Bump `TERMUX_PKG_REVISION` en `ci/termux/packages/proot/build.sh` ANTES del commit**. La revisión actual es 102; las referencias a revisiones anteriores en las fases históricas son deliberadas.
+2. **Bump `TERMUX_PKG_REVISION` en `ci/termux/packages/proot/build.sh` ANTES del commit**. La fuente de verdad es ese archivo (105 al escribir esta línea); las referencias a revisiones anteriores en las fases históricas son deliberadas.
 3. `git add -A && git commit -m "<type>(<scope>): <summary>"`.
 4. `git push origin master` (SOLO `origin`).
 5. `gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Success)'` — exit 0=éxito, 1=falló, 2=cancelado. **NO timeout, NO streaming.**
