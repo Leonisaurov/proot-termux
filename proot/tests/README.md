@@ -4,6 +4,7 @@ Las pruebas están separadas por la capa que ejercitan:
 
 | Área | Directorio | Qué valida |
 |---|---|---|
+| build | [`build/`](build/) | generación de dependencias y árbol de build local |
 | PRoot | [`proot/`](proot/) | syscalls, aislamiento, red y hardening |
 | `termux-isolated` | [`termux-isolated/`](termux-isolated/) | cwd, shell, storage, PTY, proc y políticas |
 | control-api | [`control-api/`](control-api/) | protocolo PRCT, launcher y harness |

@@ -205,7 +205,11 @@ ROSEGMENT := $(shell printf 'int main(void){return 0;}\n' | $(LD) -xc - -Wl,--ro
 ######################################################################
 # Build rules
 
-COMPILE = $($(quiet)CC) $(CPPFLAGS) $(CFLAGS) -MD -c $(SRC)$< -o $@
+# -MP agrega un target phony por cada header prerequisito: si el sysroot
+# elimina o renombra un header del sistema (p.ej. ndk-sysroot), un .d viejo
+# deja de abortar el build con "No rule to make target ... Stop." y make
+# simplemente recompila el objeto afectado.
+COMPILE = $($(quiet)CC) $(CPPFLAGS) $(CFLAGS) -MD -MP -c $(SRC)$< -o $@
 LINK    = $($(quiet)LD) -o $@ $^ $(LDFLAGS)
 
 OBJIFY = $($(quiet)GEN)									\

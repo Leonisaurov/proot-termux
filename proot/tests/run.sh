@@ -51,18 +51,20 @@ run_control_api() {
 }
 
 case "${1:-all}" in
+    build) run_dir build ;;
     proot) run_dir proot ;;
     termux-isolated) run_dir termux-isolated ;;
     harness) run_dir harness ;;
     control-api) run_control_api ;;
     all)
+        run_dir build
         run_dir proot
         run_dir termux-isolated
         run_dir harness
         run_control_api
         ;;
     *)
-        echo "usage: $0 {all|proot|termux-isolated|harness|control-api}" >&2
+        echo "usage: $0 {all|build|proot|termux-isolated|harness|control-api}" >&2
         exit 2
         ;;
 esac
