@@ -4,7 +4,7 @@
 [![Build proot](https://github.com/Leonisaurov/proot-termux/actions/workflows/build-proot.yml/badge.svg)](https://github.com/Leonisaurov/proot-termux/actions/workflows/build-proot.yml)
 [![latest proot release](https://img.shields.io/github/v/release/Leonisaurov/proot-termux?label=latest%20proot)](https://github.com/Leonisaurov/proot-termux/releases/latest)
 
-**proot-termux** is a focused fork of [termux-packages](https://github.com/termux/termux-packages) that cross-compiles [proot](https://proot-me.github.io/) for Android **aarch64** using the Android NDK r29 via Docker. The package pipeline targets proot; the checkout also retains the supporting Termux builder, tests, integrations, and documentation.
+**proot-termux** is a focused fork of [termux-packages](https://github.com/termux/termux-packages) that cross-compiles [proot](https://proot-me.github.io/) for Android **aarch64** using the Android NDK r30 via Docker. The package pipeline targets proot; the checkout also retains the supporting Termux builder, tests, integrations, and documentation.
 
 The goal is a lean, automated build pipeline that produces a ready-to-install `.pkg.tar.xz` artifact on every push. Proot remains a standalone, multipurpose tool; its capabilities are selected explicitly by the caller.
 
