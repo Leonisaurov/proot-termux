@@ -1,11 +1,11 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Regresion de ashmem_memfd: el camino memfd_create/ashmem debe dejar al guest
-# un fd util, escribible y con el tamano correcto, tanto con la flag como sin
+# Regresión de ashmem_memfd: el camino memfd_create/ashmem debe dejar al guest
+# un fd útil, escribible y con el tamaño correcto, tanto con la flag como sin
 # ella (principio "sin flags -> cero overhead").
 #
-# Las dos ramas del diseno se cubren segun el dispositivo:
-#   - kernel con memfd_create: la extension no interviene y el resultado debe
-#     ser identico con y sin flag.
+# Las dos ramas del diseño se cubren según el dispositivo:
+#   - kernel con memfd_create: la extensión no interviene y el resultado debe
+#     ser idéntico con y sin flag.
 #   - kernel sin memfd_create: sin flag el probe falla; con --ashmem-memfd debe
 #     funcionar reescribiendo la syscall a openat("/dev/ashmem").
 set -uo pipefail
@@ -53,23 +53,23 @@ case "$plain" in
         if [ "$armed" = "$plain" ]; then
             pass "con memfd nativo, --ashmem-memfd no altera lo que percibe el guest"
         else
-            fail "--ashmem-memfd cambio el resultado: '$plain' -> '$armed'"
+            fail "--ashmem-memfd cambió el resultado: '$plain' -> '$armed'"
         fi ;;
     memfd_errno=*)
-        # Kernel sin memfd: aqui es donde la extension tiene que ganar.
+        # Kernel sin memfd: aquí es donde la extensión tiene que ganar.
         pass "sin la flag el guest no tiene memfd (${plain})"
         case "$armed" in
             *"$EXPECTED"*)
                 pass "--ashmem-memfd da un fd escribible, legible y con st_size correcto" ;;
             *)
-                fail "--ashmem-memfd no rescato memfd_create: '$armed' $(cat "$FIX/stderr")" ;;
+                fail "--ashmem-memfd no rescata memfd_create: '$armed' $(cat "$FIX/stderr")" ;;
         esac ;;
     *)
-        fail "el probe no devolvio un resultado interpretable: '$armed' / '$(cat "$FIX/stderr")'" ;;
+        fail "el probe no devolvió un resultado interpretable: '$armed' / '$(cat "$FIX/stderr")'" ;;
 esac
 
-# El fd tiene que seguir siendo util para el stub de fstat de la extension:
-# se comprueba adentro del guest con un tamano no trivial.
+# El fd tiene que seguir siendo útil para el stub de fstat de la extensión:
+# se comprueba dentro del guest con un tamaño no trivial.
 big=$(run --ashmem-memfd "$PREFIX/bin/sh" -c 'echo -n 0123456789 > /dev/null; echo ok')
 if [ "$big" = "ok" ]; then
     pass "el guest sigue pudiendo escribir bajo la flag"

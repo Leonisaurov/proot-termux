@@ -1,5 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Regresion de resource_limit: --fd-limit (heredado por el guest) y --proc-limit
+# Regresión de resource_limit: --fd-limit (heredado por el guest) y --proc-limit
 # (puerta guest-side sobre fork/clone/vfork con -EAGAIN).
 #
 # --proc-limit se mide con un probe C: bash reintenta EAGAIN internamente y un
@@ -44,15 +44,15 @@ got=$(run --fd-limit 64 "$PREFIX/bin/sh" -c 'ulimit -Sn; ulimit -Hn' | tr -d '[:
 if [ "$got" = "6464" ]; then
     pass "--fd-limit 64 se hereda al guest (soft y hard = 64)"
 else
-    fail "--fd-limit 64: el guest reporto '$got' (esperado 6464)"
+    fail "--fd-limit 64: el guest reportó '$got' (esperado 6464)"
 fi
 
 if run --fd-limit 8 "$PREFIX/bin/true" 2>/dev/null; then
-    fail "--fd-limit 8 fue aceptado (el minimo es 32)"
+    fail "--fd-limit 8 fue aceptado (el mínimo es 32)"
 else
-    pass "--fd-limit 8 rechazado por la validacion"
+    pass "--fd-limit 8 rechazado por la validación"
     grep -q "at least 32" "$FIX/stderr" \
-        && pass "el rechazo explica el minimo" \
+        && pass "el rechazo explica el mínimo" \
         || fail "--fd-limit 8 fallo por otra razon: $(cat "$FIX/stderr")"
 fi
 
@@ -72,12 +72,12 @@ case "$gated" in
     created=[0-4]*)
         pass "--proc-limit 3 cerro la puerta tras $created proceso(s) (pidia 5)" ;;
     *)
-        fail "--proc-limit 3 devolvio '$gated' (esperado menos de 5 forks)" ;;
+        fail "--proc-limit 3 devolvió '$gated' (esperado menos de 5 forks)" ;;
 esac
 if [ "$errno_seen" = "$EAGAIN" ]; then
     pass "el fork rechazado recibe EAGAIN, la semantica natural de RLIMIT_NPROC"
 else
-    fail "el fork rechazado devolvio errno=$errno_seen (esperado $EAGAIN)"
+    fail "el fork rechazado devolvió errno=$errno_seen (esperado $EAGAIN)"
 fi
 if [ "${created:-0}" -lt 5 ] && [ "${created:-0}" -ge 1 ]; then
     pass "la puerta no niega todo ni deja pasar todo"
@@ -86,9 +86,9 @@ else
 fi
 
 if run --proc-limit 0 "$PREFIX/bin/true" 2>/dev/null; then
-    fail "--proc-limit 0 fue aceptado (el minimo es 1)"
+    fail "--proc-limit 0 fue aceptado (el mínimo es 1)"
 else
-    pass "--proc-limit 0 rechazado por la validacion"
+    pass "--proc-limit 0 rechazado por la validación"
 fi
 
 echo ""

@@ -1,15 +1,15 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Regresion de la extension mountinfo: /proc/<pid>/mountinfo que lee el guest
+# Regresión de la extensión mountinfo: /proc/<pid>/mountinfo que lee el guest
 # debe listar los bindings activos (para que helpers como bubblewrap encuentren
-# el "mount" que creen haber hecho) y conservarse como tabla valida.
+# el "mount" que creen haber hecho) y conservarse como tabla válida.
 #
-# Sin rootfs la raiz del guest es la del host, asi que el camino ejercitado es
+# Sin rootfs la raíz del guest es la del host, así que el camino ejercitado es
 # "tabla real + lineas de bindings", que es determinista.  El camino de
-# termux/proot#294 (raiz bajo /data, columna root reescrita a "/") pertenece a
+# termux/proot#294 (raíz bajo /data, columna root reescrita a "/") pertenece a
 # termux-isolated y lo cubre tests/termux-isolated/proc/.
 #
-# Con --proc-isolated el callback legacy esta expluitamente fuera (hace
-# early-return): la vista la sintetiza proc_isolation y aqui solo se verifica
+# Con --proc-isolated el callback legacy está explícitamente fuera (hace
+# early-return): la vista la sintetiza proc_isolation y aquí solo se verifica
 # que el archivo siga siendo una tabla mountinfo parseable.
 set -uo pipefail
 
@@ -69,7 +69,7 @@ else
     fail "falta la linea del binding /srv"
 fi
 
-# insort_binding3 ordena la lista, asi que no se asume que /mnt sea el primero:
+# insort_binding3 ordena la lista, así que no se asume que /mnt sea el primero:
 # lo que importa es que cada mount reciba su propio id.
 ids=$(printf '%s\n' "$binds" | awk '{print $1}' | sort -u | wc -l | tr -d '[:space:]')
 if [ "$ids" = "2" ]; then
@@ -79,9 +79,9 @@ else
 fi
 
 if printf '%s\n' "$out" | grep -qE '^[0-9]+ [0-9]+ 0:1 / / rw,relatime - bind '; then
-    fail "la raiz '/' se emite como bind (debe estar cubierta por la tabla del kernel)"
+    fail "la raíz ./. se emite como bind (debe estar cubierta por la tabla del kernel)"
 else
-    pass "el binding raiz no se duplica en la tabla"
+    pass "el binding raíz no se duplica en la tabla"
 fi
 
 if printf '%s\n' "$out" | grep -vq ' - bind '; then

@@ -1,7 +1,7 @@
 /* Probe de --ashmem-memfd: usa memfd_create de punta a punta y reporta lo que
- * percibe el guest (fd, tamano tras fstat, contenido releido).  La extension
+ * percibe el guest (fd, tamaño tras fstat, contenido releído).  La extensión
  * reescribe memfd_create a openat("/dev/ashmem") cuando el kernel no lo
- * soporta y arregla el st_size de esos fds, asi que este probe debe imprimir lo
+ * soporta y arregla el st_size de esos fds, así que este probe debe imprimir lo
  * mismo con y sin la flag. */
 #include <errno.h>
 #include <stdio.h>
