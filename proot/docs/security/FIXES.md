@@ -207,15 +207,17 @@ eager invocaría el guard con la lista vacía y abriría un crash que hoy no exi
 Cuando el guard se cumple, las iteraciones restantes habrían hecho `continue`
 todas, así que el `return NULL` inmediato es equivalente.
 
-Medición A/B en el dispositivo (`tests/proot/performance/test_nested_benchmark.sh`,
-dos binarios instalados uno tras otro, mismos fixtures): sin el cambio
-`0.151/0.158 · 1.94/2.12 · 24.6/21.9 s` para profundidades 1/2/3; con él
-`0.156/0.155 · 2.05/1.99 · 22.4/22.9 s`. Ninguna diferencia queda fuera del ruido
-de la corrida: el guard sobrante es computación pura en usuario mientras el coste
-real lo dominan los `stat`/`readlink`/`openat` que el sandbox tiene que hacer de
-verdad. Se asume ganancia en forma de trabajo estrictamente menor, no como
-número; si algún día se mide una regresión aquí, este es el A/B que hay que
-repetir.
+Medición: **no es resoluble con este repo en este dispositivo**. El A/B entrelazado
+(`tests/proot/performance/test_nested_benchmark.sh`, tres pares base/memo
+alternando el binario instalado para controlar la deriva térmica) dio medianas en
+frío de 0.152 vs 0.152 s en profundidad 1, 1.97 vs 2.48 s en profundidad 2 y
+24.0 vs 24.8 s en profundidad 3, con dispersión dentro del mismo brazo mayor que
+la diferencia entre brazos (profundidad 2: 1.88 a 3.93 s). El coste del sandbox
+lo dominan los `stat`/`readlink`/`openat` reales y la ida y vuelta de ptrace, no
+el predicado que se memoriza. Se justifica por trabajo estrictamente menor --
+cero recomputaciones del guard por candidato--, no por un número: si alguien
+quiere reabrir esto, necesita un microbenchmark que mida `translate_path()` sin
+proceso hijo delante.
 
 ### K.3 Regresiones que cubren features sin test propio
 
