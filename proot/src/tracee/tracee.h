@@ -111,6 +111,11 @@ typedef struct tracee {
 	 * stay scoped to the would-be namespace.  Reset once consumed.  */
 	bool clone_stripped_newns;
 
+	/* Same for CLONE_NEWNET: set when the current clone(2)/clone3(2) had
+	 * that flag stripped, so the new child is not registered as if it
+	 * owned a network namespace of its own.  Reset once consumed.  */
+	bool clone_stripped_newnet;
+
 	/* Emulation of AF_NETLINK / NETLINK_ROUTE sockets for
 	 * sandbox helpers like bubblewrap that try to bring up the
 	 * loopback interface inside their would-be net namespace.
@@ -192,6 +197,19 @@ typedef struct tracee {
 	bool _regs_were_changed;
 	bool restore_original_regs;
 	bool restore_original_regs_after_seccomp_event;
+
+	/* True when the fork-like syscall which created the child
+	 * being registered is one PRoot runs in place of another, that
+	 * the outer seccomp policy rejected: fork(2) is run as clone(2)
+	 * with other arguments, see handle_seccomp_event_common().  Set
+	 * by new_child(), consumed by attach_child().  */
+	bool fork_rewritten_after_seccomp;
+
+	/* True until the first stop of a child created that way: it
+	 * then gets back the registers its parent had before the
+	 * rewrite, as the parent does at the exit stage, see
+	 * restore_child_regs_after_seccomp().  */
+	bool restore_regs_at_first_stop;
 
 	/* State for the special handling of SIGSTOP.  */
 	enum {
@@ -303,6 +321,14 @@ typedef struct tracee {
 
 	/* Ensure the sysexit stage is always hit under seccomp.  */
 	bool sysexit_pending;
+
+	/* True when the kernel reported a fork event of this tracee without
+	 * the new child's PID; the child, created with pending_clone_flags
+	 * and starting with the stack pointer pending_child_sp, is then
+	 * registered later (see new_child()).  */
+	bool pending_child;
+	word_t pending_clone_flags;
+	word_t pending_child_sp;
 
 	/* True when the sysenter stage replaced a syscall with an avoider
 	 * number that the host kernel cancels instead of executing.  Such a
@@ -436,6 +462,8 @@ extern Tracee *get_stopped_ptracee(const Tracee *ptracer, pid_t pid,
 				bool only_with_pevent, word_t wait_options);
 extern bool has_ptracees(const Tracee *ptracer, pid_t pid, word_t wait_options);
 extern int new_child(Tracee *parent, word_t clone_flags);
+extern void resolve_pending_child(Tracee *parent);
+extern void adopt_held_children(void);
 extern Tracee *new_dummy_tracee(TALLOC_CTX *context);
 extern void terminate_tracee(Tracee *tracee);
 extern void free_terminated_tracees();
