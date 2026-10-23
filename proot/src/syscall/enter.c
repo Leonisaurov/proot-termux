@@ -89,9 +89,55 @@
 #define CLONE_NEWCGROUP 0x02000000
 #endif
 
+#ifndef OPEN_TREE_CLONE
+#define OPEN_TREE_CLONE 1
+#endif
+
 #define CLONE_NS_MASK (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | \
 		       CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET | \
 		       CLONE_NEWCGROUP | CLONE_NEWTIME)
+
+/**
+ * Force PRoot to intercept the exit stage of the fork-family syscall
+ * the @tracee is entering, i.e. restart it with PTRACE_SYSCALL rather
+ * than the seccomp PTRACE_CONT fast path.
+ *
+ * A plain syscall restarted with PTRACE_CONT after its
+ * PTRACE_EVENT_SECCOMP stop simply runs to completion, so PRoot
+ * normally takes that shortcut for syscalls it doesn't need the exit
+ * of.  But on some kernels (seen on aarch64 4.14 openela) a *forking*
+ * syscall restarted that way never runs: the kernel keeps re-reporting
+ * its seccomp entry stop instead of executing it and delivering
+ * PTRACE_EVENT_FORK/CLONE, so the tracee spins forever entering
+ * clone(2) and no child is ever created.  Restarting it with
+ * PTRACE_SYSCALL (as the exit-intercepted syscalls that do work on
+ * that kernel are) lets it proceed; asking for the exit stage keeps the
+ * event loop synchronised (the parent's clone(2) still reports a
+ * sysexit after PTRACE_EVENT_FORK).  Harmless on kernels where the
+ * fast path already worked: it only adds one ptrace stop per fork.
+ */
+static void force_fork_sysexit(Tracee *tracee)
+{
+	tracee->sysexit_pending = true;
+	tracee->restart_how = PTRACE_SYSCALL;
+}
+
+/**
+ * Force PRoot to intercept the exit stage of the syscall the @tracee
+ * is entering, whose arguments now point to data PRoot pushed below
+ * its stack pointer.  On the seccomp PTRACE_CONT fast path, the stack
+ * pointer is given back before the syscall runs: a signal handler
+ * that interrupts a blocking syscall then overwrites these data, and
+ * the syscall is restarted with arguments that point to garbage.  The
+ * exit stage keeps the stack pointer lowered until the syscall is
+ * over and restores the original arguments, so a restarted syscall
+ * is translated anew.
+ */
+static void keep_pushed_args(Tracee *tracee)
+{
+	tracee->sysexit_pending = true;
+	tracee->restart_how = PTRACE_SYSCALL;
+}
 
 /**
  * Translate @path and put the result in the @tracee's memory address
@@ -246,6 +292,25 @@ static int translate_path2_parent(Tracee *tracee, int dir_fd, char path[PATH_MAX
 		return status;
 
 	return set_sysarg_path(tracee, translated_path, reg);
+}
+
+/**
+ * With AT_EMPTY_PATH in @flags, an empty @path makes the kernel act on
+ * @dir_fd itself, that is on the current working directory when
+ * @dir_fd is AT_FDCWD.  The tracee's actual cwd is still the host
+ * directory PRoot was launched from (the guest one is only emulated),
+ * so replace @path with "." in that case: it is then translated
+ * against the guest cwd like any other relative path.  A NULL pointer,
+ * which get_sysarg_path() also reports as an empty @path, is left as
+ * is for the kernel to reject.
+ */
+static void empty_path_at_cwd(const Tracee *tracee, int dir_fd, char path[PATH_MAX], Reg reg, word_t flags)
+{
+	if (   path[0] == '\0'
+	    && dir_fd == AT_FDCWD
+	    && (flags & AT_EMPTY_PATH) != 0
+	    && peek_reg(tracee, CURRENT, reg) != 0)
+		strcpy(path, ".");
 }
 
 /**
@@ -1390,12 +1455,17 @@ static bool is_proc_userns_file(const char *path)
 /**
  * Redirect openat()/open() of /proc/.../uid_map etc. to /dev/null so
  * that writes appear to succeed.  @reg holds the path argument; the
- * path has already been translated to host form.
+ * path has already been translated to host form.  Read-only opens go
+ * to the kernel: an empty uid_map tells readers they are in a user
+ * namespace without a mapping, so tools that verify file or socket
+ * ownership (Claude Code's background daemon, for one) refuse to run.
  */
-static void maybe_redirect_userns_file(Tracee *tracee, Reg reg)
+static void maybe_redirect_userns_file(Tracee *tracee, Reg reg, int flags)
 {
 	char host_path[PATH_MAX];
 
+	if ((flags & O_ACCMODE) == O_RDONLY)
+		return;
 	if (get_sysarg_path(tracee, host_path, reg) < 0)
 		return;
 	if (!is_proc_userns_file(host_path))
@@ -1668,6 +1738,8 @@ int translate_syscall_enter(Tracee *tracee)
 
 	case PR_sendto: {
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
+		word_t address;
+
 		if (is_fake_netlink_fd(tracee, fd)) {
 			word_t buf = peek_reg(tracee, CURRENT, SYSARG_2);
 			word_t len = peek_reg(tracee, CURRENT, SYSARG_3);
@@ -1679,14 +1751,31 @@ int translate_syscall_enter(Tracee *tracee)
 			status = 0;
 			break;
 		}
+
+		/* The destination can be a named Unix domain socket, as the
+		 * address given to connect(2): without this the destination of
+		 * a send reached the kernel as the guest wrote it, so an
+		 * absolute path was looked up on the host and a relative one
+		 * was resolved against the directory PRoot started in.  */
+		address = peek_reg(tracee, CURRENT, SYSARG_5);
+		status = translate_send_address(tracee, &address,
+						(int) peek_reg(tracee, CURRENT, SYSARG_6));
+		if (status <= 0)
+			break;
+
+		poke_reg(tracee, SYSARG_5, address);
+		poke_reg(tracee, SYSARG_6, sizeof(struct sockaddr_un));
+		keep_pushed_args(tracee);
+
 		status = 0;
 		break;
 	}
 
 	case PR_sendmsg: {
 		int fd = peek_reg(tracee, CURRENT, SYSARG_1);
+		word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
+
 		if (is_fake_netlink_fd(tracee, fd)) {
-			word_t msghdr_addr = peek_reg(tracee, CURRENT, SYSARG_2);
 			size_t w = sizeof_word(tracee);
 			word_t total = 0;
 			word_t iov_ptr, iov_count;
@@ -1727,6 +1816,32 @@ int translate_syscall_enter(Tracee *tracee)
 			status = 0;
 			break;
 		}
+
+		/* msg_name is the destination, see PR_sendto above.  */
+		status = translate_sendmsg_enter(tracee, &msghdr_addr);
+		if (status <= 0)
+			break;
+
+		poke_reg(tracee, SYSARG_2, msghdr_addr);
+		keep_pushed_args(tracee);
+
+		status = 0;
+		break;
+	}
+
+	case PR_sendmmsg: {
+		word_t vector = peek_reg(tracee, CURRENT, SYSARG_2);
+		word_t vlen   = (unsigned int) peek_reg(tracee, CURRENT, SYSARG_3);
+
+		/* Each msg_name is a destination, see PR_sendto above.  */
+		status = translate_sendmmsg_enter(tracee, &vector, &vlen);
+		if (status <= 0)
+			break;
+
+		poke_reg(tracee, SYSARG_2, vector);
+		poke_reg(tracee, SYSARG_3, vlen);
+		keep_pushed_args(tracee);
+
 		status = 0;
 		break;
 	}
@@ -1904,6 +2019,21 @@ int translate_syscall_enter(Tracee *tracee)
 			status = 0;
 			break;
 
+		case SYS_SENDTO:
+		case SYS_SENDMSG:
+		case SYS_SENDMMSG:
+			/* See case PR_sendto and the following ones.  */
+			status = translate_socketcall_send_enter(tracee,
+					peek_reg(tracee, CURRENT, SYSARG_1), &args_addr);
+			if (status <= 0)
+				break;
+
+			poke_reg(tracee, SYSARG_2, args_addr);
+			keep_pushed_args(tracee);
+
+			status = 0;
+			break;
+
 		default:
 			status = 0;
 			break;
@@ -2000,6 +2130,7 @@ int translate_syscall_enter(Tracee *tracee)
 				tracee->clone_stripped_newns = true;
 			poke_reg(tracee, SYSARG_1, flags & ~(word_t) CLONE_NS_MASK);
 		}
+		force_fork_sysexit(tracee);
 		status = 0;
 		break;
 	}
@@ -2018,9 +2149,16 @@ int translate_syscall_enter(Tracee *tracee)
 					  flags & ~(word_t) CLONE_NS_MASK);
 			}
 		}
+		force_fork_sysexit(tracee);
 		status = 0;
 		break;
 	}
+
+	case PR_fork:
+	case PR_vfork:
+		force_fork_sysexit(tracee);
+		status = 0;
+		break;
 
 	/* mount(2) and pivot_root(2) are emulated by translating them
 	 * into PRoot bindings (see emulate_mount/emulate_pivot_root)
@@ -2039,6 +2177,57 @@ int translate_syscall_enter(Tracee *tracee)
 		status = 0;
 		break;
 
+	/* The file-descriptor based mount API has no such emulation.
+	 * Letting it reach the kernel would either fail (no
+	 * CAP_SYS_ADMIN) or, when PRoot runs as root, really mount
+	 * behind the bindings' back.  Report it as missing, like
+	 * kernels before 5.2 do: libmount then falls back to mount(2),
+	 * emulated above, as soon as the first call it makes, fsopen(2)
+	 * or open_tree(2), fails with ENOSYS.  */
+	case PR_fsopen:
+	case PR_fsconfig:
+	case PR_fsmount:
+	case PR_fspick:
+	case PR_move_mount:
+	case PR_mount_setattr:
+	case PR_open_tree_attr:
+		status = -ENOSYS;
+		break;
+
+	case PR_open_tree:
+		/* int open_tree(int dirfd, const char *pathname, unsigned int flags) */
+		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
+		flags = peek_reg(tracee, CURRENT, SYSARG_3);
+
+		/* A cloned tree is only good for move_mount(2), which is
+		 * missing too.  Without OPEN_TREE_CLONE this is an
+		 * O_PATH-like open and the path is translated.  */
+		if ((flags & OPEN_TREE_CLONE) != 0) {
+			status = -ENOSYS;
+			break;
+		}
+
+		status = get_sysarg_path(tracee, path, SYSARG_2);
+		if (status < 0)
+			break;
+
+		/* An empty path with AT_EMPTY_PATH names @dirfd itself;
+		 * for AT_FDCWD the kernel would use the tracee's real
+		 * working directory, which PRoot never changes, instead
+		 * of the guest one.  A NULL path is left for the kernel
+		 * to reject.  */
+		if (   path[0] == '\0'
+		    && dirfd == AT_FDCWD
+		    && (flags & AT_EMPTY_PATH) != 0
+		    && peek_reg(tracee, CURRENT, SYSARG_2) != 0)
+			strcpy(path, ".");
+
+		if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
+			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
+		else
+			status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
+		break;
+
 	case PR_open:
 		flags = peek_reg(tracee, CURRENT, SYSARG_2);
 
@@ -2055,10 +2244,11 @@ int translate_syscall_enter(Tracee *tracee)
 		else
 			status = translate_sysarg(tracee, SYSARG_1, REGULAR);
 		if (status >= 0)
-			maybe_redirect_userns_file(tracee, SYSARG_1);
+			maybe_redirect_userns_file(tracee, SYSARG_1, flags);
 		break;
 
 	case PR_fchownat:
+	case PR_fchmodat2:
 	case PR_fstatat64:
 	case PR_newfstatat:
 	case PR_utimensat:
@@ -2073,6 +2263,8 @@ int translate_syscall_enter(Tracee *tracee)
 			|| syscall_number == PR_name_to_handle_at)
 			? peek_reg(tracee, CURRENT, SYSARG_5)
 			: peek_reg(tracee, CURRENT, SYSARG_4);
+
+		empty_path_at_cwd(tracee, dirfd, path, SYSARG_2, flags);
 
 		if ((flags & AT_SYMLINK_NOFOLLOW) != 0)
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, SYMLINK);
@@ -2090,6 +2282,11 @@ int translate_syscall_enter(Tracee *tracee)
 		status = get_sysarg_path(tracee, path, SYSARG_2);
 		if (status < 0)
 			break;
+
+		/* Only faccessat2 has a flags argument.  */
+		if (syscall_number == PR_faccessat2)
+			empty_path_at_cwd(tracee, dirfd, path, SYSARG_2,
+					peek_reg(tracee, CURRENT, SYSARG_4));
 
 		status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
 		break;
@@ -2151,6 +2348,8 @@ int translate_syscall_enter(Tracee *tracee)
 			NET_CONTROL_PATH_READ);
 		if (status < 0)
 			break;
+
+		empty_path_at_cwd(tracee, olddirfd, oldpath, SYSARG_2, flags);
 
 		if ((flags & AT_SYMLINK_FOLLOW) != 0)
 			status = translate_path2(tracee, olddirfd, oldpath, SYSARG_2, REGULAR);
@@ -2219,7 +2418,7 @@ int translate_syscall_enter(Tracee *tracee)
 		else
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
 		if (status >= 0)
-			maybe_redirect_userns_file(tracee, SYSARG_2);
+			maybe_redirect_userns_file(tracee, SYSARG_2, flags);
 		break;
 
 	case PR_readlinkat:
@@ -2375,6 +2574,9 @@ int translate_syscall_enter(Tracee *tracee)
 		status = get_sysarg_path(tracee, newpath, SYSARG_2);
 		if (status < 0)
 			break;
+
+		empty_path_at_cwd(tracee, newdirfd, newpath, SYSARG_2,
+				peek_reg(tracee, CURRENT, SYSARG_3));
 
 		status = translate_path2(
 			tracee,
