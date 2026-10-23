@@ -31,19 +31,40 @@ desvinculan antes de `bind`; los errores de reserva, cierre, `unlink`, `bind` y
 Verificación local: todos los scripts bajo `tests/` existentes, 11/11 scripts
 con código 0; D4/E1/E3/E6 reportó 39/39, net policy 9/9 y Phase C 6/6.
 
-## H — Seguimiento de upstream (v5.1.107.92)
+## H — Seguimiento de upstream (v5.1.107.99, port completado)
 
-`upstream/master` fue revisado hasta `7266fb3e85` (`v5.1.107.92`). Los cuatro
-commits posteriores a la base común son `7ff389a181`, `894e5789cd`,
-`61681c6481` y `7266fb3e85`. El fork conserva deliberadamente su árbol
-`src/`: el upstream actualizado usa `src/` y una fusión normal
-eliminaría componentes propios del fork.
+El sync quedó cerrado sobre `968ae1be84` = `v5.1.107.99`: los 47 commits
+posteriores a `7266fb3e85` (`v5.1.107.92`) están portados al árbol compilado
+`src/` en siete commits de grupo, con `TERMUX_PKG_REVISION` 106→112 y
+`TERMUX_PKG_VERSION` `5.1.107.89`→`5.1.107.99`. El manifiesto commit a commit,
+las disposiciones y las medidas están en [`../UPSTREAM.md`](../UPSTREAM.md); la
+herramienta es `scripts/sync_upstream.sh`.
 
-La rama registra esa referencia upstream mediante una fusión de historial sin
-cambiar el árbol de trabajo. Los cambios funcionales de link2symlink y la
-corrección sysenter/sysexit para kernels Android antiguos quedan identificados
-para portarlos al árbol compilado del fork, con pruebas específicas antes de
-activarlos.
+Qué se llevó: la serie completa de link2symlink (incluido el caso en que una
+traducción fallada releía rutas del tracee y **movía ficheros del host fuera
+del rootfs**), la corrección de `getdents(2)` de hidden_files que mataba PRoot
+con SIGSEGV, las direcciones de carga de ARM64 reubicadas para no partir el
+espacio de 39 bits, la traducción de destinos en `sendto/sendmsg/sendmmsg`,
+`open_tree`, `fchmodat2` y el path vacío en `AT_FDCWD`, los registros de
+`fake_id0` aplicados después del kernel, y el registro del hijo cuando el
+evento de fork no trae PID.
+
+Dos cosas siguen deliberadamente fuera, escritas en el manifiesto: las 11
+líneas de `8bf810ccc4` (fallback de `SYS_SECCOMP` para glibc 2.43 — Bionic lo
+define, así que sería código muerto) y el `AGENTS.md` de upstream
+(`bd6d55e122`, que además declara "No sync with upstream"). El paquete Termux
+oficial compila con `PROOT_WITH_LIBANDROID_SHMEM=true`; este fork no, y la
+divergencia está documentada en `docs/UPSTREAM.md` con su justificación.
+
+Hallazgo nuevo: `05a93edfc8` trae un fallo de upstream que sólo se manifiesta
+con nuestro build (NDK clang 21, `-O3 -flto`) — `get_link_count()` indexaba con
+`dot[-i]` sobre un `size_t` y SIGSEGV al abrir un enlace fingido. Corregido en
+`009340ab` y fijado por `tests/proot/syscalls/test_link2symlink_link_count.sh`.
+
+Medición del port: cobertura acumulada de upstream 99%, 1299/1299 líneas propias
+preservadas, batería `tests/run.sh all` en 68 pasos con RC=0 (igual que el
+baseline, con los mismos 12 SKIP por el rootfs Alpine ausente) y overhead sin
+flags de +0,6% (9427→9485 ms en 60 corridas), dentro del ruido.
 
 ## I — Revisión 96 (auditoría completa)
 

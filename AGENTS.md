@@ -93,14 +93,23 @@ gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Succ
 
 - Exit: 0=éxito, 1=falló, 2=cancelado. `gita notify` bloquea hasta que el workflow termina (o retorna al instante si ya terminó). NO usar `timeout`, NO streaming.
 
-### ⚠️ Inconsistencia de versión (documentada, no resuelta)
+### Versión del paquete
 
 | Fuente | VERSION | REVISION |
 |--------|---------|----------|
-| `proot/ci/termux/packages/proot/build.sh` | `5.1.107.89` | `46` |
-| `proot/scripts/build-native.sh` | `5.1.107.87` | `16` |
+| `proot/ci/termux/packages/proot/build.sh` | `5.1.107.99` | ver archivo (canónica) |
+| `proot/scripts/build-native.sh` | `5.1.107.99` | alineada con la anterior |
 
-Discrepancia verificada entre ambos. NO asumas cuál es canónica ni la sincronices unilateralmente; usa la del archivo que edites.
+Ambas quedaron alineadas en el sync a `v5.1.107.99` (oct 2026). Sigue vigente la regla anterior: la
+revisión canónica es la de `build.sh`, y no hay que volver a desalinearlas sin una razón escrita.
+
+### Sync con upstream
+
+`proot/docs/UPSTREAM.md` guarda el punto de sincronización y el manifiesto commit a commit. La fuente
+propia vive en `proot/src/` mientras upstream publica en `src/`, así que **no se hace fusión de árboles**:
+se porta por archivo o por commit con `proot/scripts/sync_upstream.sh` (`--status`, `--merge-tip`,
+`--apply`, `--verify`, `--coverage`). `--verify` es la puerta que prueba que el port no perdió trabajo
+propio; `--coverage` prueba que el cambio de upstream llegó.
 
 ## Critical Rules
 
@@ -166,7 +175,7 @@ Convención: `<type>(<scope>): <summary>` — types: `fix`, `enhance`, `chore`, 
 | Remote | URL | Estado |
 |--------|-----|--------|
 | `origin` | `https://github.com/Leonisaurov/proot-termux.git` | ✅ preferido, único para push |
-| `upstream` | `https://github.com/termux/proot.git` | ⛔ deprecado, no usar |
+| `upstream` | `https://github.com/termux/proot.git` | ⛔ nunca para push; ✅ para `git fetch` del sync |
 
 ### Gotchas del entorno (Termux)
 
@@ -222,6 +231,9 @@ proot/tests/proot/hardening/test_fake_id0_meta_symlink.sh # contrato de los meta
 proot/tests/proot/resource/test_fd_and_proc_limit.sh # --fd-limit heredado al guest; --proc-limit cierra el fork con EAGAIN
 proot/tests/proot/compat/test_ashmem_memfd.sh      # --ashmem-memfd deja un fd de memoria utilizable
 proot/tests/proot/proc/test_mountinfo_bindings.sh  # mountinfo expone cada binding como mount
+proot/tests/proot/compat/test_arm64_load_addresses.sh # reserva de 256 GiB dentro del guest (arch.h)
+proot/tests/proot/proc/test_hidden_files_getdents.sh  # getdents fallido no mata PRoot
+proot/tests/proot/syscalls/test_link2symlink_link_count.sh # enlace fingido abierto por fd y conteos
 ```
 
 `./proot/tests/run.sh` continúa la batería tras cada fallo y los reporta todos al

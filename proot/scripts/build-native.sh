@@ -13,8 +13,8 @@ readonly SOURCE_DIR="$PROJECT_DIR/src"
 readonly TEMPLATE_CHROOT="$PROJECT_DIR/ci/termux/packages/proot/termux-chroot"
 
 readonly PKG_NAME="proot"
-readonly PKG_VERSION="5.1.107.87"
-readonly PKG_REVISION=16
+readonly PKG_VERSION="5.1.107.99"
+readonly PKG_REVISION=112
 readonly PKG_ARCH="aarch64"
 readonly PKG_FULLVER="${PKG_VERSION}-${PKG_REVISION}"
 readonly PKG_FILENAME="${PKG_NAME}-${PKG_FULLVER}-${PKG_ARCH}.pkg.tar.xz"
