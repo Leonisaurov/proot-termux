@@ -21,9 +21,14 @@ uso: sync_upstream.sh <comando> [especificación] [opciones]
 comandos:
   --status                    clasifica el rango completo (advisory, ver nota)
   --check    <sha>|<a>..<b>   dry-run por archivo (advisory, ver nota)
+  --merge-tip  [opc --max-own N]
+                              pista rápida: para cada archivo cuyo delta propio es
+                              <= N líneas (60 por omisión) hace un merge 3-vías real
+                              (base=upstream FROM, ours=fork, other=upstream TO).
+                              Los de delta grande se marcan DEFER-SEQUENTIAL.
   --apply    <sha>|<a>..<b>   aplica en orden cronológico; es transaccional: si un
-                              archivo queda con marcadores o .rej se revierte y se
-                              marca NEEDS-PORT (los hunks van a $TMPDIR)
+                              archivo queda con marcadores o el apply falla se
+                              revierte (índice y árbol) y se marca NEEDS-PORT
   --verify                    gates: sin .rej, sin marcadores, trabajo propio intacto
   --coverage <sha>|<a>..<b>   % de líneas añadidas por upstream que ya están aquí
 
@@ -45,15 +50,21 @@ SPEC=""
 FROM=""
 TO=""
 BASELINE=""
+MAXOWN=60
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--status | --check | --apply | --verify | --coverage)
+	--status | --check | --apply | --verify | --coverage | --merge-tip)
 		CMD="${1#--}"
 		if [ $# -gt 1 ] && [[ "$2" != --* ]]; then
 			SPEC="$2"
 			shift
 		fi
+		;;
+	--max-own)
+		[ $# -ge 2 ] || usage
+		MAXOWN="$2"
+		shift
 		;;
 	--from | --to | --baseline)
 		[ $# -ge 2 ] || usage
@@ -158,29 +169,46 @@ check_file() {
 	git show "$1" -- "$2" | git apply -3 --directory=proot -p1 --check - >/dev/null 2>&1
 }
 
-# apply transaccional de un commit en un archivo: revierte si deja marcadores y
-# informa NEEDS-PORT para portar a mano. Devuelve 0 si quedó limpio.
+# apply transaccional de un commit en un archivo. git apply -3 mancha el índice
+# cuando puede, así que el rollback revuelve índice Y árbol de trabajo. Devuelve
+# 0 si quedó limpio; 1 si hay que portar a mano (el patch crudo se guarda).
 apply_file() {
 	local sha=$1 up=$2 dst=$3
-	local short base snap existed=0
+	local short base snap patch existed=0 ok=1
 	short=$(printf '%.10s' "$sha")
 	base=$(basename "$dst")
+	mkdir -p "$RUNDIR/pre" "$RUNDIR/patches"
 	snap="$RUNDIR/pre/$short.$base"
-	mkdir -p "$RUNDIR/pre" "$REJDIR"
-	[ -f "$dst" ] && existed=1 && cp -p "$dst" "$snap"
-	git show "$sha" -- "$up" |
-		git apply -3 --directory=proot -p1 --reject="$REJDIR/$short.$base.rej" - \
-			>"$RUNDIR/apply.out" 2>&1
-	if [ -f "$dst" ] && grep -qE '^(<<<<<<< |>>>>>>> )' "$dst"; then
-		if [ "$existed" -eq 1 ]; then
+	patch="$RUNDIR/patches/$short.$base.patch"
+	if [ -f "$dst" ]; then
+		existed=1
+		cp -p "$dst" "$snap"
+	fi
+	git show "$sha" -- "$up" >"$patch"
+	if git apply -R -p1 --directory=proot --check "$patch" 2>/dev/null; then
+		printf 'ALREADY\t%s\t%s\n' "$short" "$dst"
+		return 0
+	fi
+	if ! git apply -3 --directory=proot -p1 "$patch" 2>"$RUNDIR/apply.err"; then
+		ok=0
+	fi
+	if [ "$ok" = 1 ] && [ -f "$dst" ] && grep -qE '^(<<<<<<< |>>>>>>> )' "$dst"; then
+		ok=0
+	fi
+	if [ "$ok" = 0 ]; then
+		git reset -q -- "$dst" >/dev/null 2>&1 || true
+		if [ "$existed" = 1 ]; then
 			cp -p "$snap" "$dst"
 		else
 			rm -f "$dst"
 		fi
-		printf 'NEEDS-PORT\t%s\t%s\trej=%s\n' "$short" "$dst" "$REJDIR/$short.$base.rej"
+		find "$SRC_REL" -name '*.rej' -delete 2>/dev/null || true
+		printf 'NEEDS-PORT\t%s\t%s\t%s\n' "$short" "$dst" \
+			"$(tr '\n' ' ' <"$RUNDIR/apply.err" | cut -c1-90)"
+		printf '\tpatch=%s\n' "$patch"
 		return 1
 	fi
-	if [ "$existed" -eq 0 ] && [ ! -f "$dst" ]; then
+	if [ "$existed" = 0 ] && [ ! -f "$dst" ]; then
 		printf 'DELETED\t%s\t%s\n' "$short" "$dst"
 	else
 		printf 'APPLIED\t%s\t%s\n' "$short" "$dst"
@@ -250,7 +278,7 @@ status)
 	;;
 
 check)
-	[ -n "$SPEC" ] || usage
+	SPEC="${SPEC:-}"
 	header
 	while read -r sha; do
 		[ -n "$sha" ] || continue
@@ -292,6 +320,52 @@ apply)
 		done <<<"$files"
 	done <<<"$(commits_in "$SPEC")"
 	echo "APPLIED_FILES=$applied"
+	echo "NEEDS_PORT_FILES=$needs"
+	;;
+
+merge-tip)
+	header
+	echo "MAX_OWN_LINES=$MAXOWN"
+	mkdir -p "$RUNDIR/blobs"
+	merged=0
+	needs=0
+	deferred=0
+	while IFS= read -r up; do
+		[ -n "$up" ] || continue
+		dst=$(map_path "$up")
+		[ -n "$dst" ] || continue
+		base="$RUNDIR/blobs/base.$(basename "$dst")"
+		tip="$RUNDIR/blobs/tip.$(basename "$dst")"
+		res="$RUNDIR/blobs/res.$(basename "$dst")"
+		git show "${FROM_SHA}:${up}" >"$base" 2>/dev/null || : >"$base"
+		git show "${TO_SHA}:${up}" >"$tip"
+		# delta propio: líneas que el fork cambió sobre la base upstream
+		own=$(git diff --numstat "${FROM_SHA}:${up}" "${BASE_SHA}:${dst}" 2>/dev/null |
+			awk '{print $1 + $2}')
+		own=${own:-0}
+		if [ ! -f "$dst" ]; then
+			cp "$tip" "$dst"
+			printf 'NEW-FROM-TIP\t%s\n' "$dst"
+			merged=$((merged + 1))
+			continue
+		fi
+		if [ "$own" -gt "$MAXOWN" ]; then
+			printf 'DEFER-SEQUENTIAL\t%s\tpropio=%s\n' "$dst" "$own"
+			deferred=$((deferred + 1))
+			continue
+		fi
+		cp "$dst" "$res"
+		if git merge-file -q --diff3 -L fork -L base -L upstream "$res" "$base" "$tip"; then
+			cp "$res" "$dst"
+			printf 'MERGED\t%s\tpropio=%s\n' "$dst" "$own"
+			merged=$((merged + 1))
+		else
+			printf 'NEEDS-PORT\t%s\tpropio=%s\tsalvado=%s\n' "$dst" "$own" "$res"
+			needs=$((needs + 1))
+		fi
+	done <<<"$(git diff --name-only "${FROM_SHA}..${TO_SHA}" -- src | sed '/^$/d')"
+	echo "MERGED_FILES=$merged"
+	echo "DEFERRED_FILES=$deferred"
 	echo "NEEDS_PORT_FILES=$needs"
 	;;
 
@@ -351,7 +425,7 @@ verify)
 	;;
 
 coverage)
-	[ -n "$SPEC" ] || usage
+	SPEC="${SPEC:-}"
 	header
 	total=0
 	present=0
