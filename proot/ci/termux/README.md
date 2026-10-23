@@ -68,3 +68,10 @@ gpg keys and the language `termux_setup_*` helpers proot never calls.
 
 `PROOT_WITH_LIBANDROID_SHMEM=true` is also not adopted here; see
 `proot/docs/UPSTREAM.md` for why it interacts with `ashmem_memfd`.
+
+The `libtalloc` pin is not cosmetic: dependencies are resolved by downloading the
+published `.deb` for the declared version, and only falling back to building from
+source when that version is gone from the repo. While this directory pinned 2.4.3 the
+pipeline was silently building talloc from `samba.org` on every run; at 2.5.0 it finds
+`libtalloc_2.5.0_aarch64.deb` in `termux-main` and uses it, which is also the ABI the
+rest of Termux links against. Keep the pins here close to upstream for that reason.
