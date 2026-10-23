@@ -42,3 +42,29 @@ environment; it is not a generic repository cleanup command.
 Local native builds use `proot/scripts/build-native.sh`, outside this directory. They
 write packages to `proot/artifacts/packages/` by default and support `-o DIR` for an
 explicit destination.
+
+## Sync state with `termux/termux-packages`
+
+This directory is a vendored copy of the package builder. It has no submodule and no
+commit pin, so drift is measured by content instead of by history: fetch the upstream
+tree index (`GET /repos/termux/termux-packages/git/trees/master?recursive=1`), compare
+`git hash-object` of each file here against the blob for the same relative path, and
+classify each difference as *upstream improvement* or *our intentional edit*.
+
+Measured on 2026-10-23 against `master`: 163 files byte-identical, 53 with differences,
+27 local-only. Ported: `ndk-patches/` was **already identical** (0 of 19 files with
+drift, including all of `ndk-patches/30/`), and the build steps that proot's pipeline
+actually runs — parallel `xz -T`, parallel `strip`/`elf-cleaner`, the restructured
+symbol check in `termux_step_massage`, `TERMUX_PKGS__BUILD__REUSE_BUILT_PACKAGES`, the
+`cargo --debug` flag, the NDK 23c toolchain prefix — plus `libtalloc` 2.4.3 → 2.5.0.
+
+Deliberately **not** ported, because the difference is ours and taking upstream would
+delete it: `build-package.sh` (offline bundle, pacman hooks wiring),
+`scripts/properties.sh` (documentation links rewritten to this fork),
+`scripts/build/termux_step_install_license.sh` (structural divergence, not a single
+upstream fix), `buildorder.py` (patched to skip absent dependencies), `repo.json`
+(declares `debian` while the workflow passes `--format pacman`; the pipeline wins), the
+gpg keys and the language `termux_setup_*` helpers proot never calls.
+
+`PROOT_WITH_LIBANDROID_SHMEM=true` is also not adopted here; see
+`proot/docs/UPSTREAM.md` for why it interacts with `ashmem_memfd`.
