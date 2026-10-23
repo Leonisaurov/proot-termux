@@ -9,6 +9,9 @@
 
 #define IGNORE_SYSARG (Reg)2000
 
+/* The meta file of "<dir>/<name>" is "<dir>/" META_TAG "<name>". */
+#define META_TAG ".proot-meta-file."
+
 int check_dir_perms(Tracee *tracee, char type, char path[PATH_MAX], char rel_path[PATH_MAX], Config *config);
 
 int get_dir_path(char path[PATH_MAX], char dir_path[PATH_MAX]);
@@ -31,5 +34,7 @@ int path_exists(char path[PATH_MAX]);
 int get_fd_path(Tracee *tracee, char path[PATH_MAX], Reg fd_sysarg, RegVersion version);
 
 int read_sysarg_path(Tracee *tracee, char path[PATH_MAX], Reg path_sysarg, RegVersion version);
+
+int resolve_proc_fd_path(Tracee *tracee, char path[PATH_MAX]);
 
 #endif /* FAKE_ID0_HELPER_FUNCTIONS_H */
