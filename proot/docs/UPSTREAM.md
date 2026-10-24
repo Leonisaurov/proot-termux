@@ -25,7 +25,10 @@ commits de grupo (`45bc3808`…`8bd8ca99`), con `TERMUX_PKG_REVISION` 106→112 
 |---|---|
 | Cobertura acumulada de upstream | 2613/2630 líneas añadidas (**99%**) |
 | Líneas propias preservadas (`--verify`) | 1299/1299, salvo 7 explicadas abajo |
-| Batería `tests/run.sh all` | 68 pasos, **RC=0**, 12 SKIP por el rootfs Alpine ausente (igual que el baseline) |
+| Batería `tests/run.sh all` | baseline pre-port 68 pasos RC=0 → tras el port 76 pasos RC=0 (las 4 regresiones nuevas), con los mismos 12 SKIP por el rootfs Alpine ausente en ambas |
+| Batería con rootfs Alpine instalado (2026-10-24) | 99 pasos, **RC=0**, **cero SKIP de rootfs**: los 12 tests que no llegaban a ejecutarse (modo rootfs: rutas guest, mountinfo, shebang, storage) corrieron y pasaron |
+| Rendimiento pareado pre-port vs port (`AUDIT_BASELINE`, 8 pares, CPU-segundos) | ratios 0.96–1.05 sin sesgo: [benchmarks.md](performance/benchmarks.md) |
+| Overhead sin flags | 9427 ms → 9485 ms en 60 corridas de `sh -c "ls -R"` (**+0,6%**, dentro del ruido) |
 | Overhead sin flags | 9427 ms → 9485 ms en 60 corridas de `sh -c "ls -R"` (**+0,6%**, dentro del ruido) |
 
 Las 17 líneas de upstream que no están son deliberadas: 11 de `8bf810ccc4` (el `fallback` de `SYS_SECCOMP`

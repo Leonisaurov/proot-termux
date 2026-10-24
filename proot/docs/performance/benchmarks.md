@@ -112,6 +112,41 @@ coherencia).
 La medición específica de `net_policy`, con `off`, `allow` y `deny`, está en
 [`net-policy-benchmark.md`](net-policy-benchmark.md).
 
+## Comparación pareada entre dos builds (`AUDIT_BASELINE`)
+
+Script: [`test_audit_comparison.sh`](../../tests/proot/performance/test_audit_comparison.sh) — opt-in,
+con `AUDIT_BASELINE=<ruta a un proot>` construye el par contra `$PREFIX/bin/proot`, alterna los lados
+en cada par y mide **CPU-segundos** con `getrusage`, no reloj de pared.
+
+```bash
+AUDIT_BASELINE=/ruta/pre-port/proot/src/proot AUDIT_PAIRS=8 \
+	AUDIT_REPORT="$TMPDIR/audit.json" PREFIX="$PREFIX" \
+	bash proot/tests/proot/performance/test_audit_comparison.sh
+```
+
+### 2026-10-24 — pre-port (`1f6ef25e5c`, REV 105) frente al port a `v5.1.107.99`, 8 pares
+
+| caso | antes (s) | después (s) | ratio |
+|---|---|---|---|
+| `plain` | 0.0808 | 0.0805 | 0.997 |
+| `proc` | 0.0897 | 0.0863 | 0.961 |
+| `prct` | 0.0902 | 0.0897 | 0.995 |
+| `net_off` | 0.3050 | 0.3214 | 1.054 |
+| `net_allow` | 0.3462 | 0.3504 | 1.012 |
+| `net_deny` | 0.3448 | 0.3388 | 0.983 |
+| `nested_2` | 1.0498 | 1.0567 | 1.007 |
+| `nested_3` | 12.0962 | 11.9269 | 0.986 |
+
+Ratios entre 0.96 y 1.05 con signos mezclados: **no hay regresión sistemática de rendimiento** tras el
+port de 47 commits. El único caso por encima del 5% (`net_off`) va acompañado de `net_allow` (1.01) y
+`net_deny` (0.98) sobre el mismo trabajo, así que se lee como dispersión y no como coste del port.
+
+Advertencia metodológica, medida en la misma sesión: con el teléfono en `load average ≈ 13`, las
+mediciones de **reloj de pared sin alternar lados** produjeron cifras absurdas y contradictorias
+(+0,6 %, +74 %, +1098 %, −31 % según el intento). La dispersión intra-lado superaba a la diferencia
+entre lados. Los números de esta tabla son comparables porque vienen del arnés pareado y porque la
+unidad es CPU-segundos.
+
 ## Reglas de ejecución
 
 Todos estos scripts resuelven temporales mediante `$TMPDIR`; en Termux debe
