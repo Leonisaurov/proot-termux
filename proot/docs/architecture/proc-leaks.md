@@ -173,8 +173,9 @@ La prueba local mediante `./bin/termux-isolated --termux-paths` confirmó:
 - `readlink /proc/self/exe` conserva la ruta guest Termux.
 - `/proc` y `mountinfo` mantienen la vista guest sintética.
 - `bash tests/proot/hardening/test_phase_c.sh`: **PASS=6 FAIL=0**.
-- `--no-proc-isolated` es un opt-out explícito (`mountinfo` host visible);
-  `./bin/termux-isolated` sin esa opción usa la vista estricta.
+- `--no-proc-isolated` es un opt-out explícito (`mountinfo` host visible). La
+  vista estricta es **opt-in**: `./bin/termux-isolated --proc-isolated` la
+  activa y, sin ese flag, el launcher conserva la vista procfs anterior.
 
 ## Compatibilidad con runtimes Go/cgo
 

@@ -30,6 +30,7 @@ checksum*
 /proot/ci/termux/output/
 /proot/artifacts/packages/
 /proot/artifacts/audit/
+/proot/artifacts/windows/
 /*.pkg.tar.xz
 
 # Preinstalled build tools.

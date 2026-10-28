@@ -4,9 +4,20 @@ The `control-api` implementations consume the version 1 protocol used by
 `proot --control-fd`. A channel is a full-duplex `SOCK_STREAM` (usually an
 `AF_UNIX` socketpair).
 
-All integers are little-endian. This is the wire format used by the Termux
-aarch64 build; implementations reject big-endian hosts. Every frame has this
-20-byte header:
+The header and payload integers are written in the **native endianness of the
+proot instance** that produced them. The implementation performs no byte-order
+conversion: the wire structures are plain packed C layouts (`ControlHeader`,
+`ControlNetRequest`, `ControlPathRequest`, `ControlDecision` in
+`proot/src/extension/net_policy/net_policy.c`) that are copied to and from the
+channel as-is.
+
+Both peers must therefore agree on endianness. The reference consumers shipped
+in this repository are little-endian only -- the Python codec refuses to start
+on a big-endian host (`PRCT requires little-endian host`) and the Rust codec
+uses `to_le_bytes`/`from_le_bytes` -- and the Termux aarch64 target is
+little-endian, so both sides coincide in practice. A peer built for a
+different endianness must not be used against that instance. Every frame has
+this 20-byte header:
 
 | offset | type | field |
 |---:|---|---|
@@ -64,6 +75,26 @@ write-only binding, remain denied or mediated. The current working directory
 and its descendants may be handled by core path semantics, but proot has no
 implicit Android, Termux, or rootfs bindings. Mutating operations remain
 subject to PRCT and static binding permissions.
+
+## Versioning and compatibility
+
+The `version` field is a hard gate, not a negotiation. Proot accepts only
+version `1`; a frame with any other version is treated as malformed, the
+channel is marked failed and the operation is denied (`-EACCES`). There is no
+capability exchange, no downgrade and no fallback to an older layout.
+
+Because the payload layouts are fixed by that version, a version-1 peer must
+also agree on the sizes and field order documented above: 230 bytes for
+`NET_ACCESS_REQUEST`, 2056 bytes for `PATH_ACCESS_REQUEST` and `SHADOW_EVENT`,
+98 bytes for a decision, 28 bytes for `NET_COMMAND`, 2060 bytes for
+`PATH_COMMAND` and 20 bytes for `COMMAND_RESULT`. A peer that changes any of
+them is no longer version 1.
+
+Compatibility is a consumer-side property. `control-api` requires a proot that
+implements this protocol, but proot never requires `control-api` and never
+depends on it. The protocol is an explicit opt-in capability of the proot
+executable (`--control-fd`): without that flag proot does not speak PRCT at
+all and keeps its direct, compatible network behaviour.
 
 ## Channel lifecycle
 

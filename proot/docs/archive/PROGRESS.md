@@ -6,6 +6,9 @@ Fecha: 2026-08-23
 > anterior. El test de control-fd fue reubicado en
 > `../tests/proot/networking/test_control_fd.sh`; los commits y resultados
 > actuales deben consultarse en la documentación operativa y el historial Git.
+> Las rutas de árbol que aparecen aquí (`proot-source/`, `packages/`, `pentest/`)
+> son las de entonces: el layout actual es `proot/src/`,
+> `proot/ci/termux/packages/` y `proot/tests/`.
 
 ## Estado actual
 

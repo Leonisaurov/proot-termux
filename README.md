@@ -8,6 +8,27 @@
 
 The goal is a lean, automated build pipeline that produces a ready-to-install `.pkg.tar.xz` artifact on every push. Proot remains a standalone, multipurpose tool; its capabilities are selected explicitly by the caller.
 
+## Features
+
+Every flag listed here is implemented in this fork. The operator guide with
+examples, defaults, validation ranges and known gaps is
+[`proot/docs/operations/usage.md`](proot/docs/operations/usage.md); the
+protocol contract is [`proot/control-api/PROTOCOL.md`](proot/control-api/PROTOCOL.md).
+
+| Area | Flags | Effect |
+|---|---|---|
+| Proc isolation | `--proc-isolated`, `--proc-isolation`, `--ptrace-isolated` | strict guest `/proc` view; confines `ptrace`, `kill` and `pidfd_open` to the instance |
+| Syscall isolation | `--bpf-isolated`, `--perf-isolated`, `--handle-isolated`, `--kexec-isolated`, `--swap-isolated`, `--ioport-isolated`, `--reboot-isolated` | block or void the matching syscall without revealing the host |
+| Static network policy | `--net-policy`, `--net-allow`, `--net-deny`, `--net-allow-bind`, `--net-deny-bind` | allow or deny destinations and listener ports; a `deny` rule always wins |
+| Control channel | `--control-fd` | PRCT frames to an external harness for network, path and shadow decisions (fail-closed) |
+| Virtual networking | `--proxy`, `-p`, `--port`, `--protect-privileged-ports` | isolated network over abstract Unix sockets, with an optional TCP bridge |
+| Resource limits | `--cpu-limit`, `--single-core`, `--mem-limit`, `--nice`, `--fd-limit`, `--proc-limit`, `--resource-isolated` | cap cores, memory, file descriptors and process count of the sandbox |
+| Supervision | `--supervise`, `--exec <PID> <cmd>` | keep a sandbox alive and run extra commands in the same context |
+| System V IPC | `--sysvipc` | emulate SysV shared memory, message queues and semaphores inside the sandbox |
+| memfd compatibility | `--ashmem-memfd` | expose a usable `memfd_create` on Android/Bionic through ashmem |
+| Path visibility | `--hide`, `--bind <host>:<guest>:mask` | hide a guest path and its descendants, or keep a node visible but deny its content |
+| Permission emulation | `--fake-permissions`, `--recommended-etc-rw` | emulate permissions instead of calling `chmod`, and restore the legacy read-write `/etc` binds |
+
 ## Declarative PRoot launcher
 
 Los entrypoints auxiliares están agrupados por función: `proot/bin/appimage-run`
@@ -38,6 +59,25 @@ This single command:
 3. Cross-compiles proot for aarch64
 4. Outputs a `.pkg.tar.xz` package in `proot/ci/termux/output/` in CI. Local builds
    write to `proot/artifacts/packages/` by default.
+
+---
+
+## Building from Windows
+
+proot is a Linux tool (it traces with `ptrace` and installs `seccomp`
+filters), so it cannot run natively on Windows — but Windows is a perfectly
+valid *build host*. `proot/scripts/build-windows.ps1` drives WSL2 and builds
+either a native Linux x86_64 binary or an Android aarch64 PIE with the NDK
+r30, verifying the result and writing a build report:
+
+```powershell
+.\proot\scripts\build-windows.ps1 -Target linux     # native Linux binary
+.\proot\scripts\build-windows.ps1 -Target android   # Android aarch64 (NDK r30)
+```
+
+The three routes (WSL2, NDK cross-build and the Docker route used by CI) are
+documented with the measured evidence in
+[`proot/docs/operations/windows-build.md`](./proot/docs/operations/windows-build.md).
 
 ---
 
@@ -103,10 +143,11 @@ default rootfs mode, guest paths remain rooted at locations such as `/usr` and
 `/home`; Termux, storage, and external paths are blocked, while permitted
 Android runtime paths such as `/system/etc/hosts` may remain available.
 This provides guest-root and proc-link isolation, not a complete Android
-filesystem namespace. `--no-proc-isolated` is an explicit opt-out: it restores
-the previous procfs behavior, including host procfs data, and is intended only
-for compatibility comparisons. `./proot/bin/termux-isolated` uses the strict
-view by default.
+filesystem namespace. The strict view is **opt-in**: pass `--proc-isolated`
+explicitly to `./proot/bin/termux-isolated` to enable it. `--no-proc-isolated`
+is an explicit opt-out that restores the previous procfs behavior, including
+host procfs data, and is intended only for compatibility comparisons; that is
+also the launcher's default state.
 
 Android internal storage is unavailable by default. The launcher masks
 `$HOME/storage`, `/storage/emulated/0`, `/storage/self/primary`, and `/sdcard`
@@ -140,7 +181,63 @@ Key capabilities:
 - **Cross-instance isolation**: different `--proxy` names are fully isolated; no `--proxy` means no virtual network at all.
 - **Port mapping** (`-p host:container`) coexists with virtual networking.
 
-For the full technical reference — syscall translation, registry format, cross-instance token model, and known bugs — see [`AGENTS.md`](./AGENTS.md) (sections *Virtual Networking* and *Bugs Fixed*).
+For the full technical reference — syscall translation, registry format and
+cross-instance token model — see
+[`proot/docs/operations/usage.md`](proot/docs/operations/usage.md) (section
+*Virtual Networking*) and the architecture notes collected in
+[`proot/docs/`](proot/docs/INDEX.md).
+
+## Static network policy (`--net-policy`)
+
+`--net-policy off|deny|allow` selects the base mode: `off` (the default) keeps
+the direct, compatible behaviour, `deny` blocks by default and `allow` permits
+by default. `--net-allow` and `--net-deny` filter destinations (IP, CIDR,
+domain or `domain:port`), `--net-allow-bind` and `--net-deny-bind` filter
+listener ports. A `deny` rule always wins over an `allow` rule.
+
+Evaluation happens **before** the `virtual_net` and `port_switch`
+translations, so a denied destination never leaves state behind in the virtual
+registry or in the bridge helper. With `--control-fd`, the wildcards `*`,
+`tcp://*` and `udp://*` only hand the request to the PRCT channel; the harness
+still has to allow it. See
+[`proot/docs/operations/usage.md`](proot/docs/operations/usage.md), section
+*Política de red estática*.
+
+## Resource limits
+
+`--cpu-limit N` (and its alias `--single-core`) restricts the sandbox to the
+first N CPUs, `--nice N` lowers its scheduling priority and `--fd-limit N`
+caps its open file descriptors. `--mem-limit N[KMG]` caps the address space of
+each tracee after its `execve`, and `--proc-limit N` caps the number of live
+processes of the instance, answering `EAGAIN` past the limit.
+`--resource-isolated` is the `--cpu-limit 1 --nice 10` combination. The
+host-side and guest-side limits are applied on different sides of the tracer,
+and the last option wins.
+
+## Supervision (`--supervise` / `--exec`)
+
+`--supervise` keeps the event loop alive after the root tracee exits and
+listens on the abstract socket `@proot-exec-<PID>`. A second proot invoked
+with `--exec <PID> <cmd>` connects to that socket and runs the command inside
+the same rootfs, bindings and extensions. Exit reasons are written to
+`${PROOT_RUNTIME_DIR:-$TMPDIR}/proot-exit-<PID>.log`.
+
+## System V IPC (`--sysvipc`) and memfd (`--ashmem-memfd`)
+
+`--sysvipc` emulates SysV shared memory, message queues and semaphores inside
+the sandbox, including the `/proc/sysvipc/shm` view; the shared memory is
+backed by a `--shm-helper` re-exec of `/proc/self/exe`. `--ashmem-memfd` is
+Android/Bionic only and gives the guest a usable `memfd_create` backed by
+ashmem, with a matching `fstat` size.
+
+## Path visibility and permission emulation
+
+`--hide <guest path>` hides a path and its descendants from lookup and
+directory enumeration. A `:mask` bind keeps the node visible with minimal
+metadata but denies reading, writing, opening and traversing its content.
+`--fake-permissions` emulates the permissions in `stat`/`access` instead of
+calling `chmod` on the host, and `--recommended-etc-rw` restores the legacy
+read-write behaviour of the recommended `/etc` binds.
 
 ## Optional protocol integrations
 
@@ -221,7 +318,8 @@ All issues, releases, and CI runs are managed there. This is a standalone fork �
 <type>(<scope>): <summary>
 ```
 
-Types: `fix`, `enhance`, `chore`, `ci`
+Types: `fix`, `enhance`, `chore`, `ci`, `test`, `docs`, `feat`, `perf`,
+`refactor`
 
 Example: `fix(virtual_net): handle AF_INET6 bind correctly`
 
@@ -273,6 +371,13 @@ correctly on Android.
 
 ## Planned Features
 
+The features below are **not implemented** in this fork; they are listed as
+design notes only. Everything in the [feature table](#features) above is
+already available, including `--bpf-isolated`, `--perf-isolated` and
+`--handle-isolated`, which block `bpf()`, `perf_event_open()` and
+`open_by_handle_at()` with `ENOSYS`, `ENOENT` and `EOPNOTSUPP` respectively
+without revealing that the host exists.
+
 ### `--fake-net`
 Fake network namespace: intercept `/proc/net/`, `/sys/class/net/`, and
 netlink sockets (rtnetlink) to show only `lo` interface. Tools like
@@ -301,14 +406,6 @@ inside the sandbox. If ptrace access is needed, use proot without
 the inner process — it only uses seccomp internally for interception.
 A `--seccomp-filter` feature would add an ADDITIONAL seccomp filter on
 top of proot's existing one.
-
-### `--bpf-isolated`, `--perf-isolated`, `--handle-isolated`
-Block bpf(), perf_event_open(), and open_by_handle_at() syscalls.
-These are complex to emulate (require BPF bytecode interpreter, perf
-counters, and filesystem handle translation respectively), so they
-return ENOSYS/ENOENT/EOPNOTSUPP without revealing host existence.
-
-Full emulation is possible but requires significant effort. See TODO.
 
 ---
 

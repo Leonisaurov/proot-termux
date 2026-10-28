@@ -9,7 +9,7 @@
 | Fase | Estado | Commits | Notas |
 |------|--------|---------|-------|
 | A — Aislamiento P0 | **Completada** ✅ (en producción) | `573f4cb8d9` (REV 19), `3b98197d8a` (REV 20) | A2 + C1 + V4 (573f4cb8d9); cierre de los 4 MINORs + kill(0)/kill(-pgid) confinados (3b98197d8a). Pentest ampliado con baselines `*_2` y verificaciones `*_3`. |
-| B — Leaks y fds | **Completada** ✅ | `ec308f5425` (REV 21) | 8 fixes B1-B8. Pentest: 14/14 tests PASS (B1-B2-B7 concurrent, B3 fd_map sweep, B5 SP integrity, B6 bridge children, B7 signalfd, B8 talloc). Scripts en `tests/proot/hardening/`, reporte en `reports/pentest/REPORT-FASE-B-PENTEST.md`. |
+| B — Leaks y fds | **Completada** ✅ | `ec308f5425` (REV 21) | 8 fixes B1-B8. Pentest: 14/14 tests PASS (B1-B2-B7 concurrent, B3 fd_map sweep, B5 SP integrity, B6 bridge children, B7 signalfd, B8 talloc). Scripts en `tests/proot/hardening/`, resultados en `tests/reports/pentest/` e informe en `docs/security/REPORT-FASE-B.md`. |
 | C — Aislamiento P1 | **Completada** ✅ | `6d3a556007` (REV 22), `e141f86c56` | C2 MS_RDONLY emulation (insort_binding3_with_mode), C3 /etc :ro default (--recommended-etc-rw), C4 proc blocklist expandido (12 paths), C6 SO_PEERCRED auth, C7 --fake-permissions. Pentest: 7/7 PASS. C3 fix: defer -R bindings + guest path check. |
 | D — Rendimiento P0/P1 | **Completada** ✅ | `e30bdb5b43` (REV 23), `89e2598828` (REV 24), D5 hash (REV 25) | D1 BPF sorted copy, D2 ioctl dinámico FICLONE, D3 faccessat2 sin sysexit, D4 socket no-sysexit. D5 hash table O(1) get_tracee: implementada con `tracee_hash_update()` para PID change en cli.c. D6 (binding cache) y D7 (canonicalize cache) SKIP — riesgo supera ganancia. |
 | E — Resto P2/P3 | **Completada** ✅ | `89e2598828` (REV 24), REV 27 | E1 renameat2 no-sysexit, E3 uname conditional, E6 mknod phantom fix. E5 pidfd_open → ISOLATE_PROC. E7 detección perezosa de maps (superada en REV 101 por la clasificación por fd, ver §I). E4 doc -q host-rootfs. E2 registry fd cache. E8 fake_netlink fast-path. |
@@ -261,7 +261,8 @@ Verificación local realizada:
   `maps`, PID host oculto y `mountinfo` sintético.
 - `./bin/termux-isolated --termux-paths --no-proc-isolated`: opt-out explícito que
   conserva la vista procfs anterior, incluyendo datos host, para confirmar la
-  compatibilidad. `./bin/termux-isolated` sin esa opción usa la vista estricta.
+  compatibilidad. La vista estricta es **opt-in**: hay que pasar
+  `--proc-isolated` al launcher; sin ese flag se conserva la vista anterior.
 - `bash tests/proot/hardening/test_phase_c.sh`: **6/6 PASS**.
 
 Documento de referencia INMUTABLE durante la implementación. Resultado de 3 auditorías profundas (rendimiento, leaks/fds, aislamiento). Cada fix especifica archivo:línea, cambio concreto, riesgo y verificación. No re-abrir ítems marcados en §0.
@@ -274,7 +275,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 | Leak talloc en shutdown supervise (`free_terminated_tracees`, FU-1..FU-4, `supervise_handle_exited_tracee`, guard `ctl_fd>=0`) | ✅ fixes 5ad187e929 + 414053fc04 |
 | **FASE A COMPLETADA — A2 stat/readlink oracle + C1 kill(-1) broadcast + V4 netlink topology** | ✅ commit `573f4cb8d9` 'fix(isolation): block /proc host stat/readlink oracle, kill(-1) broadcast, netlink topology' (REVISION 19) — pentest ampliado con baselines `*_2` y verificaciones `*_3` |
 | **FASE A COMPLETADA — cierre de los 4 MINORs + hardening señales** | ✅ commit `3b98197d8a` 'fix(isolation): deliver kill broadcasts to guest tracees, block statx on SIGSYS, harden signal validation' (REVISION 20) — kill(-1) entrega real a tracees; statx cubierto en SIGSYS legacy; pentest EMULADO-OK; buffers PATH_MAX; extra kill(0)/kill(-pgid) confinados al guest (ESRCH pgid vacío, EINVAL señal inválida) |
-|| REVISION actual en `ci/termux/packages/proot/build.sh` | **105** (REV 104: meta files de `fake_id0`, §K.1; REV 105: guard del binding, §K.2) — bump SIEMPRE antes de commit si se toca `src/` o `ci/termux/packages/proot/`. Léela siempre del archivo, no de esta fila |
+|| REVISION actual en `ci/termux/packages/proot/build.sh` | **106** (REV 104: meta files de `fake_id0`, §K.1; REV 105: guard del binding, §K.2; REV 106: cabeceras de autoría del fork, colofón `--about` y arreglos de build) — bump SIEMPRE antes de commit si se toca `src/` o `ci/termux/packages/proot/`. Léela siempre del archivo, no de esta fila |
 
 ## 1. Resumen ejecutivo de las 3 auditorías
 
@@ -368,7 +369,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 
 ## 8. Verificación empírica por fase (pentest ampliado + benchmarks + smoke proot-distro)
 
-- **Fase A**: pentest ampliado V1+V2 (p_proc) + V4 (p_net) en modos A y B con baselines `*_2` y verificaciones `*_3` → **ESCAPE hoy, BLOQUEADO tras fix**. Resultados en `reports/pentest/`: `p_proc_A3/B3/A4/B4/B5` y `p_net_A3/B3/A4/B4`. Punto clave: `kill(-1,SIGTERM)` → **EMULADO-OK** (verificado en `p_proc_B4` y `p_proc_B5`): el broadcast se entrega a los tracees del guest y NO llega al host (el hijo del guest sigue vivo). V1 (rutas no canónicas) demostró en baseline que NO escapaba (proot canonicaliza antes del filtro).
+- **Fase A**: pentest ampliado V1+V2 (p_proc) + V4 (p_net) en modos A y B con baselines `*_2` y verificaciones `*_3` → **ESCAPE hoy, BLOQUEADO tras fix**. Resultados en `tests/reports/pentest/`: `p_proc_A3/B3/A4/B4/B5` y `p_net_A3/B3/A4/B4`. Punto clave: `kill(-1,SIGTERM)` → **EMULADO-OK** (verificado en `p_proc_B4` y `p_proc_B5`): el broadcast se entrega a los tracees del guest y NO llega al host (el hijo del guest sigue vivo). V1 (rutas no canónicas) demostró en baseline que NO escapaba (proot canonicaliza antes del filtro).
 - **Fase B** (en curso): smoke 16+ clients `--exec` concurrentes; ciclo crear/cerrar sockets vnet con `--proxy` para agotar `fd_map`; smoke `--exec`/`--proxy` + **talloc report** (`kill -USR1/USR2`).
 - **Fase C**: pentest V3 (`kill(-1,0)` con guard de seguridad: **NO ejecutar `kill(-1,SIGTERM/SIGKILL)` real** porque el broadcast al uid host destruiría la sesión — solo `kill(-1,0)` como oráculo) + V4 (topología) + V5 (bypass `:ro` vía mount, requiere wrapper con bind `:ro`); smoke proot-distro completo para C3/C7 (detrás de flag).
 - **Fase D**: benchmark antes/después: `find / -type f` dentro del guest + `strace -c` loop de stat/open + conteo de ptrace stops (`proot -v 9`); CI + stress syscall (`apt update`) para BPF.
@@ -393,7 +394,7 @@ Documento de referencia INMUTABLE durante la implementación. Resultado de 3 aud
 ## 10. Checklist de commit (reglas AGENTS.md)
 
 1. Editar código (`src/` o `ci/termux/packages/proot/`).
-2. **Bump `TERMUX_PKG_REVISION` en `ci/termux/packages/proot/build.sh` ANTES del commit**. La fuente de verdad es ese archivo (105 al escribir esta línea); las referencias a revisiones anteriores en las fases históricas son deliberadas.
+2. **Bump `TERMUX_PKG_REVISION` en `ci/termux/packages/proot/build.sh` ANTES del commit**. La fuente de verdad es ese archivo (106 al escribir esta línea); las referencias a revisiones anteriores en las fases históricas son deliberadas.
 3. `git add -A && git commit -m "<type>(<scope>): <summary>"`.
 4. `git push origin master` (SOLO `origin`).
 5. `gita notify build-proot.yml 2>/dev/null | grep -E '(error|##\[error\]|mbind|Success)'` — exit 0=éxito, 1=falló, 2=cancelado. **NO timeout, NO streaming.**

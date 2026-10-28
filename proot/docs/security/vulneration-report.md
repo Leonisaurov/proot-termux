@@ -15,7 +15,7 @@ El sandbox proot del fork proot-termux presenta **2 escapes persistentes** (CRIT
 | **A (default)** | `--kill-on-exit --link2symlink -L --change-id=0:0 -r rootfs -b /dev -b /proc -b /sys` | Configuración mínima de proot, **sin** flags de isolation. Equivale a la configuración usada por proot-distro. |
 | **B (hardened)** | Igual que A + `--proc-isolation --bpf-isolated --perf-isolated --handle-isolated --reboot-isolated --swap-isolated --kexec-isolated --ioport-isolated` | Configuración endurecida del fork con todas las flags de isolation activadas. |
 
-Programas de prueba compilados con `gcc` dentro del rootfs Alpine (binarios estáticos musl). Salidas completas en `reports/pentest/*.txt`.
+Programas de prueba compilados con `gcc` dentro del rootfs Alpine (binarios estáticos musl). Salidas completas en `tests/reports/pentest/*.txt`.
 
 ## Hallazgos por severidad
 
@@ -155,20 +155,22 @@ y un proceso root no debería ver ninguna negación.
 
 ## Anexo: salidas completas
 
-Las salidas completas de cada prueba se encuentran en `reports/pentest/`:
+Las salidas completas de cada prueba se encuentran en `tests/reports/pentest/`:
 
 | Archivo | Contenido |
 |---------|-----------|
-| `reports/pentest/p_fs_A.txt` | Pruebas de filesystem — escenario A |
-| `reports/pentest/p_fs_B.txt` | Pruebas de filesystem — escenario B |
-| `reports/pentest/p_proc_A.txt` | Pruebas de /proc y procesos — escenario A |
-| `reports/pentest/p_proc_B.txt` | Pruebas de /proc y procesos — escenario B |
-| `reports/pentest/p_kernel_A.txt` | Pruebas de syscalls de kernel — escenario A |
-| `reports/pentest/p_kernel_B.txt` | Pruebas de syscalls de kernel — escenario B |
-| `reports/pentest/p_net_A.txt` | Pruebas de red (netlink, sockets) — escenario A |
-| `reports/pentest/p_net_B.txt` | Pruebas de red (netlink, sockets) — escenario B |
-| `reports/pentest/p_sys_A.txt` | Pruebas de syscalls varias — escenario A |
-| `reports/pentest/p_sys_B.txt` | Pruebas de syscalls varias — escenario B |
+| `tests/reports/pentest/p_fs_A.txt` | Pruebas de filesystem — escenario A |
+| `tests/reports/pentest/p_fs_B.txt` | Pruebas de filesystem — escenario B |
+| `tests/reports/pentest/p_proc_A.txt` | Pruebas de /proc y procesos — escenario A |
+| `tests/reports/pentest/p_proc_B.txt` | Pruebas de /proc y procesos — escenario B |
+| `tests/reports/pentest/p_kernel_A.txt` | Pruebas de syscalls de kernel — escenario A |
+| `tests/reports/pentest/p_kernel_B.txt` | Pruebas de syscalls de kernel — escenario B |
+| `tests/reports/pentest/p_net_A.txt` | Pruebas de red (netlink, sockets) — escenario A |
+| `tests/reports/pentest/p_net_B.txt` | Pruebas de red (netlink, sockets) — escenario B |
+| `tests/reports/pentest/p_sys_A.txt` | Pruebas de syscalls varias — escenario A |
+| `tests/reports/pentest/p_sys_B.txt` | Pruebas de syscalls varias — escenario B |
+
+Las salidas `p_*` las genera el pentest local mediante los probes `p_*` de `tests/proot/probes/`, que el `.gitignore` no trackea: no están presentes en un clone limpio. En el mismo directorio sí se versionan los resultados de las regresiones (`b1_b2_b7.txt`, `b3.txt`, `b5.txt`, `b6.txt`, `b8.txt`, `d4_e1_e3_e6.txt`).
 > **Nota de vigencia:** Las observaciones de este reporte son históricas y
 > corresponden a baselines anteriores a la Fase F. Para el estado actual de
 > `--proc-isolated`, incluida la vista estricta de `/proc`, `mountinfo`,

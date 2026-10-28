@@ -1,5 +1,10 @@
 # Solicitud de corrección: hand-off PRCT para puertos virtuales cross-proxy
 
+> **Histórico, no normativo.** Documento de una revisión anterior. Las rutas
+> `proot-source/src/...` corresponden al árbol actual `proot/src/...`; el estado
+> vigente está en [la documentación operativa](../operations/usage.md) y en el
+> historial Git.
+
 Documento de coordinación para `proot-termux`. Esta incidencia bloquea el
 último E2E de integración de Hermes: dos procesos proot con el mismo nombre
 de proxy no pueden conectarse entre sí cuando Hermes mantiene

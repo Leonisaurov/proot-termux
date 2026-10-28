@@ -1,5 +1,10 @@
 # Solicitud de corrección: PRCT debe interceptar lecturas externas
 
+> **Histórico, no normativo.** Documento de una revisión anterior. Las rutas
+> `proot-source/src/...` corresponden al árbol actual `proot/src/...`; el estado
+> vigente está en [la documentación operativa](../operations/usage.md) y en el
+> historial Git.
+
 Esta incidencia afecta la política de filesystem de Hermes. El fork actual
 solo emite `PATH_ACCESS_REQUEST` cuando la política estática de bindings
 rechaza una operación. Hermes monta el root del sistema como `:ro`, por lo

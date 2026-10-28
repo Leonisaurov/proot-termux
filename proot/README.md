@@ -14,10 +14,11 @@ se entra aquí con `cd proot`; los comandos de esta página que empiezan con
 | Tests y regresiones | [`tests/`](tests/) | [`tests/README.md`](tests/README.md) |
 | Build Termux/CI | [`ci/termux/`](ci/termux/) | [`ci/termux/README.md`](ci/termux/README.md) |
 | Build nativa local | [`scripts/build-native.sh`](scripts/build-native.sh) | `./scripts/build-native.sh --help` |
+| Build desde Windows | [`scripts/build-windows.ps1`](scripts/build-windows.ps1) | `.\proot\scripts\build-windows.ps1 -Target all` |
 | Documentación técnica | [`docs/`](docs/) | [`docs/README.md`](docs/README.md) |
 | Ejemplos de configuración | [`examples/`](examples/) | [`examples/proot-exec/proot-exec.conf.example`](examples/proot-exec/proot-exec.conf.example) |
-| Artefactos locales | [`artifacts/`](artifacts/) | paquetes generados, no código fuente |
-| Reportes | [`reports/`](reports/) | resultados de pentest y diagnósticos |
+| Artefactos locales | `artifacts/` | paquetes generados, no código fuente; el directorio se crea al compilar |
+| Reportes | [`docs/security/`](docs/security/) | informes de hardening y vulnerabilidades; los resultados de las regresiones están en [`tests/reports/`](tests/reports/) |
 
 ## Flujo recomendado
 

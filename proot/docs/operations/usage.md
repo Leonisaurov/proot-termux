@@ -76,10 +76,11 @@ debe aparecer. Sin esa opción, el rootfs muestra rutas guest como `/usr` y
 `/home`, bloquea las rutas Termux, almacenamiento y externas, y puede conservar
 rutas permitidas del runtime Android, como `/system/etc/hosts`. Esto
 proporciona aislamiento de la raíz guest y de los enlaces procfs, no un namespace
-completo del filesystem Android. `--no-proc-isolated` es un opt-out explícito que
-restaura la vista procfs anterior, incluida la posibilidad de ver datos procfs
-host; se usa solo para comparar compatibilidad. El wrapper
-`./bin/termux-isolated` activa la vista estricta por defecto.
+completo del filesystem Android. La vista estricta es **opt-in**: hay que pasar
+`--proc-isolated` explícitamente a `./bin/termux-isolated` para activarla.
+`--no-proc-isolated` es un opt-out explícito que restaura la vista procfs
+anterior, incluida la posibilidad de ver datos procfs host; se usa solo para
+comparar compatibilidad y es el estado por defecto del launcher.
 
 ### Nivel 3: Aislamiento granular
 
@@ -241,6 +242,33 @@ semántica del peer `AF_UNIX` en Android.
 
 ## Resource Limits
 
+Los límites se aplican en dos lados distintos del tracer y no todos los flags
+tocan los dos:
+
+| Flag | Lado | Qué hace | Rango válido |
+|---|---|---|---|
+| `--cpu-limit N` | host + guest | `sched_setaffinity()` sobre el proceso proot (primeras N CPUs) y el guest percibe N cores porque se intercepta `sched_getaffinity()` | 1..número real de CPUs del host |
+| `--single-core` | host + guest | alias de `--cpu-limit 1` | — |
+| `--nice N` | host | `setpriority()` sobre el proceso proot; los tracees lo heredan por fork/exec | 0..19 (subir prioridad exige root) |
+| `--fd-limit N` | host | `prlimit64(RLIMIT_NOFILE)` sobre el proceso proot; los tracees lo heredan | >= 32 |
+| `--mem-limit N[KMG]` | guest | `prlimit64(RLIMIT_AS)` sobre cada tracee **después** de su `execve` | >= 16 MiB |
+| `--proc-limit N` | guest | cuenta los tracees vivos de esta instancia y responde `-EAGAIN` a `fork`/`clone`/`vfork` al alcanzar N | >= 1 |
+| `--resource-isolated` | host + guest | combinación de `--cpu-limit 1` y `--nice 10`; no impone límites de memoria, FDs ni procesos | — |
+
+Notas de implementación:
+
+- `--mem-limit` **no** se aplica al proceso proot: su espacio virtual ronda los
+  10 GiB en Android y un `RLIMIT_AS` lo mataría. Se aplica a cada tracee tras
+  su `execve`, cuando el VSZ todavía es pequeño; es el guest quien recibe
+  `ENOMEM` si crece de más. El sufijo acepta `K`, `M` y `G` (potencias de
+  1024).
+- `--proc-limit` **no** usa `RLIMIT_NPROC` del host (afectaría a todo el UID de
+  Termux): el gate vive en la extensión `resource_limit`, que intercepta
+  `fork`/`clone`/`vfork` en el flanco de entrada de la syscall y cuenta sólo
+  los procesos y hilos de esta instancia.
+- Si se combinan `--resource-isolated` con un `--cpu-limit` o un `--nice`
+  explícitos, **gana la última opción** de la línea de comandos.
+
 ### Límite de CPU
 
 ```bash
@@ -301,6 +329,24 @@ proot --single-core --nice 10 --mem-limit 512M --proc-limit 50 \
 
 `--supervise` mantiene el event loop vivo después de que el root tracee sale. `--exec` ejecuta comandos dentro del mismo contexto.
 
+Con `--supervise` el event loop deja de usar el `waitpid()` bloqueante de
+upstream y pasa a `signalfd` + `poll()`: un descriptor para `SIGCHLD` y otro
+para el socket de control. El supervisor escucha en un socket Unix **abstracto**
+(el primer byte de `sun_path` es cero, así que no existe entrada en el
+filesystem) con el nombre `@proot-exec-<PID>`, donde `<PID>` es el PID del
+propio supervisor.
+
+`--exec <PID> <cmd>` conecta a ese socket, envía el comando junto con
+stdin/stdout/stderr mediante `SCM_RIGHTS` y espera al tracee hijo. El
+supervisor reutiliza su rootfs, sus binds, su proxy y sus extensiones; el
+`cwd` explícito del cliente (`-w`/`--cwd`/`--pwd`) se propaga al hijo y se
+resuelve contra el rootfs del supervisor, no contra el del cliente. El hijo
+hereda `seccomp = DISABLED` porque no pasó por el filtro BPF del kernel: sin
+eso, `restart_tracee()` esperaría eventos de seccomp que nunca llegan y las
+syscalls no se interceptarían.
+
+Sin `--supervise` el loop es idéntico al de upstream: cero overhead.
+
 ### Patron daemon + clientes
 
 ```bash
@@ -359,7 +405,34 @@ ${PROOT_RUNTIME_DIR:-$TMPDIR}/proot-exit-<PID>.log
 definido, proot usa `TMPDIR`. El launcher `termux-isolated` configura ambos en
 `$PREFIX/tmp` para sus procesos.
 
-Contenido: `process 'x' exited with status N / killed by signal N`
+Contenido: `process 'x' exited with status N (started Ns)` o
+`process 'x' killed by signal N (started Ns)`.
+
+### Comportamiento conocido
+
+- Cuando el root tracee sale, el supervisor registra el motivo, cierra el
+  socket de control y termina en cuanto no quedan clientes `--exec` pendientes
+  ni tracees vivos. **No queda vivo en background**: con `--supervise` y sin
+  `--exec` se apaga al salir el root tracee.
+- `SIGTERM` e `SIGINT` se ignoran (el event loop los instala como `SIG_IGN`).
+  Sólo `SIGKILL` —que no se puede capturar— o la salida natural del root tracee
+  detienen el supervisor; para terminarlo hay que usar `kill -9`.
+- El cliente se autentica por UID: `SO_PEERCRED` debe coincidir con el UID del
+  supervisor, y un cliente de otro UID se descarta sin ejecutar nada.
+
+### Límites conocidos
+
+- La creación inicial de tracees del supervisor **no pasa** por el gate de
+  `--proc-limit`: ese gate cuenta los tracees vivos de la instancia y se
+  evalúa en el flanco de entrada de `fork`/`clone`/`vfork`, un camino que los
+  tracees creados por el propio supervisor no atraviesan. Los clientes
+  `--exec` sí se comprueban antes de crear su tracee: si el límite está
+  alcanzado, el supervisor rechaza el cliente con `EAGAIN` y no se crea el
+  proceso.
+- Los flags del cliente `--exec` **no** se propagan al supervisor. El cliente
+  sólo transmite el comando y, si lo pidió de forma explícita, el `cwd`. El
+  contexto (rootfs, binds, proxy, extensiones y `--mem-limit`) lo decide el
+  supervisor.
 
 ## Bind Permissions
 
@@ -377,7 +450,9 @@ proot -b /data/data/com.termux/files/home:/data:rw --rootfs=... /bin/sh
 proot --recommended-etc-rw --rootfs=... /bin/sh
 ```
 
-## Fake Permissions
+## Visibilidad de rutas y emulación de permisos
+
+### Permisos emulados (`--fake-permissions`)
 
 ```bash
 # Emula permisos sin chmod real (no-op en override_permissions)
@@ -385,6 +460,106 @@ proot --fake-permissions --rootfs=... /bin/sh
 ```
 
 Útil para apps que verifican permisos via `access()` pero no necesitan `chmod` real.
+
+Con `--fake-permissions` la extensión `fake_id0` no llama a `chmod()` sobre los
+ficheros del host: los permisos se emulan en las respuestas de `stat` y de
+`access`/`faccessat`/`faccessat2`, que devuelven éxito. Así no quedan cambios
+de permisos persistidos tras un `SIGKILL` y no se tocan los binds `:ro`. El
+contrapartida es que `open()` puede seguir fallando con `EACCES` si el usuario
+del host no puede leer realmente el fichero.
+
+### `/etc` en modo lectura-escritura (`--recommended-etc-rw`)
+
+```bash
+# Por defecto los binds recomendados de /etc/* son :ro
+proot -R /path/to/alpine --rootfs=... /bin/sh
+
+# Restaura el comportamiento legacy (lectura y escritura)
+proot --recommended-etc-rw -R /path/to/alpine --rootfs=... /bin/sh
+```
+
+`--recommended-etc-rw` sólo cambia el modo de los binds recomendados que
+empiezan por `/etc/`; el resto conserva el suyo. Úsalo con cuidado: el guest
+puede sobrescribir `/etc/passwd` o `/etc/hosts` del host.
+
+### Ocultar rutas (`--hide`)
+
+```bash
+# Instala un shadow oculto recursivo sobre una ruta guest
+proot --hide /ruta/secreta --rootfs=... /bin/sh
+```
+
+La ruta y sus descendientes dejan de aparecer en el lookup ni en el enumerado
+de directorios. El valor debe ser una ruta guest absoluta: un valor relativo
+o que contenga `:` se rechaza.
+
+### Nodo visible pero bloqueado (`:mask`)
+
+```bash
+# El nodo existe, pero su contenido no se puede leer, escribir, abrir ni atravesar
+proot -b /data/data/com.termux/files/home:/data:mask --rootfs=... /bin/sh
+```
+
+A diferencia de `:ro`, el modo `mask` conserva la presencia y la metadata
+mínima del nodo, pero bloquea la lectura, la escritura, la apertura y el
+travesado del contenido. Es el modo que usa `bin/termux-isolated` para tapar el
+almacenamiento interno sin borrarlo del árbol guest. Con un `--control-fd`
+activo, un shadow puede revelarse con `REVEAL_SHADOW` (alcance `node` o
+`recursive`) y volver a ocultarse con `RESTORE_SHADOW`.
+
+## System V IPC (`--sysvipc`)
+
+```bash
+# Emula shm/msg/sem de System V dentro del sandbox
+proot --sysvipc --rootfs=... /bin/sh
+```
+
+La extensión `sysvipc` intercepta y emula dentro de proot las syscalls de
+System V: `msgget`/`msgsnd`/`msgrcv`/`msgctl`, `semget`/`semop`/
+`semtimedop`/`semctl` y `shmget`/`shmat`/`shmdt`/`shmctl`. Cada instancia de
+proot tiene **su propio namespace de IPC**: dos proot distintos no comparten
+colas de mensajes, semáforos ni segmentos de memoria compartida.
+
+La memoria compartida se materializa con un proceso helper: proot hace doble
+`fork()` y re-ejecuta `/proc/self/exe` con `--shm-helper`. El helper escucha
+en un socket Unix temporal (`SOCK_SEQPACKET`), cierra todos los descriptores
+heredados salvo stdin/stdout/stderr y sirve las peticiones de asignación y
+liberación. En Android el segmento se reserva en `/dev/ashmem`
+(`ASHMEM_SET_NAME`/`ASHMEM_SET_SIZE`); fuera de Android, en un fichero
+temporal. El guest lo mapea después con un `mmap` encadenado de tipo
+`MAP_SHARED` sobre el descriptor que entrega el helper.
+
+Existe además un backend alternativo basado en `libandroid-shmem`, que se
+activa compilando con `PROOT_WITH_LIBANDROID_SHMEM` (la macro de C es
+`WITH_LIBANDROID_SHMEM`). **La build oficial no lo define**, así que el
+comportamiento efectivo es el backend genérico de `mmap`. En tiempo de
+ejecución, la variable de entorno `PROOT_DONT_SHARE_LIBANDROID_SHMEM` desactiva
+el camino de `libandroid-shmem` si algún día se compila con él.
+
+El guest ve además una vista propia de `/proc/sysvipc/shm`, generada a partir
+del namespace de la instancia.
+
+## Compatibilidad memfd (`--ashmem-memfd`)
+
+```bash
+# Expone un memfd usable sobre ashmem
+proot --ashmem-memfd --rootfs=... /bin/sh
+```
+
+`--ashmem-memfd` existe **sólo en Android/Bionic**: todo el código de la
+extensión está bajo la guarda `#if defined(__ANDROID__) || defined(__BIONIC__)`,
+y la propia opción CLI no se declara fuera de esa plataforma, así que en otro
+sistema el flag ni siquiera aparece en la ayuda.
+
+Al arrancar, la extensión comprueba si el kernel soporta `memfd_create`
+(`fork()` más una llamada de prueba). Si no lo soporta, reescribe
+`memfd_create` como un `openat(AT_FDCWD, "/dev/ashmem", O_RDWR [| O_CLOEXEC],
+0)`: el guest recibe un descriptor real y utilizable. Además, `ftruncate` sobre
+un descriptor de ashmem se traduce a `ioctl(fd, ASHMEM_SET_SIZE, size)`, y
+`fstat`/`fstatat64` sobre un descriptor de ashmem con `st_size` a cero encadena
+un `ioctl(fd, ASHMEM_GET_SIZE, 0)` para rellenar el tamaño real. La variable
+`PROOT_ASSUME_MEMFD_UNSUPPORTED=1` fuerza el camino de ashmem y `=0` fuerza el
+de `memfd_create` nativo, para poder probar los dos en un mismo dispositivo.
 
 ## Port Mapping (-p)
 
@@ -399,6 +574,12 @@ proot -p 8080:80 --rootfs=... /bin/sh  # si 8080 ocupado, usa 8081
 proot --protect-privileged-ports --rootfs=... /bin/sh -c "python -m http.server 80"
 # bind(80) → bind(2080) automáticamente
 ```
+
+`--port` exige la forma con `=`: `--port=127.0.0.1:8080`. La forma con
+espacio (`--port 127.0.0.1:8080`) se rechaza con el error *"option '--port'
+and its value must be separated by '='"*, porque la opción está declarada con
+separador `=`. La forma corta `-p 8080:80` sí acepta el valor separado por un
+espacio.
 
 ## Ejemplo Completo: termux-isolated-style
 
@@ -459,10 +640,32 @@ env -i PATH=/bin:/usr/bin \
 - **`--mem-limit` mínimo 16 MiB** — valores menores se rechazan.
 - **`--proc-limit` solo cuenta tracees de ESTE proot** — no afecta al resto del UID.
 - **`--supervise` sin `--exec`** = el supervisor se apaga al salir el root tracee.
+- **`--sysvipc` crea un namespace de IPC por instancia** — dos proot distintos no comparten shm, colas ni semáforos.
+- **`--ashmem-memfd` sólo existe en Android/Bionic** — fuera de esa plataforma el flag no se declara.
+- **`--proc-isolated` es opt-in** en `bin/termux-isolated`; sin el flag se conserva la vista procfs anterior.
 - **`-q` expone todo el host** en `/host-rootfs` — solo usar con guests confiables.
 - **PID 0 en `get_tracee()`** se cambia a `getpid()` — el hash table usa `tracee_hash_update()` para re-indexar. No manually set `tracee->pid` sin actualizar el hash.
 
 ## Política de red estática
+
+| Flag | Valor | Efecto |
+|---|---|---|
+| `--net-policy off\|deny\|allow` | modo base | `off` (el valor por defecto) no media nada; `deny` bloquea por defecto; `allow` permite por defecto |
+| `--net-allow <destino>` | IP, CIDR, dominio o `dominio:puerto` | permite el destino |
+| `--net-deny <destino>` | ídem | deniega el destino |
+| `--net-allow-bind <puerto>` | número de puerto o `*` | permite publicar un listener en ese puerto |
+| `--net-deny-bind <puerto>` | ídem | deniega publicar un listener en ese puerto |
+| `--control-fd <FD>` | descriptor ya abierto | abre el canal PRCT fail-closed para decisiones de red, de rutas y de shadows |
+
+Precedencia: **una regla `deny` siempre gana**, tanto sobre los destinos como
+sobre los puertos de publicación. En modo `deny` sólo pasa lo que coincide con
+una regla `allow`; en modo `allow` sólo se bloquea lo que coincide con una
+regla `deny`. La publicación de un puerto se valida antes de configurar
+`port_switch` o de arrancar el helper.
+
+Orden de evaluación: la política se aplica **antes** de las traducciones de
+`--proxy` (red virtual) y de `-p`/`--port` (`port_switch`). Un destino denegado
+no deja estado en el registry de la red virtual ni en el helper del bridge.
 
 La red conserva su comportamiento actual por defecto. Para activar la
 mediación, usa `--net-policy deny` (bloqueo por defecto) o `--net-policy
@@ -478,7 +681,7 @@ proot --net-policy allow --net-deny 10.0.0.0/8 /bin/sh
 
 # Publicación: se valida antes de configurar port_switch o arrancar el helper
 proot --proxy demo --net-policy deny --net-allow-bind 8080 \
-  --port 127.0.0.1:8080 /bin/sh
+  --port=127.0.0.1:8080 /bin/sh
 ```
 
 Los destinos aceptan IPv4, IPv6 entre corchetes, CIDR, dominios y un puerto
@@ -509,6 +712,14 @@ entregar un `SOCK_STREAM` full-duplex (normalmente un `socketpair(AF_UNIX,
 SOCK_STREAM)`). `HELLO` se envía al instalar el FD, incluso antes de arrancar
 el guest, para que las decisiones de publicación de `--port` usen el mismo
 canal.
+
+Los tiempos del canal: la escritura de un frame y la lectura de su encabezado
+y de su payload usan un timeout de 1 s (`CONTROL_TIMEOUT_MS = 1000`). La lectura
+de la **decisión** en sí es deliberadamente ilimitada
+(`CONTROL_DECISION_TIMEOUT_MS = -1`) para que un harness humano pueda responder
+sin que el tracee caduque; EOF, error o una respuesta malformada siguen
+denegando la operación. Los consumidores de referencia aplican un deadline de
+1 s por frame completo por defecto.
 
 Proot envía `NET_ACCESS_REQUEST`, `PATH_ACCESS_REQUEST`, `SHADOW_EVENT` y
 `COMMAND_RESULT`. Las operaciones de path son `READ`, `WRITE`, `CREATE`,

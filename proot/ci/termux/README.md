@@ -16,6 +16,44 @@ kept separate from the project source and from local Termux development tools.
 The GitHub Actions workflows remain in the repository-level `.github/`
 directory because GitHub requires that location.
 
+## NDK pin (r30)
+
+The vendored toolchain is pinned to **Android NDK r30**:
+
+- `scripts/properties.sh` sets `TERMUX_NDK_VERSION_NUM="30"`.
+- `scripts/build/termux_step_setup_toolchain.sh` dispatches to
+  `termux_setup_toolchain_30`, and `build-package.sh` sources
+  `scripts/build/toolchain/termux_setup_toolchain_30.sh`.
+- The compatibility headers live in `ndk-patches/30/`.
+- `scripts/setup-android-sdk.sh` only knows how to fetch NDK `30` and `23c`.
+
+The reason for the pin is the package-builder image, not the code. The
+`ghcr.io/termux/package-builder` image used by the runner no longer ships
+`android-ndk-r29`, so a pin on r29 aborted the job before anything was
+compiled:
+
+```text
+ERROR: NDK (/home/builder/lib/android-ndk-r29) not pointing at a directory!
+```
+
+(run `36568563252`). Moving the pin to r30 — together with sourcing the r30
+toolchain helper in `build-package.sh`, without which the build then died with
+`termux_setup_toolchain_30: command not found` — turned the job green again
+(run `36570306638`). Do not go back to r29 unless a builder image that
+contains r29 is pinned as well.
+
+## Workflows
+
+The active workflow is `build-proot.yml`, at
+`.github/workflows/build-proot.yml` in the repository root. It triggers on
+pushes that touch `proot/ci/termux/packages/proot/**`,
+`proot/ci/termux/scripts/**`, `proot/ci/termux/ndk-patches/**`,
+`proot/ci/termux/build-package.sh`, `proot/src/**` or `proot/scripts/**`, and
+it can also be started manually with `workflow_dispatch`.
+
+`docker_image.yml` is **disabled**: its job carries `if: false`, so it never
+runs and is not part of the build path.
+
 ## CI build
 
 From the repository root:

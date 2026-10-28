@@ -13,6 +13,7 @@ LD       = $(CC)
 STRIP    ?= $(CROSS_COMPILE)strip
 OBJCOPY  ?= $(CROSS_COMPILE)objcopy
 OBJDUMP  ?= $(CROSS_COMPILE)objdump
+READELF  ?= $(CROSS_COMPILE)readelf
 
 CPPFLAGS += -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -I$(VPATH)
 CFLAGS   += -Wall -Wextra -O2
@@ -39,6 +40,22 @@ endif
 # Aplicar flags de optimización a compilación y linkeo
 CFLAGS += $(OPTIMIZATION_FLAGS)
 LDFLAGS += -flto -Wl,--gc-sections
+
+# clang + LTO compatibility: clang's "-flto -c" emits a raw LLVM bitcode file
+# instead of a regular object file, and neither objdump nor objcopy can read
+# it, so the loader embedding step (see OBJIFY) fails.  "-ffat-lto-objects"
+# makes the compiler emit a regular ELF object that also embeds the bitcode:
+# the loader can then be embedded as usual while the final link keeps the
+# full LTO optimization.  GCC is not affected, its "-flto -c" already keeps
+# an ELF container.
+CC_IS_CLANG := $(shell $(CC) --version 2>/dev/null | grep -qi clang && echo true)
+ifneq (,$(CC_IS_CLANG))
+  ifneq (,$(findstring -flto,$(OPTIMIZATION_FLAGS)))
+    ifeq (,$(findstring -ffat-lto-objects,$(CFLAGS)))
+      CFLAGS += -ffat-lto-objects
+    endif
+  endif
+endif
 
 # --icf=safe (Identical Code Folding) — soportado por gold/lld, no por BFD ld
 ICF_SAFE := $(shell printf 'int main(void){return 0;}\n' | $(LD) -xc - -Wl,--icf=safe -o /dev/null >/dev/null 2>&1 && echo '-Wl,--icf=safe')
@@ -283,7 +300,7 @@ $(eval $(call build_loader,-m32))
 endif
 
 loader/loader-info.c: loader/loader
-	readelf -s $< | awk -f loader/loader-info.awk > $@
+	$(READELF) -s $< | awk -f loader/loader-info.awk > $@
 
 ######################################################################
 # Dependencies
