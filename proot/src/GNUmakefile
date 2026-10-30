@@ -32,6 +32,7 @@ OPTIMIZATION_FLAGS ?= -O3 -flto -fvisibility=hidden -ffunction-sections -fdata-s
 # NOTA: Cuando CROSS_COMPILE está definida, CC será ej. aarch64-linux-android-gcc
 # y -dumpmachine retornará "aarch64-linux-android"
 IS_AARCH64 := $(shell $(CC) -dumpmachine 2>/dev/null | grep -q aarch64 && echo true)
+IS_ANDROID := $(shell $(CC) -dumpmachine 2>/dev/null | grep -q 'linux-android' && echo true)
 ifdef IS_AARCH64
   OPTIMIZATION_FLAGS += -march=armv8-a+crc -mtune=cortex-a76
 endif
@@ -199,8 +200,15 @@ build.h: $(CHECK_RESULTS)
 
 BUILD_ID_NONE := $(shell printf 'int main(void){return 0;}\n' | $(LD) -xc - -Wl,--build-id=none -o /dev/null >/dev/null 2>&1 && echo ',--build-id=none')
 
-# Android NDK r29+ compatibility
-ROSEGMENT := $(shell printf 'int main(void){return 0;}\n' | $(LD) -xc - -Wl,--rosegment -o /dev/null >/dev/null 2>&1 && echo ',--rosegment')
+# Android NDK r29+ compatibility.  '--rosegment' solo aplica al toolchain que lo
+# necesita: el loader se enlaza en una dirección fija (-Ttext=$(LOADER_ADDRESS)) y
+# en aarch64/android el lld del NDK dejaba .rodata fuera del alcance de las
+# referencias PC-relativas.  En x86_64/glibc con BFD ld (-Ttext=0x600000000000)
+# el flag pone .rodata AÚN más lejos y el enlace revienta con
+# "relocation truncated to fit: R_X86_64_PC32".  Se preserva la ruta oficial
+# admitiendo también el triple aarch64 genérico, y 'make ROSEGMENT=' sigue
+# forzando el comportamiento desde la línea de comandos.
+ROSEGMENT := $(if $(or $(IS_ANDROID),$(IS_AARCH64)),$(shell printf 'int main(void){return 0;}\n' | $(LD) -xc - -Wl,--rosegment -o /dev/null >/dev/null 2>&1 && echo ',--rosegment'))
 
 ######################################################################
 # Build rules
