@@ -58,7 +58,7 @@ static int sysvipc_syscall_common(Tracee *tracee, struct SysVIpcConfig *config, 
 		break;
 	case PR_semtimedop:
 		timeout = peek_reg(tracee, CURRENT, SYSARG_4);
-		// Fall-throug
+		/* Fall through.  */
 	case PR_semop:
 		status = sysvipc_semop(tracee, config);
 		break;
@@ -237,6 +237,9 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 		}
 		default:
 			assert(!"Bad wait_state on SYSCALL_ENTER_START");
+			/* With NDEBUG the assert vanishes; return instead of
+			 * falling into the next event handler below. */
+			return 0;
 		}
 	}
 
@@ -290,6 +293,9 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 		}
 		default:
 			assert(!"Bad wait_state on SYSCALL_EXIT_START");
+			/* With NDEBUG the assert vanishes; return instead of
+			 * falling into the next event handler below. */
+			return 0;
 		}
 	}
 

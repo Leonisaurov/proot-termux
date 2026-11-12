@@ -854,6 +854,7 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 	case PR_fchownat: 
 		uid_sysarg = SYSARG_3;
 		gid_sysarg = SYSARG_4;
+		/* Fall through.  */
 	case PR_chown:
 	case PR_chown32:
 	case PR_lchown:
@@ -1212,6 +1213,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 	case PR_fstatat64:
 	case PR_newfstatat:
 		stat_sysarg = SYSARG_3;
+		/* Fall through.  */
 	case PR_stat64:
 	case PR_lstat64:
 	case PR_fstat64:

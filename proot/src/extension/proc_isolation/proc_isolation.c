@@ -761,7 +761,9 @@ static int hpc_handle_synth_read_exit(Tracee *tracee)
 static void hpc_track_fd_lifecycle_exit(Tracee *tracee, Sysnum num)
 {
 	int oldfd, newfd, cmd;
-	if (peek_reg(tracee, CURRENT, SYSARG_RESULT) < 0)
+	/* A failed syscall leaves a negative int in the word_t result register,
+	 * so the check only works on the signed view. */
+	if ((int) peek_reg(tracee, CURRENT, SYSARG_RESULT) < 0)
 		return;
 	switch (num) {
 	case PR_close:

@@ -56,6 +56,7 @@ extern int net_policy_set_path_operation(Tracee *tracee,
 						 NetControlPathOperation operation);
 extern NetControlPathOperation net_policy_path_operation_override(Tracee *tracee);
 /* 0: ordinary path, -ENOENT: hidden, 1: temporarily revealed/allowed. */
+extern int net_policy_has_config(Tracee *tracee);
 extern int net_policy_shadow_access(Tracee *tracee, const char *path,
 					   NetControlPathOperation operation);
 extern int net_policy_add_shadow(Tracee *tracee, const char *path);

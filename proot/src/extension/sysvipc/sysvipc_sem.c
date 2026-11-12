@@ -146,7 +146,7 @@ int sysvipc_semop(Tracee *tracee, struct SysVIpcConfig *config)
 	}
 
 	for (size_t i = 0; i < nsops; i++) {
-		if (sops[i].sem_num < 0 || sops[i].sem_num >= semaphore->nsems) {
+		if (sops[i].sem_num >= semaphore->nsems) {
 			talloc_free(sops);
 			return -EFBIG;
 		}

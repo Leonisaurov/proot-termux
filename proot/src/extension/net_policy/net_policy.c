@@ -2512,6 +2512,20 @@ int net_policy_add_shadow(Tracee *tracee, const char *path)
 	return 0;
 }
 
+/**
+ * Tell whether a net policy configuration is attached to @tracee, which is the
+ * exact condition net_policy_shadow_access() itself tests before looking at
+ * shadows.  Hot paths use it to skip building policy-specific state.
+ *
+ * Deliberately weaker than net_policy_is_active(): that one also requires an
+ * enforcing mode, yet hidden shadows apply even with the policy in "off" mode,
+ * so it would skip path hiding that must still happen.
+ */
+int net_policy_has_config(Tracee *tracee)
+{
+	return policy_config(tracee) != NULL;
+}
+
 int net_policy_shadow_access(Tracee *tracee, const char *path,
 				     NetControlPathOperation operation)
 {

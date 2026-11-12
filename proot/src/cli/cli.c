@@ -451,7 +451,7 @@ static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
 	argc_offset = i;
 
 	i = run_config_hook(tracee, cli, cli->pre_initialize_bindings, argc, argv, i);
-	if (i < 0)
+	if ((int) i < 0)
 		return -1;
 
 	/* The guest rootfs is now known: bindings specified by the
@@ -461,10 +461,10 @@ static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
 		return -1;
 
 	i = run_config_hook(tracee, cli, cli->post_initialize_bindings, argc, argv, i);
-	if (i < 0)
+	if ((int) i < 0)
 		return -1;
 	i = run_config_hook(tracee, cli, cli->pre_initialize_cwd, argc, argv, i);
-	if (i < 0)
+	if ((int) i < 0)
 		return -1;
 
 	/* Bindings are now installed (tracee->bindings.guest &
@@ -475,10 +475,10 @@ static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
 		return -1;
 
 	i = run_config_hook(tracee, cli, cli->post_initialize_cwd, argc, argv, i);
-	if (i < 0)
+	if ((int) i < 0)
 		return -1;
 	i = run_config_hook(tracee, cli, cli->pre_initialize_exe, argc, argv, i);
-	if (i < 0)
+	if ((int) i < 0)
 		return -1;
 
 	/* Bindings are now installed and the current working
@@ -506,7 +506,7 @@ static int parse_config(Tracee *tracee, size_t argc, char *const argv[])
 	}
 
 	i = run_config_hook(tracee, cli, cli->post_initialize_exe, argc, argv, i);
-	if (i < 0)
+	if ((int) i < 0)
 		return -1;
 
 	print_config(tracee, &argv[argc_offset]);

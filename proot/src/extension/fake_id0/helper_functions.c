@@ -232,8 +232,10 @@ int get_permissions(char meta_path[PATH_MAX], Config *config, bool uses_real)
 	switch(perms) {
 	case OWNER_PERMS:
 		omode /= 10;
+		/* Fall through.  */
 	case GROUP_PERMS:
 		omode /= 10;
+		/* Fall through.  */
 	case OTHER_PERMS:
 		omode = omode % 10;
 	}

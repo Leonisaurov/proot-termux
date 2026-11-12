@@ -441,7 +441,9 @@ void translate_syscall_exit(Tracee *tracee)
 			/* Empty path was passed (""),
 			 * indicating that path is pointed to by fd passed in first argument */
 			word_t dirfd = peek_reg(tracee, ORIGINAL, SYSARG_1);
-			if (syscall_number == PR_readlink || dirfd < 0) {
+			/* dirfd holds a raw register value (word_t); a bad fd is a
+			 * negative int there, so compare as int or this check is dead. */
+			if (syscall_number == PR_readlink || (int) dirfd < 0) {
 				status = -EBADF;
 				break;
 			}
