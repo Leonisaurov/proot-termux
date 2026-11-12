@@ -212,9 +212,12 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 	int status;
 	unsigned int symlinks_followed = 0;
 
-	/* Avoid infinite loop on circular links.  */
-	//if (recursion_level > MAXSYMLINKS)
-	if (recursion_level > 3)
+	/* Avoid infinite loop on circular links.  MAXSYMLINKS is the same
+	 * limit the kernel applies to symlink indirections (ELOOP), so any
+	 * chain the host kernel accepts keeps resolving here too.  A lower
+	 * bound rejected valid chains: a 4-link chain failed with ELOOP while
+	 * the same path worked natively.  */
+	if (recursion_level > MAXSYMLINKS)
 		return -ELOOP;
 
 	/* Sanity checks.  */
@@ -228,17 +231,23 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 	/* Check the complete guest spelling before component lookup.  The
 	 * canonicalizer may later replace its output with a host-root spelling
 	 * while resolving bindings; consulting shadows only in that later path
-	 * would already have performed an lstat() on hidden host data. */
-	if (user_path[0] == '/')
-		strncpy(shadow_path, user_path, sizeof(shadow_path) - 1);
-	else if (join_paths(2, shadow_path, guest_path, user_path) < 0)
-		return -ENAMETOOLONG;
-	shadow_path[sizeof(shadow_path) - 1] = '\0';
-	if (normalize_guest_path(shadow_path) < 0)
-		return -ENAMETOOLONG;
-	if (net_policy_shadow_access(tracee, shadow_path,
-				NET_CONTROL_PATH_READ) < 0)
-		return -ENOENT;
+	 * would already have performed an lstat() on hidden host data.
+	 *
+	 * This path is only reachable with a net policy attached, so the guard
+	 * keeps it off the common case: without it, every path syscall paid a
+	 * join + full normalize + strcpy pass just to find no policy. */
+	if (net_policy_has_config(tracee)) {
+		if (user_path[0] == '/')
+			strncpy(shadow_path, user_path, sizeof(shadow_path) - 1);
+		else if (join_paths(2, shadow_path, guest_path, user_path) < 0)
+			return -ENAMETOOLONG;
+		shadow_path[sizeof(shadow_path) - 1] = '\0';
+		if (normalize_guest_path(shadow_path) < 0)
+			return -ENAMETOOLONG;
+		if (net_policy_shadow_access(tracee, shadow_path,
+					NET_CONTROL_PATH_READ) < 0)
+			return -ENOENT;
+	}
 
 	if (user_path[0] != '/') {
 		/* Ensure 'guest_path' contains an absolute base of
